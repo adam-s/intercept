@@ -1,0 +1,239 @@
+/**
+ * buildFingerprintScript — generates the anti-detection init script from a FingerprintProfile.
+ *
+ * Runs via addInitScript (CDP Page.addScriptToEvaluateOnNewDocument) before any page JS.
+ * Covers all 55 properties that Cloudflare Turnstile / ChatGPT Sentinel reads,
+ * based on Buchodi's bytecode analysis.
+ */
+
+import type { FingerprintProfile } from '@interceptor/shared';
+
+export function buildFingerprintScript(profile?: FingerprintProfile): string {
+	const hw = profile?.browser?.hardware;
+	const screen = profile?.browser?.screen;
+	const webgl = profile?.browser?.webgl;
+	const plugins = profile?.browser?.plugins;
+	const fonts = profile?.browser?.fonts;
+	const behavioral = profile?.behavioral;
+	const appState = profile?.applicationState;
+
+	const screenOffsetX = profile?.screenOffsetX ?? 800 + Math.floor(Math.random() * 400);
+	const screenOffsetY = profile?.screenOffsetY ?? 300 + Math.floor(Math.random() * 300);
+
+	// --- plugins JS ---
+	const pluginList = plugins ?? [
+		{
+			name: 'PDF Viewer',
+			filename: 'internal-pdf-viewer',
+			description: 'Portable Document Format',
+		},
+		{
+			name: 'Chrome PDF Viewer',
+			filename: 'internal-pdf-viewer',
+			description: 'Portable Document Format',
+		},
+		{
+			name: 'Chromium PDF Viewer',
+			filename: 'internal-pdf-viewer',
+			description: 'Portable Document Format',
+		},
+		{
+			name: 'Microsoft Edge PDF Viewer',
+			filename: 'internal-pdf-viewer',
+			description: 'Portable Document Format',
+		},
+		{
+			name: 'WebKit built-in PDF',
+			filename: 'internal-pdf-viewer',
+			description: 'Portable Document Format',
+		},
+	];
+	const pluginEntries = pluginList
+		.map(
+			(p, i) =>
+				`${i}: { name: ${JSON.stringify(p.name)}, filename: ${JSON.stringify(p.filename)}, description: ${JSON.stringify(p.description)} }`,
+		)
+		.join(', ');
+
+	// --- font measurement JS ---
+	const fontMapJs = fonts
+		? `const __fp_fonts = ${JSON.stringify(fonts)};`
+		: 'const __fp_fonts = null;';
+
+	// --- behavioral biometrics JS ---
+	const beh = behavioral ?? {
+		keystrokeIntervalMs: 130,
+		keystrokeCount: 42,
+		mouseVelocity: 0.68,
+		mouseDistancePx: 3800,
+		scrollCount: 7,
+		scrollDistancePx: 1240,
+		idleMs: 1200,
+		pasteCount: 0,
+		clickCount: 5,
+	};
+
+	// --- screen JS helpers ---
+	const screenJs = screen
+		? `
+		Object.defineProperty(screen, 'colorDepth', { get: () => ${screen.colorDepth ?? 24} });
+		Object.defineProperty(screen, 'pixelDepth', { get: () => ${screen.pixelDepth ?? 24} });
+		Object.defineProperty(screen, 'width', { get: () => ${screen.width ?? 1512} });
+		Object.defineProperty(screen, 'height', { get: () => ${screen.height ?? 982} });
+		Object.defineProperty(screen, 'availWidth', { get: () => ${screen.availWidth ?? 1512} });
+		Object.defineProperty(screen, 'availHeight', { get: () => ${screen.availHeight ?? 946} });
+		Object.defineProperty(screen, 'availLeft', { get: () => ${screen.availLeft ?? 0} });
+		Object.defineProperty(screen, 'availTop', { get: () => ${screen.availTop ?? 36} });
+		`
+		: `
+		Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+		Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+		`;
+
+	// --- app state JS ---
+	const appStateJs =
+		appState?.reactRouterContextPresent === false
+			? ''
+			: `
+		// Ensure React Router context appears present (checked by Turnstile Layer 3)
+		// Only set if not already defined by the actual React app
+		Object.defineProperty(window, '__fp_sentinel_app_state_ready', { value: true, writable: false });
+		`;
+
+	return `(function() {
+	// === Core Navigator Overrides ===
+	Object.defineProperty(navigator, 'platform', { get: () => ${JSON.stringify(hw?.platform ?? 'MacIntel')} });
+	Object.defineProperty(navigator, 'vendor', { get: () => ${JSON.stringify(hw?.vendor ?? 'Google Inc.')} });
+	Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+	Object.defineProperty(navigator, 'languages', { get: () => ${JSON.stringify(profile?.languages ?? ['en-US', 'en'])} });
+	Object.defineProperty(navigator, 'language', { get: () => ${JSON.stringify(profile?.language ?? 'en-US')} });
+	Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ${hw?.hardwareConcurrency ?? 8} });
+	Object.defineProperty(navigator, 'deviceMemory', { get: () => ${hw?.deviceMemory ?? 8} });
+	Object.defineProperty(navigator, 'maxTouchPoints', { get: () => ${hw?.maxTouchPoints ?? 0} });
+
+	// === Plugins ===
+	const fakePlugins = {
+		${pluginEntries},
+		length: ${pluginList.length},
+		item: function(i) { return this[i] || null; },
+		namedItem: function(name) { return Object.values(this).find(p => p && p.name === name) || null; },
+		refresh: function() {},
+		[Symbol.iterator]: function*() { for (let i = 0; i < this.length; i++) yield this[i]; }
+	};
+	Object.defineProperty(navigator, 'plugins', { get: () => fakePlugins });
+	Object.defineProperty(navigator, 'mimeTypes', { get: () => ({ length: 0, item: () => null, namedItem: () => null }) });
+
+	// === WebGL (UNMASKED_VENDOR/RENDERER — Turnstile Layer 1, 8 properties) ===
+	const __fp_webgl_vendor = ${JSON.stringify(webgl?.vendor ?? 'Apple Inc.')};
+	const __fp_webgl_renderer = ${JSON.stringify(webgl?.renderer ?? 'Apple M1')};
+	const __fp_webgl_version = ${JSON.stringify(webgl?.version ?? 'WebGL 1.0 (OpenGL ES 2.0 Chromium)')};
+	const __fp_webgl_sl_version = ${JSON.stringify(webgl?.shadingLanguageVersion ?? 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)')};
+
+	const getParameterProxy = {
+		apply: function(target, thisArg, args) {
+			const param = args[0];
+			if (param === 37445) return __fp_webgl_vendor;   // UNMASKED_VENDOR_WEBGL
+			if (param === 37446) return __fp_webgl_renderer; // UNMASKED_RENDERER_WEBGL
+			if (param === 7938)  return __fp_webgl_version;  // VERSION
+			if (param === 35724) return __fp_webgl_sl_version; // SHADING_LANGUAGE_VERSION
+			return Reflect.apply(target, thisArg, args);
+		}
+	};
+	const _origGetContext = HTMLCanvasElement.prototype.getContext;
+	HTMLCanvasElement.prototype.getContext = function(type) {
+		const ctx = _origGetContext.apply(this, arguments);
+		if (ctx && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
+			ctx.getParameter = new Proxy(ctx.getParameter, getParameterProxy);
+		}
+		return ctx;
+	};
+	if (typeof OffscreenCanvas !== 'undefined') {
+		const _origOff = OffscreenCanvas.prototype.getContext;
+		OffscreenCanvas.prototype.getContext = function(type) {
+			const ctx = _origOff.apply(this, arguments);
+			if (ctx && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
+				ctx.getParameter = new Proxy(ctx.getParameter, getParameterProxy);
+			}
+			return ctx;
+		};
+	}
+
+	// === Screen ===
+	${screenJs}
+
+	// === Font Measurement Interception (Turnstile Layer 1 — hidden div font probe) ===
+	${fontMapJs}
+	if (__fp_fonts) {
+		const _origGetBCR = Element.prototype.getBoundingClientRect;
+		Element.prototype.getBoundingClientRect = function() {
+			const s = window.getComputedStyle(this);
+			if (s.visibility === 'hidden' && s.position === 'absolute') {
+				const ff = s.fontFamily ? s.fontFamily.replace(/['"]/g, '').split(',')[0].trim() : null;
+				if (ff && __fp_fonts[ff]) {
+					const m = __fp_fonts[ff];
+					return { width: m.width, height: m.height, top: 0, left: 0, bottom: m.height, right: m.width, x: 0, y: 0, toJSON: function() { return this; } };
+				}
+			}
+			return _origGetBCR.apply(this, arguments);
+		};
+	}
+
+	// === AudioContext fingerprint ===
+	const _OrigAC = window.AudioContext || window.webkitAudioContext;
+	if (_OrigAC) {
+		const _AC = class extends _OrigAC {
+			constructor() { super(...arguments); Object.defineProperty(this, 'sampleRate', { get: () => 44100 }); }
+		};
+		window.AudioContext = window.webkitAudioContext = _AC;
+	}
+
+	// === Battery API (macOS Chrome does not expose this) ===
+	if (navigator.getBattery) { navigator.getBattery = undefined; }
+
+	// === Connection API ===
+	if (navigator.connection) {
+		Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g' });
+		Object.defineProperty(navigator.connection, 'downlink', { get: () => 10 });
+		Object.defineProperty(navigator.connection, 'rtt', { get: () => 50 });
+	}
+
+	// === Permissions API ===
+	const _origQuery = navigator.permissions?.query;
+	if (_origQuery) {
+		navigator.permissions.query = function(p) {
+			if (p.name === 'notifications') return Promise.resolve({ state: 'denied', onchange: null });
+			return _origQuery.call(this, p);
+		};
+	}
+
+	// === CDP screenX/screenY patch — Cloudflare Turnstile iframe bot check ===
+	// CDP Input.dispatchMouseEvent gives screenX/screenY equal to x/y (small values).
+	// Real mouse events have large screen-relative values. Turnstile checks this in its iframe.
+	const _fakeScreenX = ${screenOffsetX};
+	const _fakeScreenY = ${screenOffsetY};
+	Object.defineProperty(MouseEvent.prototype, 'screenX', { get() { return this.clientX + _fakeScreenX; } });
+	Object.defineProperty(MouseEvent.prototype, 'screenY', { get() { return this.clientY + _fakeScreenY; } });
+	Object.defineProperty(PointerEvent.prototype, 'screenX', { get() { return this.clientX + _fakeScreenX; } });
+	Object.defineProperty(PointerEvent.prototype, 'screenY', { get() { return this.clientY + _fakeScreenY; } });
+
+	// === Behavioral Biometrics — pre-seed window.__oai_so_* (Signal Orchestrator) ===
+	// ChatGPT's Signal Orchestrator monitors these 36 properties for keystroke timing,
+	// mouse velocity, scroll patterns, idle time, and paste events.
+	// Pre-seeding realistic values before the SO installs its listeners.
+	const _now = Date.now();
+	window.__oai_so_kt_count = ${beh.keystrokeCount ?? 42};
+	window.__oai_so_kt_last  = _now - ${beh.keystrokeIntervalMs ?? 130};
+	window.__oai_so_kt_avg   = ${beh.keystrokeIntervalMs ?? 130};
+	window.__oai_so_mv_dist  = ${beh.mouseDistancePx ?? 3800};
+	window.__oai_so_mv_vel   = ${beh.mouseVelocity ?? 0.68};
+	window.__oai_so_mv_last  = _now - 200;
+	window.__oai_so_sc_count = ${beh.scrollCount ?? 7};
+	window.__oai_so_sc_dist  = ${beh.scrollDistancePx ?? 1240};
+	window.__oai_so_idle_ms  = ${beh.idleMs ?? 1200};
+	window.__oai_so_paste    = ${beh.pasteCount ?? 0};
+	window.__oai_so_click    = ${beh.clickCount ?? 5};
+
+	// === Application State ===
+	${appStateJs}
+})();`;
+}

@@ -32,6 +32,7 @@
 		"postinstall": "npx patchright install chromium"
 	},
 	"dependencies": {
+		"@interceptor/shared": "workspace:*",
 		"@ghostery/adblocker-playwright": "2.14.1",
 		"@modelcontextprotocol/sdk": "1.27.1",
 		"cheerio": "^1.2.0",

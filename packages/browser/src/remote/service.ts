@@ -17,6 +17,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { FingerprintProfile } from '@interceptor/shared';
 import type { BrowserContext, CDPSession, Page, Route } from 'patchright';
 import { chromium } from 'patchright';
 import { BlockerManager } from '../blocker';
@@ -29,6 +30,7 @@ import type {
 	CDPWebSocketCreated,
 	CDPWebSocketFrameReceived,
 } from './cdp-types';
+import { FingerprintController } from './fingerprint-controller';
 
 // Rate limiter integration for browserFetch — injected at startup to avoid circular deps
 let rateLimitWait: ((url: string) => Promise<void>) | null = null;
@@ -48,57 +50,6 @@ export function connectBrowserRateLimiter(fns: {
 	rateLimitRecord = fns.record;
 	rateLimitRelease = fns.release;
 }
-
-/**
- * URLs to block completely (tracking, analytics, fingerprinting)
- * Domain-specific trackers that can detect automation
- */
-const BLOCKED_TRACKING_URLS = [
-	// Fingerprinting / device detection - CRITICAL for bot detection
-	'**/fingerprintjs.com/**',
-	'**/fpjs.io/**',
-	'**/cdn.fingerprint.com/**',
-	'**/fp.boardshop.com/**',
-	'**/arkoselabs.com/**',
-	'**/funcaptcha.com/**',
-
-	// Analytics & tracking
-	'**/segment.io/**',
-	'**/segment.com/**',
-	'**/analytics.boardshop.com/**',
-	'**/cdn.segment.com/**',
-	'**/api.segment.io/**',
-
-	// Marketing / attribution
-	'**/branch.io/**',
-	'**/app.link/**',
-	'**/bnc.lt/**',
-	'**/adjust.com/**',
-	'**/appsflyer.com/**',
-
-	// Error tracking (can leak automation info)
-	'**/sentry.io/**',
-	'**/bugsnag.com/**',
-
-	// Analytics services
-	'**/google-analytics.com/**',
-	'**/googletagmanager.com/**',
-	'**/gtag/**',
-
-	// Social tracking pixels
-	'**/facebook.com/tr/**',
-	'**/connect.facebook.net/**',
-
-	// Other trackers
-	'**/doubleclick.net/**',
-	'**/hotjar.com/**',
-	'**/fullstory.com/**',
-	'**/heap.io/**',
-	'**/amplitude.com/**',
-	'**/mixpanel.com/**',
-	'**/optimizely.com/**',
-	'**/launchdarkly.com/**',
-];
 
 export interface StreamConfig {
 	/** Frames per second (default: 4) */
@@ -177,8 +128,12 @@ export class RemoteBrowserService {
 	 */
 	private namedPages: Map<string, Page> = new Map();
 
-	/** Cached anti-detection script — set during start(), used by getOrCreatePage() */
-	private antiDetectionScript: string | null = null;
+	/** Controls browser fingerprinting — anti-detection script, blocked URLs, UA, sec-ch-ua.
+	 *  Recreated via setFingerprintProfile() when the active profile changes. */
+	private fingerprint = new FingerprintController();
+
+	/** Active fingerprint profile — kept so getFingerprintProfile() can return it */
+	private fingerprintProfile: FingerprintProfile | undefined = undefined;
 
 	/** Callback for CDP-captured network traffic (XHR/Fetch JSON responses) */
 	private networkCaptureCallback:
@@ -327,9 +282,7 @@ export class RemoteBrowserService {
 
 		// Apply same anti-detection as main page (context-level addInitScript
 		// only applies to pages created AFTER the call, so we need page-level too)
-		if (this.antiDetectionScript) {
-			await newPage.addInitScript(this.antiDetectionScript);
-		}
+		await this.fingerprint.applyToPage(newPage);
 
 		// Enable ad blocking on the new page
 		if (this.config.enableAdBlocking) {
@@ -389,6 +342,29 @@ export class RemoteBrowserService {
 		}
 		this.interceptors.clear();
 		console.log('[RemoteBrowserService.clearInterceptors] Cleared all interceptors');
+	}
+
+	/**
+	 * Set or replace the active fingerprint profile.
+	 * If the browser is already running, restarts the init script on the current page.
+	 * Note: a full browser restart (stop + start) is needed for context-level init script changes.
+	 */
+	async setFingerprintProfile(profile: FingerprintProfile | undefined): Promise<void> {
+		this.fingerprintProfile = profile;
+		this.fingerprint = new FingerprintController(profile);
+		if (this.page) {
+			// Re-apply init script to the current page so the new profile is active on next navigation.
+			// A full stop+start is needed for context-level changes to take full effect.
+			await this.fingerprint.applyToPage(this.page);
+			console.log(
+				`[RemoteBrowserService.setFingerprintProfile] Applied profile: ${profile?.name ?? 'default'}`,
+			);
+		}
+	}
+
+	/** Return the currently active fingerprint profile (undefined = built-in defaults). */
+	getFingerprintProfile(): FingerprintProfile | undefined {
+		return this.fingerprintProfile;
 	}
 
 	/**
@@ -480,132 +456,6 @@ export class RemoteBrowserService {
 				: undefined;
 		const executablePath = chromePath || chromiumPath || undefined;
 
-		// Use consistent Mac User-Agent across all platforms to avoid bot detection
-		// Chrome 145 — matches real Chrome binary version and sec-ch-ua override below.
-		// Version mismatch between UA and sec-ch-ua is a bot detection signal.
-		const MAC_USER_AGENT =
-			'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
-
-		// Anti-detection: Comprehensive script to override navigator properties BEFORE any page JS runs
-		// This must match the macOS fingerprint as closely as possible
-		const antiDetectionScript = `
-			// === Core Navigator Overrides ===
-			Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
-			Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
-			Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-			Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-			Object.defineProperty(navigator, 'language', { get: () => 'en-US' });
-			Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); // Typical Mac
-			Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); // 8GB typical
-			Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 }); // Desktop Mac has no touch
-
-			// === Plugins - macOS Chrome has these ===
-			const fakePlugins = {
-				0: { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				1: { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				2: { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				3: { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				4: { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				length: 5,
-				item: function(i) { return this[i] || null; },
-				namedItem: function(name) { return Object.values(this).find(p => p && p.name === name) || null; },
-				refresh: function() {},
-				[Symbol.iterator]: function*() { for (let i = 0; i < this.length; i++) yield this[i]; }
-			};
-			Object.defineProperty(navigator, 'plugins', { get: () => fakePlugins });
-
-			// === WebGL - Critical for fingerprinting ===
-			const getParameterProxyHandler = {
-				apply: function(target, thisArg, args) {
-					const param = args[0];
-					// UNMASKED_VENDOR_WEBGL
-					if (param === 37445) return 'Apple Inc.';
-					// UNMASKED_RENDERER_WEBGL  
-					if (param === 37446) return 'Apple M1';
-					// VERSION
-					if (param === 7938) return 'WebGL 1.0 (OpenGL ES 2.0 Chromium)';
-					// SHADING_LANGUAGE_VERSION
-					if (param === 35724) return 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)';
-					return Reflect.apply(target, thisArg, args);
-				}
-			};
-			
-			// Wrap WebGL getParameter for all canvas contexts
-			const originalGetContext = HTMLCanvasElement.prototype.getContext;
-			HTMLCanvasElement.prototype.getContext = function(type, ...args) {
-				const context = originalGetContext.apply(this, [type, ...args]);
-				if (context && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
-					context.getParameter = new Proxy(context.getParameter, getParameterProxyHandler);
-				}
-				return context;
-			};
-
-			// Also wrap OffscreenCanvas if available
-			if (typeof OffscreenCanvas !== 'undefined') {
-				const originalOffscreenGetContext = OffscreenCanvas.prototype.getContext;
-				OffscreenCanvas.prototype.getContext = function(type, ...args) {
-					const context = originalOffscreenGetContext.apply(this, [type, ...args]);
-					if (context && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
-						context.getParameter = new Proxy(context.getParameter, getParameterProxyHandler);
-					}
-					return context;
-				};
-			}
-
-			// === Screen properties - Match typical Mac display ===
-			Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-			Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
-
-			// === AudioContext fingerprinting protection ===
-			const originalAudioContext = window.AudioContext || window.webkitAudioContext;
-			if (originalAudioContext) {
-				window.AudioContext = window.webkitAudioContext = class extends originalAudioContext {
-					constructor(...args) {
-						super(...args);
-						// Override sampleRate to macOS default
-						Object.defineProperty(this, 'sampleRate', { get: () => 44100 });
-					}
-				};
-			}
-
-			// === Battery API - Return null (macOS Chrome doesn't expose this) ===
-			if (navigator.getBattery) {
-				navigator.getBattery = undefined;
-			}
-
-			// === Connection API - Spoof to typical desktop ===
-			if (navigator.connection) {
-				Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g' });
-				Object.defineProperty(navigator.connection, 'downlink', { get: () => 10 });
-				Object.defineProperty(navigator.connection, 'rtt', { get: () => 50 });
-			}
-
-			// === Permissions API - Don't reveal automation ===
-			const originalQuery = navigator.permissions?.query;
-			if (originalQuery) {
-				navigator.permissions.query = function(parameters) {
-					// Notifications typically denied by default on Mac
-					if (parameters.name === 'notifications') {
-						return Promise.resolve({ state: 'denied', onchange: null });
-					}
-					return originalQuery.call(this, parameters);
-				};
-			}
-
-			// === CDP screenX/screenY patch — Cloudflare Turnstile bypass ===
-			// When CDP dispatches Input.dispatchMouseEvent, MouseEvent.screenX/screenY
-			// equal the x/y coordinates (relative to iframe, small values like 30,15).
-			// Real clicks have screen-relative coordinates (hundreds/thousands).
-			// Cloudflare Turnstile checks this in cross-origin iframes to detect bots.
-			// Fix: override screenX/screenY on MouseEvent prototype with realistic values.
-			const _fakeScreenX = 800 + Math.floor(Math.random() * 400);
-			const _fakeScreenY = 300 + Math.floor(Math.random() * 300);
-			Object.defineProperty(MouseEvent.prototype, 'screenX', { get() { return this.clientX + _fakeScreenX; } });
-			Object.defineProperty(MouseEvent.prototype, 'screenY', { get() { return this.clientY + _fakeScreenY; } });
-			Object.defineProperty(PointerEvent.prototype, 'screenX', { get() { return this.clientX + _fakeScreenX; } });
-			Object.defineProperty(PointerEvent.prototype, 'screenY', { get() { return this.clientY + _fakeScreenY; } });
-		`;
-
 		// Configure proxy based on proxyType setting
 		// Bright Data proxy URLs from environment variables
 		const proxyConfig = this.getProxyConfig();
@@ -631,7 +481,7 @@ export class RemoteBrowserService {
 				height: this.config.viewportHeight,
 			},
 			deviceScaleFactor: 1, // Force 1x scale for consistent streaming
-			userAgent: MAC_USER_AGENT,
+			userAgent: this.fingerprint.userAgent,
 			locale: 'en-US',
 			timezoneId: 'America/New_York',
 			args: commonArgs,
@@ -646,37 +496,16 @@ export class RemoteBrowserService {
 			ignoreHTTPSErrors: this.config.proxyType === 'residential',
 		});
 
-		// Override sec-ch-ua to prevent HeadlessChrome detection.
-		// When Patchright runs in headless mode, Chromium automatically sets
-		// sec-ch-ua to include "HeadlessChrome" — a primary Cloudflare Bot Management
-		// detection signal. Some sites allow CDN-cached endpoints through
-		// but block real-time data endpoints when HeadlessChrome is detected.
-		// setExtraHTTPHeaders overrides browser-generated headers for ALL requests from this context,
-		// including JavaScript-initiated fetch() calls via page.evaluate().
-		// The value must match MAC_USER_AGENT version (Chrome 145) to avoid version-mismatch detection.
-		// When using real Chrome channel, sec-ch-ua is already correct — this is defense-in-depth.
-		await this.context.setExtraHTTPHeaders({
-			'sec-ch-ua': '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
-			'sec-ch-ua-mobile': '?0',
-			'sec-ch-ua-platform': '"macOS"',
-		});
-
-		// Add anti-detection script BEFORE getting/creating pages
-		await this.context.addInitScript(antiDetectionScript);
-		this.antiDetectionScript = antiDetectionScript;
+		// Apply all fingerprint protections: init script, sec-ch-ua headers, and tracking URL blocklist.
+		// Must run BEFORE pages are opened so the init script fires on the first page load.
+		await this.fingerprint.applyToContext(this.context);
 
 		const pages = this.context.pages();
 		this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 
-		// Also add init script to the page level for existing pages from persistent context
-		// Context-level addInitScript only applies to pages created AFTER the call
-		await this.page.addInitScript(antiDetectionScript);
-
-		// Block fingerprinting and tracking URLs at the route level
-		// This runs BEFORE Ghostery and catches domain-specific trackers
-		for (const pattern of BLOCKED_TRACKING_URLS) {
-			await this.context.route(pattern, (route) => route.abort());
-		}
+		// Also apply init script directly to existing pages from a persistent context.
+		// context.addInitScript only applies to pages created AFTER the call.
+		await this.fingerprint.applyToPage(this.page);
 
 		// Block static resources — discovery only needs HTML + JS, not images/CSS/fonts.
 		// Saves ~30% memory per browser instance and speeds up page loads.
@@ -729,91 +558,9 @@ export class RemoteBrowserService {
 		await this.page.goto('data:text/html,<html></html>');
 
 		// Log browser fingerprint data for debugging bot detection issues
-		await this.logBrowserFingerprint();
+		await this.fingerprint.logFingerprint(this.page);
 
 		await this.startScreencast();
-	}
-
-	/**
-	 * Log key browser fingerprint data for debugging bot detection.
-	 * Only logs once on browser start - not on every page load.
-	 */
-	private async logBrowserFingerprint(): Promise<void> {
-		if (!this.page) return;
-
-		try {
-			const fingerprint = await this.page.evaluate(() => {
-				return {
-					userAgent: navigator.userAgent,
-					platform: navigator.platform,
-					vendor: navigator.vendor,
-					language: navigator.language,
-					languages: navigator.languages,
-					hardwareConcurrency: navigator.hardwareConcurrency,
-					deviceMemory: (navigator as unknown as { deviceMemory?: number }).deviceMemory,
-					maxTouchPoints: navigator.maxTouchPoints,
-					webdriver: (navigator as unknown as { webdriver?: boolean }).webdriver,
-					// Screen info
-					screenWidth: screen.width,
-					screenHeight: screen.height,
-					screenColorDepth: screen.colorDepth,
-					devicePixelRatio: window.devicePixelRatio,
-					// Timezone
-					timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-					timezoneOffset: new Date().getTimezoneOffset(),
-					// WebGL (key for bot detection)
-					webglVendor: (() => {
-						try {
-							const canvas = document.createElement('canvas');
-							const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-							if (gl) {
-								const debugInfo = (gl as WebGLRenderingContext).getExtension(
-									'WEBGL_debug_renderer_info',
-								);
-								if (debugInfo) {
-									return (gl as WebGLRenderingContext).getParameter(
-										debugInfo.UNMASKED_VENDOR_WEBGL,
-									);
-								}
-							}
-						} catch {
-							/* ignore */
-						}
-						return 'unknown';
-					})(),
-					webglRenderer: (() => {
-						try {
-							const canvas = document.createElement('canvas');
-							const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-							if (gl) {
-								const debugInfo = (gl as WebGLRenderingContext).getExtension(
-									'WEBGL_debug_renderer_info',
-								);
-								if (debugInfo) {
-									return (gl as WebGLRenderingContext).getParameter(
-										debugInfo.UNMASKED_RENDERER_WEBGL,
-									);
-								}
-							}
-						} catch {
-							/* ignore */
-						}
-						return 'unknown';
-					})(),
-				};
-			});
-
-			// Import logger dynamically to avoid circular deps
-			const { browserLogger } = await import('./logger');
-			browserLogger.lifecycle('fingerprint', {
-				...fingerprint,
-				nodeEnv: process.env.NODE_ENV,
-				chromiumPath: process.env.CHROMIUM_PATH || 'bundled',
-			});
-		} catch (err) {
-			// Don't fail browser start if fingerprint logging fails
-			console.warn('[RemoteBrowserService] Failed to log fingerprint:', err);
-		}
 	}
 
 	/**

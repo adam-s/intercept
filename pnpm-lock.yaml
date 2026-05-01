@@ -186,6 +186,9 @@ importers:
       '@ghostery/adblocker-playwright':
         specifier: 2.14.1
         version: 2.14.1(playwright@1.58.2)
+      '@interceptor/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@modelcontextprotocol/sdk':
         specifier: 1.27.1
         version: 1.27.1(zod@4.3.6)

@@ -2,6 +2,16 @@ export { appendDebugLog, DEBUG, DEBUG_DIR } from './debug';
 export type { RetryOptions } from './fetch-retry';
 export { fetchWithRetry, friendlyHttpError } from './fetch-retry';
 export type {
+	ApplicationStateFingerprint,
+	BehavioralFingerprint,
+	BrowserFingerprint,
+	FingerprintProfile,
+	FontMeasurements,
+	HardwareFingerprint,
+	ScreenFingerprint,
+	WebGLFingerprint,
+} from './fingerprint';
+export type {
 	BridgeReadyMessage,
 	BridgeRequest,
 	BridgeResponse,

@@ -4,6 +4,7 @@
  */
 
 export { BrowserLifecycleManager } from './browser-manager';
+export { FingerprintController } from './fingerprint-controller';
 export { browserLogger } from './logger';
 export {
 	cleanProfile,
