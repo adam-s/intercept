@@ -58,14 +58,12 @@ const BLOCKED_TRACKING_URLS = [
 	'**/fingerprintjs.com/**',
 	'**/fpjs.io/**',
 	'**/cdn.fingerprint.com/**',
-	'**/fp.boardshop.com/**',
 	'**/arkoselabs.com/**',
 	'**/funcaptcha.com/**',
 
 	// Analytics & tracking
 	'**/segment.io/**',
 	'**/segment.com/**',
-	'**/analytics.boardshop.com/**',
 	'**/cdn.segment.com/**',
 	'**/api.segment.io/**',
 
