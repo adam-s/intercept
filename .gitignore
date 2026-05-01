@@ -28,6 +28,7 @@ prompts/.app-spec.md
 # Domain plugins (created by agents, only boardshop is the reference example)
 domains/*/
 !domains/boardshop/
+!domains/chatgpt/
 
 # Cached API responses for offline dashboard dev
 tmp/cache/

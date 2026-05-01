@@ -17,7 +17,6 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { FingerprintProfile } from '@interceptor/shared';
 import type { BrowserContext, CDPSession, Page, Route } from 'patchright';
 import { chromium } from 'patchright';
 import { BlockerManager } from '../blocker';
@@ -128,12 +127,8 @@ export class RemoteBrowserService {
 	 */
 	private namedPages: Map<string, Page> = new Map();
 
-	/** Controls browser fingerprinting — anti-detection script, blocked URLs, UA, sec-ch-ua.
-	 *  Recreated via setFingerprintProfile() when the active profile changes. */
+	/** Controls baseline anti-detection: removes webdriver, sets UA, sec-ch-ua, blocks trackers. */
 	private fingerprint = new FingerprintController();
-
-	/** Active fingerprint profile — kept so getFingerprintProfile() can return it */
-	private fingerprintProfile: FingerprintProfile | undefined = undefined;
 
 	/** Callback for CDP-captured network traffic (XHR/Fetch JSON responses) */
 	private networkCaptureCallback:
@@ -342,29 +337,6 @@ export class RemoteBrowserService {
 		}
 		this.interceptors.clear();
 		console.log('[RemoteBrowserService.clearInterceptors] Cleared all interceptors');
-	}
-
-	/**
-	 * Set or replace the active fingerprint profile.
-	 * If the browser is already running, restarts the init script on the current page.
-	 * Note: a full browser restart (stop + start) is needed for context-level init script changes.
-	 */
-	async setFingerprintProfile(profile: FingerprintProfile | undefined): Promise<void> {
-		this.fingerprintProfile = profile;
-		this.fingerprint = new FingerprintController(profile);
-		if (this.page) {
-			// Re-apply init script to the current page so the new profile is active on next navigation.
-			// A full stop+start is needed for context-level changes to take full effect.
-			await this.fingerprint.applyToPage(this.page);
-			console.log(
-				`[RemoteBrowserService.setFingerprintProfile] Applied profile: ${profile?.name ?? 'default'}`,
-			);
-		}
-	}
-
-	/** Return the currently active fingerprint profile (undefined = built-in defaults). */
-	getFingerprintProfile(): FingerprintProfile | undefined {
-		return this.fingerprintProfile;
 	}
 
 	/**

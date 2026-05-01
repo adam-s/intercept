@@ -12,11 +12,13 @@
 
 import { registerDomain } from '@interceptor/browser/handler/domain-loader';
 import { plugin as boardshop } from '@interceptor/domain-boardshop';
+import { plugin as chatgpt } from '@interceptor/domain-chatgpt';
 import { registerRateLimit } from '@interceptor/shared';
 
 // ─── Domain plugins ──────────────────────────────────────────────────
 
 registerDomain(boardshop);
+registerDomain(chatgpt);
 
 // ─── Outbound rate limits (per-hostname) ─────────────────────────────
 

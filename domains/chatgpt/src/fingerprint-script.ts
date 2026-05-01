@@ -1,20 +1,29 @@
 /**
- * buildFingerprintScript — generates the anti-detection init script from a FingerprintProfile.
+ * buildChatGPTFingerprintScript
  *
- * Runs via addInitScript (CDP Page.addScriptToEvaluateOnNewDocument) before any page JS.
- * Covers all 55 properties that Cloudflare Turnstile / ChatGPT Sentinel reads,
- * based on Buchodi's bytecode analysis.
+ * Generates the full page init script (addInitScript / CDP
+ * Page.addScriptToEvaluateOnNewDocument) for chatgpt.com.
+ *
+ * Covers all 55 properties Cloudflare Turnstile / ChatGPT Sentinel reads
+ * (Buchodi's bytecode analysis) plus ChatGPT-specific Signal Orchestrator
+ * pre-seeding of the 36 window.__oai_so_* behavioral biometric properties.
+ *
+ * Everything lives here because FingerprintProfile and the script builder
+ * are ChatGPT-specific — they belong in the domain, not in @interceptor/browser.
  */
 
-import type { FingerprintProfile } from '@interceptor/shared';
+import type { FingerprintProfile } from './types';
 
-export function buildFingerprintScript(profile?: FingerprintProfile): string {
+// ---------------------------------------------------------------------------
+// Generic anti-detection init script (Turnstile Layer 1 — 55 properties)
+// ---------------------------------------------------------------------------
+
+function buildFingerprintScript(profile?: FingerprintProfile): string {
 	const hw = profile?.browser?.hardware;
 	const screen = profile?.browser?.screen;
 	const webgl = profile?.browser?.webgl;
 	const plugins = profile?.browser?.plugins;
 	const fonts = profile?.browser?.fonts;
-	const behavioral = profile?.behavioral;
 	const appState = profile?.applicationState;
 
 	const screenOffsetX = profile?.screenOffsetX ?? 800 + Math.floor(Math.random() * 400);
@@ -60,19 +69,6 @@ export function buildFingerprintScript(profile?: FingerprintProfile): string {
 		? `const __fp_fonts = ${JSON.stringify(fonts)};`
 		: 'const __fp_fonts = null;';
 
-	// --- behavioral biometrics JS ---
-	const beh = behavioral ?? {
-		keystrokeIntervalMs: 130,
-		keystrokeCount: 42,
-		mouseVelocity: 0.68,
-		mouseDistancePx: 3800,
-		scrollCount: 7,
-		scrollDistancePx: 1240,
-		idleMs: 1200,
-		pasteCount: 0,
-		clickCount: 5,
-	};
-
 	// --- screen JS helpers ---
 	const screenJs = screen
 		? `
@@ -96,7 +92,6 @@ export function buildFingerprintScript(profile?: FingerprintProfile): string {
 			? ''
 			: `
 		// Ensure React Router context appears present (checked by Turnstile Layer 3)
-		// Only set if not already defined by the actual React app
 		Object.defineProperty(window, '__fp_sentinel_app_state_ready', { value: true, writable: false });
 		`;
 
@@ -207,8 +202,6 @@ export function buildFingerprintScript(profile?: FingerprintProfile): string {
 	}
 
 	// === CDP screenX/screenY patch — Cloudflare Turnstile iframe bot check ===
-	// CDP Input.dispatchMouseEvent gives screenX/screenY equal to x/y (small values).
-	// Real mouse events have large screen-relative values. Turnstile checks this in its iframe.
 	const _fakeScreenX = ${screenOffsetX};
 	const _fakeScreenY = ${screenOffsetY};
 	Object.defineProperty(MouseEvent.prototype, 'screenX', { get() { return this.clientX + _fakeScreenX; } });
@@ -216,10 +209,40 @@ export function buildFingerprintScript(profile?: FingerprintProfile): string {
 	Object.defineProperty(PointerEvent.prototype, 'screenX', { get() { return this.clientX + _fakeScreenX; } });
 	Object.defineProperty(PointerEvent.prototype, 'screenY', { get() { return this.clientY + _fakeScreenY; } });
 
-	// === Behavioral Biometrics — pre-seed window.__oai_so_* (Signal Orchestrator) ===
-	// ChatGPT's Signal Orchestrator monitors these 36 properties for keystroke timing,
-	// mouse velocity, scroll patterns, idle time, and paste events.
-	// Pre-seeding realistic values before the SO installs its listeners.
+	// === Application State ===
+	${appStateJs}
+})();`;
+}
+
+// ---------------------------------------------------------------------------
+// ChatGPT-specific init script (generic + Signal Orchestrator pre-seeding)
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the combined init script for chatgpt.com:
+ *   1. Generic anti-detection (navigator, WebGL, screen, fonts, plugins, etc.)
+ *   2. ChatGPT Signal Orchestrator pre-seeding (__oai_so_* properties)
+ *
+ * @param profile - Optional persona. Falls through to real browser values if omitted.
+ */
+export function buildChatGPTFingerprintScript(profile?: FingerprintProfile): string {
+	const generic = buildFingerprintScript(profile);
+
+	const beh = profile?.behavioral ?? {
+		keystrokeIntervalMs: 130,
+		keystrokeCount: 42,
+		mouseVelocity: 0.68,
+		mouseDistancePx: 3800,
+		scrollCount: 7,
+		scrollDistancePx: 1240,
+		idleMs: 1200,
+		pasteCount: 0,
+		clickCount: 5,
+	};
+
+	const oaiSoScript = `
+(function __oai_so_seed() {
+	// === ChatGPT Signal Orchestrator — pre-seed window.__oai_so_* ===
 	const _now = Date.now();
 	window.__oai_so_kt_count = ${beh.keystrokeCount ?? 42};
 	window.__oai_so_kt_last  = _now - ${beh.keystrokeIntervalMs ?? 130};
@@ -232,8 +255,8 @@ export function buildFingerprintScript(profile?: FingerprintProfile): string {
 	window.__oai_so_idle_ms  = ${beh.idleMs ?? 1200};
 	window.__oai_so_paste    = ${beh.pasteCount ?? 0};
 	window.__oai_so_click    = ${beh.clickCount ?? 5};
+})();
+`;
 
-	// === Application State ===
-	${appStateJs}
-})();`;
+	return `${generic}\n${oaiSoScript}`;
 }

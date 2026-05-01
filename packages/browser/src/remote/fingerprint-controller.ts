@@ -1,27 +1,51 @@
 /**
  * FingerprintController
  *
- * Encapsulates all anti-fingerprinting logic for the remote browser:
- * - The anti-detection init script (generated from a FingerprintProfile)
- * - The User-Agent and sec-ch-ua headers that must stay in sync
+ * Applies baseline anti-detection to the remote browser:
+ * - Minimal init script: removes webdriver, sets realistic platform/vendor
+ * - User-Agent and sec-ch-ua headers that stay in sync
  * - Tracking/fingerprinting URL blocklist
- * - Fingerprint logging for debugging bot detection issues
+ *
+ * This is the generic baseline applied to ALL browser sessions.
+ * Profile-aware fingerprint customisation (persona WebGL, screen, fonts, etc.)
+ * is handled by domain plugins (e.g. domains/chatgpt) via ChatGPTScriptInterceptor
+ * and buildChatGPTFingerprintScript — those are domain-specific.
  *
  * Usage:
- *   const fp = new FingerprintController(profile);
- *   await fp.applyToContext(context);  // sets headers + blocks URLs + registers context init script
- *   await fp.applyToPage(page);        // adds init script to an existing page (persistent context)
- *   await fp.logFingerprint(page);     // logs key fields for bot detection debugging
+ *   const fp = new FingerprintController();
+ *   await fp.applyToContext(context);  // headers + block URLs + init script
+ *   await fp.applyToPage(page);        // init script on an existing page
+ *   await fp.logFingerprint(page);     // log key fields for debugging
  */
 
-import type { FingerprintProfile } from '@interceptor/shared';
 import type { BrowserContext, Page } from 'patchright';
-import { buildFingerprintScript } from '../fingerprint-script';
 
 // Chrome 145 — version must match the sec-ch-ua header below.
-// A mismatch between UA and sec-ch-ua is a bot detection signal.
 const DEFAULT_USER_AGENT =
 	'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
+
+/**
+ * Minimal baseline anti-detection script.
+ * Removes the `webdriver` flag and sets realistic navigator properties.
+ * Domain plugins layer their own profile-aware script on top of this.
+ */
+const BASELINE_SCRIPT = `(function() {
+	Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+	Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
+	Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
+	Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+	Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+	Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+	Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+	Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+	const _origQuery = navigator.permissions?.query;
+	if (_origQuery) {
+		navigator.permissions.query = function(p) {
+			if (p.name === 'notifications') return Promise.resolve({ state: 'denied', onchange: null });
+			return _origQuery.call(this, p);
+		};
+	}
+})();`;
 
 /**
  * URLs to block completely (tracking, analytics, fingerprinting).
@@ -77,22 +101,18 @@ const BLOCKED_TRACKING_URLS = [
 ] as const;
 
 export class FingerprintController {
-	/** The anti-detection init script generated from the active profile. */
-	readonly script: string;
+	/** The baseline anti-detection init script. */
+	readonly script: string = BASELINE_SCRIPT;
 
-	/** User-Agent string — from profile if set, otherwise the default Mac Chrome UA. */
-	readonly userAgent: string;
+	/** User-Agent string. */
+	readonly userAgent: string = DEFAULT_USER_AGENT;
 
 	/**
 	 * sec-ch-ua client hint headers — must stay in sync with userAgent.
-	 * Applied to every context via setExtraHTTPHeaders to prevent HeadlessChrome detection.
+	 * When Patchright runs headless, Chromium sets sec-ch-ua to include
+	 * "HeadlessChrome" — a primary Cloudflare Bot Management detection signal.
 	 */
 	readonly clientHintHeaders: Record<string, string> = {
-		// Override sec-ch-ua to prevent HeadlessChrome detection.
-		// When Patchright runs in headless mode, Chromium automatically sets
-		// sec-ch-ua to include "HeadlessChrome" — a primary Cloudflare Bot Management
-		// detection signal. The value must match userAgent version (Chrome 145).
-		// When using real Chrome channel, sec-ch-ua is already correct — this is defense-in-depth.
 		'sec-ch-ua': '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
 		'sec-ch-ua-mobile': '?0',
 		'sec-ch-ua-platform': '"macOS"',
@@ -100,11 +120,6 @@ export class FingerprintController {
 
 	/** Tracking/fingerprinting URL patterns to block at the context route level. */
 	readonly blockedUrls: readonly string[] = BLOCKED_TRACKING_URLS;
-
-	constructor(profile?: FingerprintProfile) {
-		this.script = buildFingerprintScript(profile);
-		this.userAgent = profile?.userAgent ?? DEFAULT_USER_AGENT;
-	}
 
 	/**
 	 * Apply all fingerprint protections to a browser context:

@@ -15,12 +15,6 @@
 export { BlockerManager, getBlockerManager } from './blocker';
 // Config
 export { type BrowserConfig, getBrowserConfig } from './config';
-export {
-	type FingerprintLogEntry,
-	ScriptInterceptor as FingerprintController,
-	type ScriptInterceptorMode as FingerprintControllerMode,
-} from './fingerprint-controller';
-export { buildFingerprintScript } from './fingerprint-script';
 // Browser pool
 export { BrowserPool, getBrowserPool } from './pool';
 // Scraper Registry
