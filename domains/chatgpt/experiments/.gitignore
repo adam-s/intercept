@@ -1,0 +1,4 @@
+captures/
+logs/
+*.decrypted.js
+node_modules/

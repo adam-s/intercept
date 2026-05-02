@@ -65,12 +65,16 @@ function extractCode(response: string): string {
 	return response.trim();
 }
 
-/** Call POST /api/chatgpt/chat and collect the streamed response. */
+/** Call POST /api/chatgpt/v1/chat/completions (OpenAI-compatible) and collect text. */
 async function callChatGPT(message: string, model = 'gpt-4o'): Promise<string> {
-	const resp = await fetch(`${API_BASE}/api/chatgpt/chat`, {
+	const resp = await fetch(`${API_BASE}/api/chatgpt/v1/chat/completions`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ message, model }),
+		body: JSON.stringify({
+			model,
+			messages: [{ role: 'user', content: message }],
+			stream: true,
+		}),
 	});
 
 	if (!resp.ok) {
@@ -80,21 +84,19 @@ async function callChatGPT(message: string, model = 'gpt-4o'): Promise<string> {
 
 	const contentType = resp.headers.get('content-type') ?? '';
 
-	// SSE stream — collect all delta text
+	// OpenAI-format SSE: each chunk is `data: { choices: [{ delta: { content } }] }`
 	if (contentType.includes('text/event-stream')) {
-		const reader = resp.body!.getReader();
+		if (!resp.body) return '';
+		const reader = resp.body.getReader();
 		const decoder = new TextDecoder();
 		let fullText = '';
 		let buf = '';
-
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
 			buf += decoder.decode(value, { stream: true });
-
 			const lines = buf.split('\n');
 			buf = lines.pop() ?? '';
-
 			for (const line of lines) {
 				if (!line.startsWith('data: ')) continue;
 				const data = line.slice(6).trim();
@@ -111,14 +113,18 @@ async function callChatGPT(message: string, model = 'gpt-4o'): Promise<string> {
 		return fullText;
 	}
 
-	// Plain JSON fallback
+	// Non-streaming JSON fallback (when stream:false or upstream error)
 	const json = (await resp.json()) as Record<string, unknown>;
+	const choices = json.choices as Array<{ message?: { content?: string } }> | undefined;
+	if (Array.isArray(choices) && choices[0]?.message?.content) {
+		return choices[0].message.content;
+	}
 	return (json.text ?? json.content ?? json.message ?? JSON.stringify(json)) as string;
 }
 
 /** Run a shell command and return { exitCode, stdout, stderr }. */
-function runCommand(cmd: string, cwd: string) {
-	const result = spawnSync('sh', ['-c', cmd], { cwd, encoding: 'utf8', timeout: 30_000 });
+function runCommand(cmd: string, cwd: string, timeoutMs = 30_000) {
+	const result = spawnSync('sh', ['-c', cmd], { cwd, encoding: 'utf8', timeout: timeoutMs });
 	return {
 		exitCode: result.status ?? 1,
 		stdout: result.stdout ?? '',
@@ -153,18 +159,23 @@ function installDeps(challengeId: string, workDir: string) {
 			writeFileSync(join(workDir, 'test.js'), readFileSync(testSrc));
 			log('Copied test.js');
 		}
-		// Need better-sqlite3
+		// Need better-sqlite3 (native compile takes >30s; bump timeout).
+		// v12 has prebuilt binaries for Node 24; v9 fails to compile.
 		log('Installing better-sqlite3...');
 		const pkg = JSON.stringify({
 			name: 'challenge',
 			version: '1.0.0',
 			type: 'module',
-			dependencies: { 'better-sqlite3': '^9.0.0' },
+			dependencies: { 'better-sqlite3': '^12.0.0' },
 		});
 		writeFileSync(join(workDir, 'package.json'), pkg);
-		const r = runCommand('npm install --silent 2>&1', workDir);
+		const r = runCommand('npm install 2>&1', workDir, 180_000);
 		if (r.exitCode !== 0) {
-			log(`npm install failed:\n${r.stdout}\n${r.stderr}`);
+			log(
+				`npm install failed (exit ${r.exitCode}):\n${r.stdout.slice(-800)}\n${r.stderr.slice(-400)}`,
+			);
+		} else {
+			log('npm install ok');
 		}
 	}
 

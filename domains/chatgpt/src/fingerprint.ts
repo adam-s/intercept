@@ -1,208 +1,158 @@
 /**
  * ChatGPTScriptInterceptor
  *
- * Intercepts Cloudflare Turnstile and ChatGPT Sentinel scripts before they execute.
+ * Persona-aware fingerprint stealth for chatgpt.com — runs entirely through
+ * the raw-CDP `CdpScriptControl` surface owned by RemoteBrowserService.
  *
- * HOW IT WORKS
+ * WHAT IT DOES
  * ─────────────
- * page.route() runs for ALL frames, including cross-origin iframes
- * (e.g., challenges.cloudflare.com). When a matching JS file is fetched we:
- *   1. Fetch the original response via route.fetch()
- *   2. Prepend a logging/control preamble to the JS text
- *   3. Fulfill the route with the rewritten body
+ * 1. Registers an init script (`buildChatGPTFingerprintScript`) via
+ *    Page.addScriptToEvaluateOnNewDocument. The script:
+ *      - Replaces all 55 properties Cloudflare Turnstile / ChatGPT Sentinel
+ *        read (WebGL, navigator, screen, fonts, plugins, AudioContext, …).
+ *      - Pre-seeds the 36 `window.__oai_so_*` behavioural-biometric values.
+ *      - Hardens the overrides so descriptor introspection and
+ *        `Function.prototype.toString` checks return native-looking output.
+ *    The script runs in the main world before ANY page or subframe script,
+ *    including in cross-origin iframes (auto-propagated by Chromium).
  *
- * The Turnstile VM still runs and generates a valid token, but every property
- * read (GPU, screen, fonts, navigator, React state) is intercepted. In 'control'
- * mode the values returned are from the active FingerprintProfile, not the real
- * browser — so the token Cloudflare receives contains your chosen persona, not
- * your actual fingerprint.
+ * 2. (Log mode only.) Registers a Fetch.requestPaused capture for Cloudflare
+ *    Turnstile, challenge-platform, Sentinel, and __oai_so script bundles.
+ *    Bodies are read but NEVER modified — modifying the bytes risks tripping
+ *    self-checksums in the Turnstile VM. Instead the bodies are emitted as
+ *    `script-captured` events for offline analysis.
+ *
+ * WHY THIS DESIGN
+ * ────────────────
+ * The previous implementation used `page.route()` and prepended a JS
+ * preamble to each Cloudflare/Sentinel script. That approach (a) leaks
+ * Patchright route timing/header artifacts to in-page scripts, and (b)
+ * is fragile — Turnstile bundles are XOR-encrypted and may self-checksum.
+ * The new design controls the *environment* before scripts run, not the
+ * bytes of the scripts themselves.
  *
  * MODES
  * ─────
- * 'log'     — observe only. Wraps reads and writes to window.__fp_log_entries.
- * 'control' — like 'log' but also replaces values with profile data (privacy mode).
+ * 'log'     — install hooks; capture script bodies as 'script-captured' events.
+ * 'control' — install hooks (full persona override); no body capture.
  *
- * SIGNAL ORCHESTRATOR
- * ────────────────────
- * The __oai_so_* behavioral biometric properties are pre-seeded by
- * buildChatGPTFingerprintScript() in the page init script (runs before React).
- * This interceptor handles the Turnstile iframe layer.
+ * HOW TO USE
+ * ──────────
+ *   const interceptor = new ChatGPTScriptInterceptor('control', profile);
+ *   await interceptor.attach(browser.getScriptControl()!);
+ *   interceptor.on('entry', (e) => ...);          // property reads from in-page script
+ *   interceptor.on('script-captured', (s) => ...); // log-mode body dumps
  */
 
 import { EventEmitter } from 'node:events';
-import type { Page, Route } from 'patchright';
+import type {
+	CapturedScript,
+	CdpScriptControl,
+	InitScriptHandle,
+} from '@interceptor/browser/remote';
+import type { Page } from 'patchright';
+import { buildChatGPTFingerprintScript } from './fingerprint-script';
 import type { ChatGPTInterceptorMode, FingerprintLogEntry, FingerprintProfile } from './types';
 
 export type { FingerprintLogEntry } from './types';
 
 /**
- * URL patterns that match Cloudflare Turnstile and ChatGPT Sentinel scripts.
- * All five layers of the Turnstile challenge chain are covered.
+ * URL globs (CDP `Fetch.enable` urlPattern syntax — `*` matches any chars)
+ * that capture every script in the Cloudflare Turnstile / ChatGPT Sentinel
+ * load chain. Used in `log` mode for body capture only.
  */
-const CHATGPT_SCRIPT_PATTERNS = [
-	// Cloudflare Turnstile challenge iframe
-	'**/challenges.cloudflare.com/**',
-	// Generic turnstile scripts loaded on any domain
-	'**/*turnstile*',
-	// Cloudflare challenge platform CDN
-	'**/cdn-cgi/challenge-platform/**',
-	// ChatGPT Sentinel — the program that reads React state + fingerprint
-	'**/chatgpt.com/_next/static/chunks/**sentinel**',
-	// ChatGPT Signal Orchestrator — behavioral biometrics listener
-	'**/chatgpt.com/_next/static/chunks/**oai-so**',
+const CHATGPT_SCRIPT_PATTERNS: readonly string[] = [
+	'*challenges.cloudflare.com*',
+	'*turnstile*',
+	'*cdn-cgi/challenge-platform*',
+	'*chatgpt.com/_next/static/chunks/*sentinel*',
+	'*chatgpt.com/_next/static/chunks/*oai-so*',
 ];
 
 /**
- * Builds the JS preamble prepended to every intercepted script.
+ * Tiny side-channel script: reads the persona script's log buffer
+ * (`window.__fp_log_entries`) on a 500 ms interval and surfaces entries to
+ * Node via a CDP-bound page binding. The persona script writes to that
+ * buffer whenever a Turnstile-iframe property read goes through one of our
+ * intercepted getters.
  *
- * In 'log' mode: wraps WebGL getParameter and window.__fp_log_entries to
- * record what values Turnstile reads.
- *
- * In 'control' mode: additionally replaces all 55 fingerprint property reads
- * with values from the active FingerprintProfile, so Turnstile's token
- * contains persona data instead of real device data.
+ * Kept here (not in the persona script) so log-mode plumbing is testable
+ * independently of the much larger persona payload.
  */
-function buildInterceptPreamble(
-	mode: ChatGPTInterceptorMode,
-	profile: FingerprintProfile | undefined,
-): string {
-	const profileJson = profile ? JSON.stringify(profile) : 'null';
-
-	return `
-(function __chatgpt_fp_intercept() {
-	const __mode = ${JSON.stringify(mode)};
-	const __profile = ${profileJson};
-
-	// ─── Logging ─────────────────────────────────────────────────
-	const __log = function(layer, property, value) {
+const LOG_DRAIN_SCRIPT = `
+(function __chatgpt_fp_log_drain() {
+	if (window.__fp_log_drain_installed) return;
+	window.__fp_log_drain_installed = true;
+	let lastSent = 0;
+	setInterval(() => {
 		try {
-			window.__fp_log_entries = window.__fp_log_entries || [];
-			window.__fp_log_entries.push({
-				t: Date.now(), layer, property,
-				value: String(value).slice(0, 200)
-			});
-			if (window.__fp_log_entries.length > 500) window.__fp_log_entries.shift();
-		} catch(e) {}
-	};
-
-	// ─── WebGL getParameter proxy ─────────────────────────────────
-	// Covers Layer 1: UNMASKED_VENDOR_WEBGL, UNMASKED_RENDERER_WEBGL
-	// and 6 other WebGL params Turnstile reads (getContext, getExtension etc.)
-	const _origGC = HTMLCanvasElement.prototype.getContext;
-	HTMLCanvasElement.prototype.getContext = function(type) {
-		const ctx = _origGC.apply(this, arguments);
-		if (!ctx) return ctx;
-		if (type !== 'webgl' && type !== 'webgl2' && type !== 'experimental-webgl') return ctx;
-		const _origGP = ctx.getParameter.bind(ctx);
-		const wgl = __profile && __profile.browser && __profile.browser.webgl;
-		ctx.getParameter = function(param) {
-			if (param === 37445) {
-				const v = (__mode === 'control' && wgl) ? wgl.vendor : _origGP(param);
-				__log('browser', 'UNMASKED_VENDOR_WEBGL', v);
-				return v;
+			const all = window.__fp_log_entries;
+			if (!all || all.length <= lastSent) return;
+			const next = all.slice(lastSent);
+			lastSent = all.length;
+			if (typeof window.__fp_emit_entries === 'function') {
+				try { window.__fp_emit_entries(JSON.stringify(next)); } catch (e) {}
 			}
-			if (param === 37446) {
-				const v = (__mode === 'control' && wgl) ? wgl.renderer : _origGP(param);
-				__log('browser', 'UNMASKED_RENDERER_WEBGL', v);
-				return v;
-			}
-			const v = _origGP(param);
-			__log('browser', 'webgl_param_' + param, v);
-			return v;
-		};
-		return ctx;
-	};
-
-	// ─── Navigator property logging (Layer 1 Hardware) ────────────
-	// In 'control' mode these are already overridden by the page init script
-	// (buildChatGPTFingerprintScript). Here we just log reads inside the iframe.
-	const _navProps = ['hardwareConcurrency', 'deviceMemory', 'platform', 'vendor', 'maxTouchPoints'];
-	for (const prop of _navProps) {
-		try {
-			const desc = Object.getOwnPropertyDescriptor(Navigator.prototype, prop)
-				|| Object.getOwnPropertyDescriptor(navigator, prop);
-			if (!desc) continue;
-			const _orig = desc.get ? desc.get.bind(navigator) : () => navigator[prop];
-			Object.defineProperty(navigator, prop, {
-				get: function() {
-					const v = _orig();
-					__log('browser', prop, v);
-					return v;
-				},
-				configurable: true,
-			});
-		} catch(e) {}
-	}
-
-	// ─── Screen property logging (Layer 1 Screen) ────────────────
-	const _screenProps = ['colorDepth', 'pixelDepth', 'width', 'height', 'availWidth', 'availHeight', 'availLeft', 'availTop'];
-	for (const prop of _screenProps) {
-		try {
-			const _origVal = screen[prop];
-			Object.defineProperty(screen, prop, {
-				get: function() { __log('browser', 'screen.' + prop, _origVal); return _origVal; },
-				configurable: true,
-			});
-		} catch(e) {}
-	}
-
-	// ─── React / Application state logging (Layer 3) ─────────────
-	// Turnstile reads __reactRouterContext, loaderData, clientBootstrap.
-	// These only exist after the ChatGPT SPA hydrates. We log when they're read.
-	const _appStateProps = ['__reactRouterContext', 'clientBootstrap'];
-	for (const prop of _appStateProps) {
-		try {
-			let _val = window[prop];
-			Object.defineProperty(window, prop, {
-				get: function() { __log('app_state', prop, _val ? '[present]' : '[missing]'); return _val; },
-				set: function(v) { _val = v; },
-				configurable: true,
-			});
-		} catch(e) {}
-	}
+		} catch (e) {}
+	}, 500);
 })();
 `;
-}
 
 export class ChatGPTScriptInterceptor extends EventEmitter {
 	private mode: ChatGPTInterceptorMode;
 	private profile: FingerprintProfile | undefined;
-	private attached = false;
-	private page: Page | null = null;
-	private routeHandlers: Array<{ pattern: string; handler: (route: Route) => Promise<void> }> = [];
+	private control: CdpScriptControl | null = null;
+	private personaHandle: InitScriptHandle | null = null;
+	private drainHandle: InitScriptHandle | null = null;
+	private stopCapture: (() => Promise<void>) | null = null;
+	private bindingsInstalled = new WeakSet<Page>();
 
-	constructor(mode: ChatGPTInterceptorMode = 'log', profile?: FingerprintProfile) {
+	constructor(mode: ChatGPTInterceptorMode = 'control', profile?: FingerprintProfile) {
 		super();
 		this.mode = mode;
 		this.profile = profile;
 	}
 
-	/** Attach to a Patchright page — installs route interceptors for all script patterns. */
-	async attach(page: Page): Promise<void> {
-		if (this.attached) return;
-		this.page = page;
-		this.attached = true;
+	getMode(): ChatGPTInterceptorMode {
+		return this.mode;
+	}
 
-		for (const pattern of CHATGPT_SCRIPT_PATTERNS) {
-			const handler = async (route: Route) => {
-				await this.handleScriptRoute(route);
-			};
-			await page.route(pattern, handler);
-			this.routeHandlers.push({ pattern, handler });
+	/**
+	 * Attach to the raw-CDP control surface. Idempotent: a second `attach`
+	 * call rebuilds the persona script with the latest mode/profile.
+	 */
+	async attach(control: CdpScriptControl): Promise<void> {
+		this.control = control;
+
+		// Tear down any previous registration so mode/profile changes take effect.
+		await this.unregisterScripts();
+
+		// 1. Install the persona script. Runs in main world, before any page
+		//    or subframe script (Chromium auto-propagates to OOPIFs).
+		const personaSource = buildChatGPTFingerprintScript(this.profile);
+		this.personaHandle = await control.registerInitScript(personaSource);
+
+		// 2. Install the log-drain script so Turnstile-iframe property reads
+		//    surface to Node. Same install path; runs after the persona script
+		//    in registration order.
+		this.drainHandle = await control.registerInitScript(LOG_DRAIN_SCRIPT);
+
+		// 3. In log mode: capture upstream script bodies for offline analysis.
+		if (this.mode === 'log') {
+			this.stopCapture = await control.captureScripts(
+				{ urlPattern: '*', resourceType: 'Script' },
+				(s) => this.onScriptCaptured(s),
+			);
 		}
 
-		this.startLogPoll(page);
-		console.log('[ChatGPTScriptInterceptor] Attached — mode:', this.mode);
+		console.log(
+			`[ChatGPTScriptInterceptor] Attached via CDP — mode: ${this.mode}, profile: ${this.profile?.name ?? '(none)'}`,
+		);
 	}
 
 	async detach(): Promise<void> {
-		if (!this.page || !this.attached) return;
-		for (const { pattern } of this.routeHandlers) {
-			await this.page.unroute(pattern).catch(() => {});
-		}
-		this.routeHandlers = [];
-		this.attached = false;
-		this.page = null;
+		await this.unregisterScripts();
+		this.control = null;
 	}
 
 	setMode(mode: ChatGPTInterceptorMode): void {
@@ -213,53 +163,27 @@ export class ChatGPTScriptInterceptor extends EventEmitter {
 		this.profile = profile;
 	}
 
-	getMode(): ChatGPTInterceptorMode {
-		return this.mode;
-	}
+	/**
+	 * Install a CDP page binding that the in-page log-drain script calls with
+	 * batched property-read entries. Must be called per page after the page
+	 * exists (the persona script's `window.__fp_emit_entries` is a no-op
+	 * until we install the binding here). Service code can call this on the
+	 * primary page after `attach`.
+	 */
+	async bindLogChannel(page: Page): Promise<void> {
+		if (this.bindingsInstalled.has(page)) return;
+		this.bindingsInstalled.add(page);
 
-	private async handleScriptRoute(route: Route): Promise<void> {
-		const url = route.request().url();
-		try {
-			const response = await route.fetch();
-			const ct = response.headers()['content-type'] ?? '';
-
-			if (!ct.includes('javascript') && !ct.includes('ecmascript')) {
-				await route.fulfill({ response });
-				return;
-			}
-
-			const originalBody = await response.text();
-			const preamble = buildInterceptPreamble(this.mode, this.profile);
-
-			this.emit('script-intercepted', { url, size: originalBody.length });
-
-			await route.fulfill({
-				status: response.status(),
-				headers: response.headers(),
-				body: `${preamble}\n${originalBody}`,
-			});
-		} catch (err) {
-			console.warn('[ChatGPTScriptInterceptor] Route fetch failed for', url, err);
-			await route.continue().catch(() => {});
-		}
-	}
-
-	/** Poll window.__fp_log_entries every 500ms and emit 'entry' events. */
-	private startLogPoll(page: Page): void {
-		let lastCount = 0;
-		const poll = async () => {
-			if (!this.attached || page.isClosed()) return;
-			try {
-				const entries = await page.evaluate(() => {
-					const all = (window as unknown as Record<string, unknown>).__fp_log_entries as
-						| Array<{ t: number; layer: string; property: string; value: unknown }>
-						| undefined;
-					return all ?? null;
-				});
-				if (entries && entries.length > lastCount) {
-					const newEntries = entries.slice(lastCount);
-					lastCount = entries.length;
-					for (const e of newEntries) {
+		await page
+			.exposeFunction('__fp_emit_entries', (json: string) => {
+				try {
+					const arr = JSON.parse(json) as Array<{
+						t: number;
+						layer: string;
+						property: string;
+						value: unknown;
+					}>;
+					for (const e of arr) {
 						this.emit('entry', {
 							timestamp: e.t,
 							layer: e.layer,
@@ -267,12 +191,52 @@ export class ChatGPTScriptInterceptor extends EventEmitter {
 							value: e.value,
 						} satisfies FingerprintLogEntry);
 					}
+				} catch {
+					/* ignore malformed batch */
 				}
-			} catch {
-				// Page may have navigated — ignore
-			}
-			if (this.attached) setTimeout(poll, 500);
-		};
-		setTimeout(poll, 500);
+			})
+			.catch(() => {
+				/* binding may already exist on persistent contexts */
+			});
 	}
+
+	// ─── Internals ────────────────────────────────────────────────────
+
+	private async unregisterScripts(): Promise<void> {
+		if (this.stopCapture) {
+			await this.stopCapture().catch(() => {});
+			this.stopCapture = null;
+		}
+		if (this.control && this.personaHandle) {
+			await this.control.unregisterInitScript(this.personaHandle).catch(() => {});
+			this.personaHandle = null;
+		}
+		if (this.control && this.drainHandle) {
+			await this.control.unregisterInitScript(this.drainHandle).catch(() => {});
+			this.drainHandle = null;
+		}
+	}
+
+	private onScriptCaptured(captured: CapturedScript): void {
+		// Filter on URL — captureScripts uses `*` so we receive all scripts
+		// and route filtering here. Cheaper than registering 5 separate
+		// per-pattern handlers since they all flow to the same listener.
+		if (!CHATGPT_SCRIPT_PATTERNS.some((p) => globMatch(captured.url, p))) return;
+		this.emit('script-captured', {
+			url: captured.url,
+			resourceType: captured.resourceType,
+			status: captured.responseStatusCode,
+			size: captured.body.length,
+			body: captured.body,
+			base64Encoded: captured.base64Encoded,
+		});
+	}
+}
+
+function globMatch(url: string, pattern: string): boolean {
+	if (pattern === '*' || pattern === '') return true;
+	const regex = new RegExp(
+		`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`,
+	);
+	return regex.test(url);
 }

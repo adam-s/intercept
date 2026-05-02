@@ -61,7 +61,8 @@
 			"!**/data",
 			"!**/.venv",
 			"!**/next-env.d.ts",
-			"!apps/api/src/browser.ts"
+			"!apps/api/src/browser.ts",
+			"!**/experiments/captures"
 		]
 	}
 }

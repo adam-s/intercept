@@ -96,6 +96,48 @@ function buildFingerprintScript(profile?: FingerprintProfile): string {
 		`;
 
 	return `(function() {
+	// Installation marker visible to ANY world (DOM is shared across worlds;
+	// window/navigator overrides are not). Use it from /browser/mcp/evaluate
+	// to confirm the persona script reached the page.
+	try { if (document && document.documentElement) document.documentElement.setAttribute('data-fp-persona-ran', '1'); } catch(e) {}
+
+	// ─── Hardening Prelude ────────────────────────────────────────────
+	// 1. Patch Function.prototype.toString so every getter we install
+	//    later in this IIFE returns "function get NAME() { [native code] }"
+	//    when introspected — defeating Sentinel's getter.toString() checks.
+	// 2. Initialise the log buffer used by the page-level log-drain.
+	// 3. Provide __fp_setNative(fn, name) used by the post-pass at the
+	//    bottom of this IIFE to mark every getter we installed.
+	const __fp_origFnToString = Function.prototype.toString;
+	const __fp_fakeNatives = new WeakMap();
+	const __fp_setNative = function(fn, displayName) {
+		try { __fp_fakeNatives.set(fn, displayName); } catch(e) {}
+		return fn;
+	};
+	const __fp_toStringProxy = new Proxy(__fp_origFnToString, {
+		apply: function(target, thisArg, args) {
+			try {
+				if (thisArg && __fp_fakeNatives.has(thisArg)) {
+					return 'function ' + __fp_fakeNatives.get(thisArg) + '() { [native code] }';
+				}
+			} catch(e) {}
+			return Reflect.apply(target, thisArg, args);
+		}
+	});
+	Function.prototype.toString = __fp_toStringProxy;
+	__fp_setNative(__fp_toStringProxy, 'toString');
+
+	// Public log buffer — read every 500ms by the page-level log-drain
+	// script (registered separately by ChatGPTScriptInterceptor).
+	try { window.__fp_log_entries = window.__fp_log_entries || []; } catch(e) {}
+	const __fp_log = function(layer, prop, value) {
+		try {
+			const arr = window.__fp_log_entries; if (!arr) return;
+			arr.push({ t: Date.now(), layer: layer, property: prop, value: String(value).slice(0, 200) });
+			if (arr.length > 1000) arr.shift();
+		} catch(e) {}
+	};
+
 	// === Core Navigator Overrides ===
 	Object.defineProperty(navigator, 'platform', { get: () => ${JSON.stringify(hw?.platform ?? 'MacIntel')} });
 	Object.defineProperty(navigator, 'vendor', { get: () => ${JSON.stringify(hw?.vendor ?? 'Google Inc.')} });
@@ -211,6 +253,59 @@ function buildFingerprintScript(profile?: FingerprintProfile): string {
 
 	// === Application State ===
 	${appStateJs}
+
+	// ─── Hardening Post-Pass ──────────────────────────────────────────
+	// Walk the property paths we just patched. For each one:
+	//   1. Mark the getter as a fake native so Function.prototype.toString
+	//      reports "function get NAME() { [native code] }".
+	//   2. Wrap the getter so reads append to window.__fp_log_entries
+	//      (the side-channel used by ChatGPTScriptInterceptor in log mode).
+	// Doing this as a single post-pass lets the existing override blocks
+	// stay readable as plain Object.defineProperty calls.
+	const __fp_paths = [
+		[navigator, ['platform','vendor','webdriver','languages','language','hardwareConcurrency','deviceMemory','maxTouchPoints','plugins','mimeTypes']],
+		[screen,    ['colorDepth','pixelDepth','width','height','availWidth','availHeight','availLeft','availTop']],
+	];
+	if (navigator.connection) {
+		__fp_paths.push([navigator.connection, ['effectiveType','downlink','rtt']]);
+	}
+	for (const entry of __fp_paths) {
+		const target = entry[0];
+		const props = entry[1];
+		for (const prop of props) {
+			try {
+				const desc = Object.getOwnPropertyDescriptor(target, prop)
+					|| Object.getOwnPropertyDescriptor(Object.getPrototypeOf(target) || {}, prop);
+				const orig = desc && desc.get ? desc.get : null;
+				if (!orig) continue;
+				// Wrap: log + delegate.
+				const wrapped = function() {
+					const v = orig.call(this);
+					__fp_log('browser', prop, v);
+					return v;
+				};
+				__fp_setNative(wrapped, 'get ' + prop);
+				Reflect.defineProperty(target, prop, {
+					get: wrapped,
+					configurable: true,
+					enumerable: desc ? !!desc.enumerable : true,
+				});
+			} catch(e) {}
+		}
+	}
+
+	// Mark our WebGL getParameter Proxy as native too — it's the property
+	// most aggressively introspected by Cloudflare Turnstile (Layer 1).
+	try {
+		const _testCtx = document.createElement('canvas').getContext('webgl');
+		if (_testCtx && _testCtx.getParameter) {
+			__fp_setNative(_testCtx.getParameter, 'getParameter');
+		}
+	} catch(e) {}
+
+	// Logs that appear in window.__fp_log_entries are emitted to Node by
+	// the separate __chatgpt_fp_log_drain init script (registered by
+	// ChatGPTScriptInterceptor) via the __fp_emit_entries CDP binding.
 })();`;
 }
 
