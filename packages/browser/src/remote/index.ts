@@ -4,6 +4,13 @@
  */
 
 export { BrowserLifecycleManager } from './browser-manager';
+export {
+	type CapturedScript,
+	type CaptureHandler,
+	CdpScriptControl,
+	type FetchCaptureOptions,
+	type InitScriptHandle,
+} from './cdp-script-control';
 export { FingerprintController } from './fingerprint-controller';
 export { browserLogger } from './logger';
 export {

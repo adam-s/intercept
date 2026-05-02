@@ -11,14 +11,19 @@
  * is handled by domain plugins (e.g. domains/chatgpt) via ChatGPTScriptInterceptor
  * and buildChatGPTFingerprintScript — those are domain-specific.
  *
+ * The init script is installed via raw CDP (Page.addScriptToEvaluateOnNewDocument)
+ * through CdpScriptControl, NOT via Patchright's addInitScript wrapper. This
+ * matters for hostile detection (Cloudflare Turnstile / ChatGPT Sentinel) that
+ * inspects the JS environment for automation tells.
+ *
  * Usage:
  *   const fp = new FingerprintController();
- *   await fp.applyToContext(context);  // headers + block URLs + init script
- *   await fp.applyToPage(page);        // init script on an existing page
- *   await fp.logFingerprint(page);     // log key fields for debugging
+ *   await fp.applyToContext(context, control); // headers + URL blocklist + CDP init script
+ *   await fp.logFingerprint(page);             // log key fields for debugging
  */
 
 import type { BrowserContext, Page } from 'patchright';
+import type { CdpScriptControl, InitScriptHandle } from './cdp-script-control';
 
 // Chrome 145 — version must match the sec-ch-ua header below.
 const DEFAULT_USER_AGENT =
@@ -30,6 +35,11 @@ const DEFAULT_USER_AGENT =
  * Domain plugins layer their own profile-aware script on top of this.
  */
 const BASELINE_SCRIPT = `(function() {
+	// Set a DOM attribute as an installation marker. The DOM is shared
+	// across JS worlds, so it survives Patchright's isolated-world evaluator
+	// (window/navigator overrides are NOT visible there because isolated
+	// worlds get their own copies of those bindings).
+	try { if (document && document.documentElement) document.documentElement.setAttribute('data-fp-baseline-ran', '1'); } catch(e) {}
 	Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 	Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
 	Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
@@ -119,33 +129,38 @@ export class FingerprintController {
 	/** Tracking/fingerprinting URL patterns to block at the context route level. */
 	readonly blockedUrls: readonly string[] = BLOCKED_TRACKING_URLS;
 
+	/** Handle to the installed CDP init script — used for cleanup if needed. */
+	private installedHandle: InitScriptHandle | null = null;
+
 	/**
 	 * Apply all fingerprint protections to a browser context:
-	 * - Registers the anti-detection init script (for all future pages)
+	 * - Registers the anti-detection init script via raw CDP (covers all
+	 *   current and future pages, propagates to cross-origin subframes)
 	 * - Sets sec-ch-ua client hint headers
 	 * - Blocks tracking/fingerprinting URLs
 	 *
-	 * Call once immediately after context creation, before any pages are opened.
+	 * `control` MUST already be attached to (context, primaryPage). Call
+	 * immediately after context creation, before any meaningful navigation.
 	 */
-	async applyToContext(context: BrowserContext): Promise<void> {
-		await context.addInitScript(this.script);
+	async applyToContext(context: BrowserContext, control: CdpScriptControl): Promise<void> {
+		this.installedHandle = await control.registerInitScript(this.script);
 		await context.setExtraHTTPHeaders(this.clientHintHeaders);
 
 		// Block fingerprinting and tracking URLs at the route level.
 		// This runs BEFORE Ghostery and catches domain-specific trackers.
+		// We keep this on Patchright's context.route — these requests are
+		// strictly aborted (no body fetch), so the route artifact is harmless.
 		for (const pattern of this.blockedUrls) {
 			await context.route(pattern, (route) => route.abort());
 		}
 	}
 
 	/**
-	 * Apply the anti-detection init script directly to a page.
-	 *
-	 * Necessary for pages that already existed when the context was created
-	 * (context-level addInitScript only applies to pages created AFTER the call).
+	 * Returns the installed init-script handle, if any. Used for cleanup
+	 * during context teardown.
 	 */
-	async applyToPage(page: Page): Promise<void> {
-		await page.addInitScript(this.script);
+	getInstalledHandle(): InitScriptHandle | null {
+		return this.installedHandle;
 	}
 
 	/**

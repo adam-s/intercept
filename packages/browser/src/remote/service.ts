@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { BrowserContext, CDPSession, Page, Route } from 'patchright';
 import { chromium } from 'patchright';
 import { BlockerManager } from '../blocker';
+import { CdpScriptControl } from './cdp-script-control';
 import type {
 	CDPLoadingFailed,
 	CDPLoadingFinished,
@@ -129,6 +130,14 @@ export class RemoteBrowserService {
 
 	/** Controls baseline anti-detection: removes webdriver, sets UA, sec-ch-ua, blocks trackers. */
 	private fingerprint = new FingerprintController();
+
+	/**
+	 * Raw-CDP control for init scripts and (optionally) script-body capture.
+	 * Replaces Patchright's addInitScript / page.route for hostile detection
+	 * targets (Cloudflare Turnstile, ChatGPT Sentinel). Domain plugins access
+	 * this via getScriptControl().
+	 */
+	private scriptControl: CdpScriptControl | null = null;
 
 	/** Callback for CDP-captured network traffic (XHR/Fetch JSON responses) */
 	private networkCaptureCallback:
@@ -263,6 +272,18 @@ export class RemoteBrowserService {
 	}
 
 	/**
+	 * Get the raw-CDP script control surface. Domain plugins use this to
+	 * register fingerprint init scripts via Page.addScriptToEvaluateOnNewDocument
+	 * (rather than Patchright's detectable addInitScript wrapper) and to
+	 * capture script bodies in log mode.
+	 *
+	 * Returns null if the browser hasn't started yet.
+	 */
+	getScriptControl(): CdpScriptControl | null {
+		return this.scriptControl;
+	}
+
+	/**
 	 * Get or create a named page for a specific domain.
 	 * Named pages run in the same browser context (shared cookies, anti-detection)
 	 * but navigate independently — enabling parallel browsing across domains.
@@ -275,9 +296,13 @@ export class RemoteBrowserService {
 		if (!this.context) throw new Error('Browser not running — connect via WebSocket first');
 		const newPage = await this.context.newPage();
 
-		// Apply same anti-detection as main page (context-level addInitScript
-		// only applies to pages created AFTER the call, so we need page-level too)
-		await this.fingerprint.applyToPage(newPage);
+		// Eagerly adopt the new page into raw-CDP control. The context.on('page')
+		// handler in CdpScriptControl will also adopt it asynchronously, but
+		// adoptChildPage is idempotent — so we explicitly await here to guarantee
+		// init scripts are installed BEFORE the caller navigates the new page.
+		if (this.scriptControl) {
+			await this.scriptControl.adoptChildPage(newPage);
+		}
 
 		// Enable ad blocking on the new page
 		if (this.config.enableAdBlocking) {
@@ -468,16 +493,23 @@ export class RemoteBrowserService {
 			ignoreHTTPSErrors: this.config.proxyType === 'residential',
 		});
 
-		// Apply all fingerprint protections: init script, sec-ch-ua headers, and tracking URL blocklist.
-		// Must run BEFORE pages are opened so the init script fires on the first page load.
-		await this.fingerprint.applyToContext(this.context);
-
+		// Resolve the primary page BEFORE attaching the CDP script control —
+		// the control needs a page target to open its root CDP session against.
 		const pages = this.context.pages();
 		this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 
-		// Also apply init script directly to existing pages from a persistent context.
-		// context.addInitScript only applies to pages created AFTER the call.
-		await this.fingerprint.applyToPage(this.page);
+		// Attach raw-CDP script control on the primary page. From here on
+		// every init-script registration goes through Chromium's
+		// Page.addScriptToEvaluateOnNewDocument directly — bypassing
+		// Patchright's addInitScript wrapper.
+		this.scriptControl = new CdpScriptControl();
+		await this.scriptControl.attach(this.context, this.page);
+
+		// Apply baseline fingerprint protection: install the anti-detection
+		// init script via CDP, set sec-ch-ua headers, and register the
+		// tracking-URL blocklist. Must run BEFORE the page navigates so the
+		// init script fires on the first real document load.
+		await this.fingerprint.applyToContext(this.context, this.scriptControl);
 
 		// Block static resources — discovery only needs HTML + JS, not images/CSS/fonts.
 		// Saves ~30% memory per browser instance and speeds up page loads.
@@ -598,6 +630,16 @@ export class RemoteBrowserService {
 
 		// Clear named pages map (pages themselves closed below with context.pages())
 		this.namedPages.clear();
+
+		// Detach the raw-CDP script control before closing pages.
+		if (this.scriptControl) {
+			try {
+				await this.scriptControl.detach();
+			} catch {
+				// Script control may already be detached
+			}
+			this.scriptControl = null;
+		}
 
 		// Clear CDP session first
 		if (this.cdp) {
