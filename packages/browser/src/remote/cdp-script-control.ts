@@ -90,6 +90,21 @@ export interface FetchCaptureOptions {
 
 export type CaptureHandler = (s: CapturedScript) => void | Promise<void>;
 
+/**
+ * Mutate a script body before it reaches the page. Return:
+ *   - `null` to skip (fall through to next mutator / continueResponse unmodified)
+ *   - `string` to replace the body with that content
+ *
+ * Mutators receive the (already-decoded) UTF-8 body. Multiple mutators
+ * can register against the same pattern; they chain in registration order.
+ *
+ * Bytes ARE written back via `Fetch.fulfillRequest`, so any integrity
+ * check the upstream script does on itself (CSP `sha256-…` pin, ECDSA
+ * `MEUC` header, runtime self-checksum) WILL detect the change. Use
+ * mutators only on bundles that don't self-check (e.g. Next.js builds).
+ */
+export type ScriptMutator = (s: CapturedScript) => string | null | Promise<string | null>;
+
 interface InstalledScript {
 	id: string;
 	source: string;
@@ -144,6 +159,8 @@ export class CdpScriptControl extends EventEmitter {
 	private scripts: Map<string, string> = new Map(); // handle.id → source
 	private fetchHandlers: Map<string, CaptureHandler> = new Map(); // handle.id → handler
 	private fetchPatterns: Map<string, FetchCaptureOptions> = new Map();
+	private mutateHandlers: Map<string, ScriptMutator> = new Map(); // handle.id → mutator
+	private mutatePatterns: Map<string, FetchCaptureOptions> = new Map();
 	private fetchListenerInstalled = false;
 	private attached = false;
 	private contextPageHandler: ((p: Page) => void) | null = null;
@@ -409,10 +426,61 @@ export class CdpScriptControl extends EventEmitter {
 		};
 	}
 
-	private async applyFetchToSession(session: CDPSession): Promise<void> {
-		if (this.fetchPatterns.size === 0) return;
+	/**
+	 * Mutate matching response bodies. Return `null` from the mutator to
+	 * pass through unmodified; return a string to replace the body. Bytes
+	 * are written back via `Fetch.fulfillRequest`. See `ScriptMutator`.
+	 *
+	 * Returns a stop() function that disables this mutator.
+	 */
+	async decorateScript(
+		opts: FetchCaptureOptions,
+		mutator: ScriptMutator,
+	): Promise<() => Promise<void>> {
+		if (!this.attached || !this.rootSession) {
+			throw new Error('CdpScriptControl.decorateScript called before attach()');
+		}
+		const id = randomUUID();
+		this.mutateHandlers.set(id, mutator);
+		this.mutatePatterns.set(id, opts);
 
-		const patterns = Array.from(this.fetchPatterns.values()).map((opts) => ({
+		await this.applyFetchToSession(this.rootSession);
+		for (const state of this.childSessions.values()) {
+			await this.applyFetchToSession(state.session).catch(() => {});
+		}
+
+		return async () => {
+			this.mutateHandlers.delete(id);
+			this.mutatePatterns.delete(id);
+			if (this.fetchPatterns.size === 0 && this.mutatePatterns.size === 0 && this.rootSession) {
+				await this.rootSession.send('Fetch.disable').catch(() => {});
+				for (const state of this.childSessions.values()) {
+					await state.session.send('Fetch.disable').catch(() => {});
+				}
+				this.fetchListenerInstalled = false;
+			} else if (this.rootSession) {
+				await this.applyFetchToSession(this.rootSession);
+				for (const state of this.childSessions.values()) {
+					await this.applyFetchToSession(state.session).catch(() => {});
+				}
+			}
+		};
+	}
+
+	private async applyFetchToSession(session: CDPSession): Promise<void> {
+		if (this.fetchPatterns.size === 0 && this.mutatePatterns.size === 0) return;
+
+		// Mutators rewrite bytes via Fetch.fulfillRequest. If Chromium serves
+		// the response from disk/memory cache, Fetch.requestPaused never fires
+		// for that request, so the mutator silently no-ops. Disable cache when
+		// any mutator is registered. Read-only captures work either way.
+		if (this.mutatePatterns.size > 0) {
+			await session.send('Network.enable').catch(() => {});
+			await session.send('Network.setCacheDisabled', { cacheDisabled: true }).catch(() => {});
+		}
+
+		const allPatterns = [...this.fetchPatterns.values(), ...this.mutatePatterns.values()];
+		const patterns = allPatterns.map((opts) => ({
 			urlPattern: opts.urlPattern,
 			resourceType: opts.resourceType ?? 'Script',
 			requestStage: 'Response' as const,
@@ -450,16 +518,26 @@ export class CdpScriptControl extends EventEmitter {
 			return;
 		}
 
-		// Find handlers whose pattern matches.
-		const matches: CaptureHandler[] = [];
+		// Find capture (read-only) and mutate handlers whose pattern matches.
+		const captureMatches: CaptureHandler[] = [];
 		for (const [id, opts] of this.fetchPatterns) {
 			if (matchesGlob(event.request.url, opts.urlPattern)) {
 				const h = this.fetchHandlers.get(id);
-				if (h) matches.push(h);
+				if (h) captureMatches.push(h);
+			}
+		}
+		const mutateMatches: ScriptMutator[] = [];
+		for (const [id, opts] of this.mutatePatterns) {
+			if (matchesGlob(event.request.url, opts.urlPattern)) {
+				const m = this.mutateHandlers.get(id);
+				if (m) mutateMatches.push(m);
 			}
 		}
 
-		if (matches.length > 0) {
+		const needBody = captureMatches.length > 0 || mutateMatches.length > 0;
+		let captured: CapturedScript | null = null;
+
+		if (needBody) {
 			try {
 				const body = (await session.send('Fetch.getResponseBody', {
 					requestId: event.requestId,
@@ -470,7 +548,7 @@ export class CdpScriptControl extends EventEmitter {
 					headers[h.name.toLowerCase()] = h.value;
 				}
 
-				const captured: CapturedScript = {
+				captured = {
 					url: event.request.url,
 					method: event.request.method,
 					frameId: event.frameId,
@@ -481,7 +559,7 @@ export class CdpScriptControl extends EventEmitter {
 					base64Encoded: body.base64Encoded,
 				};
 
-				for (const h of matches) {
+				for (const h of captureMatches) {
 					try {
 						await h(captured);
 					} catch {
@@ -493,7 +571,44 @@ export class CdpScriptControl extends EventEmitter {
 			}
 		}
 
-		// Always continue the response unmodified — we do not rewrite bytes.
+		// If any mutator returned a non-null body, fulfill with the new bytes.
+		if (captured && mutateMatches.length > 0) {
+			let mutated: string | null = null;
+			let workingBody = captured.base64Encoded
+				? Buffer.from(captured.body, 'base64').toString('utf8')
+				: captured.body;
+			for (const m of mutateMatches) {
+				try {
+					const next = await m({ ...captured, body: workingBody, base64Encoded: false });
+					if (typeof next === 'string') {
+						mutated = next;
+						workingBody = next;
+					}
+				} catch {
+					/* mutator errors are isolated */
+				}
+			}
+			if (mutated !== null) {
+				const responseHeaders = (event.responseHeaders ?? [])
+					.filter((h) => h.name.toLowerCase() !== 'content-length')
+					.map((h) => ({ name: h.name, value: h.value }));
+				responseHeaders.push({
+					name: 'content-length',
+					value: String(Buffer.byteLength(mutated, 'utf8')),
+				});
+				await session
+					.send('Fetch.fulfillRequest', {
+						requestId: event.requestId,
+						responseCode: event.responseStatusCode ?? 200,
+						responseHeaders,
+						body: Buffer.from(mutated, 'utf8').toString('base64'),
+					})
+					.catch(() => {});
+				return;
+			}
+		}
+
+		// Default path: continue the response unmodified.
 		await session.send('Fetch.continueResponse', { requestId: event.requestId }).catch(() => {});
 	}
 

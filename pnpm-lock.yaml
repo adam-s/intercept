@@ -51,6 +51,9 @@ importers:
       '@interceptor/domain-boardshop':
         specifier: workspace:*
         version: link:../../domains/boardshop
+      '@interceptor/domain-build-nvidia':
+        specifier: workspace:*
+        version: link:../../domains/build-nvidia
       '@interceptor/domain-chatgpt':
         specifier: workspace:*
         version: link:../../domains/chatgpt
@@ -180,6 +183,25 @@ importers:
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
+  domains/build-nvidia:
+    dependencies:
+      '@interceptor/browser':
+        specifier: workspace:*
+        version: link:../../packages/browser
+      '@interceptor/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      zod:
+        specifier: 4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@types/node':
+        specifier: 25.5.0
+        version: 25.5.0
       typescript:
         specifier: 5.9.3
         version: 5.9.3

@@ -418,17 +418,24 @@ export class RemoteBrowserService {
 			'--disable-background-timer-throttling',
 			'--disable-backgrounding-occluded-windows',
 			'--disable-renderer-backgrounding',
-			// Prevents GPU process crash loop in headless/container environments without
-			// GPU hardware. Falls back to Skia CPU rendering (sufficient for screenshots
-			// and CDP screencasting). Harmless on macOS where real GPU is available.
-			'--disable-gpu',
 		];
 
-		// SwiftShader provides software WebGL on Linux/Docker without a real GPU.
-		// On macOS (darwin) the real GPU handles WebGL natively — SwiftShader
-		// conflicts and disables WebGL entirely.
-		if (process.platform === 'linux') {
-			commonArgs.push('--use-gl=swiftshader', '--use-angle=swiftshader-webgl');
+		// GPU handling differs between headed and headless modes:
+		// - Headless / Linux containers: --disable-gpu prevents the GPU process
+		//   crash loop on hosts without GPU hardware. Skia CPU is enough for
+		//   screencast frames.
+		// - Headed on a real machine: we WANT hardware GL — without it, WebGL
+		//   contexts initialise as software fallback (very slow) and the
+		//   visible page feels broken to a human driver. Real Chrome would
+		//   never run with --disable-gpu in interactive use.
+		if (this.config.headless) {
+			commonArgs.push('--disable-gpu');
+			// SwiftShader provides software WebGL on Linux/Docker without a real GPU.
+			// On macOS (darwin) the real GPU handles WebGL natively — SwiftShader
+			// conflicts and disables WebGL entirely.
+			if (process.platform === 'linux') {
+				commonArgs.push('--use-gl=swiftshader', '--use-angle=swiftshader-webgl');
+			}
 		}
 
 		// When using a persistent Chrome user data dir, force the Default profile.
@@ -464,23 +471,32 @@ export class RemoteBrowserService {
 			console.log('[RemoteBrowserService] No proxy configured (direct connection)');
 		}
 
-		// Use real Chrome channel when available — it has window.chrome, proper plugins,
-		// and real WebGL contexts that Patchright's bundled Chromium lacks.
-		// Fall back to bundled Chromium when CHROMIUM_PATH is set (Docker) or Chrome isn't installed.
-		const useChannel = !executablePath ? 'chrome' : undefined;
+		// Use Patchright's bundled (patched) Chromium by default — that is the
+		// whole reason Patchright exists. The bundled binary has anti-detection
+		// patches baked into the binary that no JS-level shim can replicate
+		// (CDP runtime fingerprints, devtools-protocol behaviour, etc.). Using
+		// `channel: 'chrome'` (system Chrome) silently disables all of that.
+		//
+		// Override only when CHROME_PATH or CHROMIUM_PATH is explicitly set
+		// (Docker, custom builds). For everything else: bundled Patchright wins.
 
 		this.context = await chromium.launchPersistentContext(this.userDataDir, {
 			...(executablePath && { executablePath }),
-			...(useChannel && { channel: useChannel }),
 			headless: this.config.headless,
 			viewport: {
 				width: this.config.viewportWidth,
 				height: this.config.viewportHeight,
 			},
 			deviceScaleFactor: 1, // Force 1x scale for consistent streaming
-			userAgent: this.fingerprint.userAgent,
-			locale: 'en-US',
-			timezoneId: 'America/New_York',
+			// In headed mode we want a near-vanilla Chrome experience: skip our
+			// custom UA + locale + timezone overrides so the browser reports
+			// what Patchright's bundled binary natively does. Headless still
+			// gets the full persona because that's what discovery code expects.
+			...(this.config.headless && {
+				userAgent: this.fingerprint.userAgent,
+				locale: 'en-US',
+				timezoneId: 'America/New_York',
+			}),
 			args: commonArgs,
 			// ⚠️  DO NOT REMOVE. --enable-automation sets navigator.webdriver=true and shows
 			// an automation infobar — both are primary bot detection signals. Without this
@@ -509,14 +525,30 @@ export class RemoteBrowserService {
 		// init script via CDP, set sec-ch-ua headers, and register the
 		// tracking-URL blocklist. Must run BEFORE the page navigates so the
 		// init script fires on the first real document load.
-		await this.fingerprint.applyToContext(this.context, this.scriptControl);
+		//
+		// SKIP when running headed: headed mode is for human-driven research
+		// where we want a near-vanilla Chrome experience. Patchright's binary-
+		// level stealth is still active; layering FingerprintController on top
+		// adds 50+ context.route() interceptors and an init script that
+		// changes navigator/screen properties — both of which slow page loads
+		// and confuse research observation. Domain plugins that NEED a persona
+		// in headed mode can call browser.getScriptControl() and apply it
+		// explicitly via their own attach() flow.
+		if (this.config.headless) {
+			await this.fingerprint.applyToContext(this.context, this.scriptControl);
+		}
 
 		// Block static resources — discovery only needs HTML + JS, not images/CSS/fonts.
 		// Saves ~30% memory per browser instance and speeds up page loads.
-		await this.context.route(
-			'**/*.{png,jpg,jpeg,gif,svg,webp,ico,css,woff,woff2,ttf,eot,mp4,webm,ogg,mp3,wav}',
-			(route) => route.abort(),
-		);
+		// SKIP when running headed: a human is going to look at the page, and a
+		// page with no CSS/images/fonts is unusable for visual driving (the
+		// observation harness for hCaptcha behavioural capture, etc.).
+		if (this.config.headless) {
+			await this.context.route(
+				'**/*.{png,jpg,jpeg,gif,svg,webp,ico,css,woff,woff2,ttf,eot,mp4,webm,ogg,mp3,wav}',
+				(route) => route.abort(),
+			);
+		}
 
 		// Enable Ghostery ad/tracker blocking (general ad blocking)
 		if (this.config.enableAdBlocking) {

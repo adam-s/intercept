@@ -29,6 +29,8 @@ prompts/.app-spec.md
 domains/*/
 !domains/boardshop/
 !domains/chatgpt/
+!domains/nvidia-build
+!domains/build-nvidia
 
 # Cached API responses for offline dashboard dev
 tmp/cache/

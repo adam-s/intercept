@@ -11,6 +11,7 @@
 	"dependencies": {
 		"@interceptor/browser": "workspace:*",
 		"@interceptor/domain-boardshop": "workspace:*",
+		"@interceptor/domain-build-nvidia": "workspace:*",
 		"@interceptor/domain-chatgpt": "workspace:*",
 		"@interceptor/shared": "workspace:*",
 		"hono": "^4.12.8",

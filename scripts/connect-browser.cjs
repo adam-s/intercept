@@ -17,8 +17,9 @@ const port = process.argv[2] || '3001';
 const profile = process.argv[3] || 'generic';
 const url = process.argv[4] || '';
 const timeoutSec = parseInt(process.argv[5] || '60', 10);
+const headed = process.argv[6] === 'headed';
 
-const wsUrl = `ws://localhost:${port}/browser/stream?profile=${encodeURIComponent(profile)}${url ? `&url=${encodeURIComponent(url)}` : ''}`;
+const wsUrl = `ws://localhost:${port}/browser/stream?profile=${encodeURIComponent(profile)}${url ? `&url=${encodeURIComponent(url)}` : ''}${headed ? '&headless=false' : ''}`;
 
 let ready = false;
 let ws;
