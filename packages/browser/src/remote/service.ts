@@ -420,21 +420,25 @@ export class RemoteBrowserService {
 			'--disable-renderer-backgrounding',
 		];
 
-		// GPU handling differs between headed and headless modes:
-		// - Headless / Linux containers: --disable-gpu prevents the GPU process
-		//   crash loop on hosts without GPU hardware. Skia CPU is enough for
-		//   screencast frames.
-		// - Headed on a real machine: we WANT hardware GL — without it, WebGL
-		//   contexts initialise as software fallback (very slow) and the
-		//   visible page feels broken to a human driver. Real Chrome would
-		//   never run with --disable-gpu in interactive use.
-		if (this.config.headless) {
-			commonArgs.push('--disable-gpu');
-			// SwiftShader provides software WebGL on Linux/Docker without a real GPU.
-			// On macOS (darwin) the real GPU handles WebGL natively — SwiftShader
-			// conflicts and disables WebGL entirely.
-			if (process.platform === 'linux') {
-				commonArgs.push('--use-gl=swiftshader', '--use-angle=swiftshader-webgl');
+		// GPU handling: real Chrome has real WebGL. Anything we do here that
+		// breaks WebGL (--disable-gpu, software-only) makes hCaptcha
+		// fingerprinting (params 2401-2501 from d4c5d1e0/hcaptcha) flag the
+		// browser as non-real.
+		// - Headed on macOS: bare default → hardware Metal renderer. Best.
+		// - Headless on macOS: --use-angle=metal forces ANGLE/Metal even in
+		//   the headless-shell binary, which keeps WebGL functional and the
+		//   renderer string realistic ("ANGLE (Apple, Apple M1, …)").
+		// - Linux containers: --use-gl=swiftshader provides software WebGL
+		//   without crash; --disable-gpu only as a last resort because it
+		//   eliminates WebGL entirely and is detectable.
+		if (process.platform === 'darwin' && this.config.headless) {
+			commonArgs.push('--use-angle=metal');
+		} else if (process.platform === 'linux') {
+			commonArgs.push('--use-gl=swiftshader', '--use-angle=swiftshader-webgl');
+			if (this.config.headless) {
+				// Linux containers without GPU hardware crash without --disable-gpu;
+				// SwiftShader runs CPU-side regardless.
+				commonArgs.push('--disable-gpu');
 			}
 		}
 
@@ -538,17 +542,14 @@ export class RemoteBrowserService {
 			await this.fingerprint.applyToContext(this.context, this.scriptControl);
 		}
 
-		// Block static resources — discovery only needs HTML + JS, not images/CSS/fonts.
-		// Saves ~30% memory per browser instance and speeds up page loads.
-		// SKIP when running headed: a human is going to look at the page, and a
-		// page with no CSS/images/fonts is unusable for visual driving (the
-		// observation harness for hCaptcha behavioural capture, etc.).
-		if (this.config.headless) {
-			await this.context.route(
-				'**/*.{png,jpg,jpeg,gif,svg,webp,ico,css,woff,woff2,ttf,eot,mp4,webm,ogg,mp3,wav}',
-				(route) => route.abort(),
-			);
-		}
+		// Static-resource blocking removed. The previous "discovery only needs
+		// HTML + JS" optimisation broke headless-driven flows: blocking CSS
+		// destroys the page layout (verified — body grows to 40k+px tall when
+		// CSS is missing because flex/grid collapse), which then breaks
+		// coordinate-based clicks on textareas / buttons. The memory savings
+		// were not worth losing the ability to drive pages headlessly.
+		// Tracking-URL blocking still happens via FingerprintController in
+		// headless mode (sentry, segment, etc.) — that's surgical and safe.
 
 		// Enable Ghostery ad/tracker blocking (general ad blocking)
 		if (this.config.enableAdBlocking) {

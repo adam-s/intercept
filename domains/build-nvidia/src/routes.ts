@@ -28,7 +28,7 @@
  */
 
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
-import type { InitScriptHandle } from '@interceptor/browser/remote';
+import type { InitScriptHandle, RemoteBrowserService } from '@interceptor/browser/remote';
 import { DEBUG, rateLimitedFetch } from '@interceptor/shared';
 import { browserDrivenChat } from './browser-chat';
 import {
@@ -38,6 +38,7 @@ import {
 	pollHCaptchaPostMessages,
 	probeHCaptchaFrame,
 } from './captcha-frame';
+import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { BuildNvidiaInstrument } from './instrument';
 import {
 	attachRuntimeTap,
@@ -51,6 +52,33 @@ import { getBundleCapture, startBundleCapture, stopBundleCapture } from './scrip
 let instrument: BuildNvidiaInstrument | null = null;
 /** Singleton — one active runtime-tap per server. */
 let runtimeTapHandle: InitScriptHandle | null = null;
+/** Persona init script — installed on first browser-driven chat call. The
+ *  script's `__bn_fp_installed` IIFE guard makes re-installs idempotent. */
+let fingerprintHandle: InitScriptHandle | null = null;
+let fingerprintAttachedFor: RemoteBrowserService | null = null;
+
+/**
+ * Install the build-nvidia persona init script on this browser session if
+ * not already done. The persona masks the headless-fingerprint surface
+ * hCaptcha invisible mode reads (~70 properties per d4c5d1e0/hcaptcha).
+ *
+ * The script's `__bn_fp_installed` guard means re-execution in already-
+ * patched realms is a no-op, so it is safe to call this on every chat
+ * request — only the first one does real work.
+ *
+ * Headed mode does not need this — real Chrome already passes hCaptcha —
+ * but we install unconditionally because it costs nothing and helps any
+ * marginal headless-shell bleed-through.
+ */
+async function ensurePersona(browser: RemoteBrowserService): Promise<boolean> {
+	if (fingerprintAttachedFor === browser && fingerprintHandle) return false;
+	const control = browser.getScriptControl();
+	if (!control) return false;
+	fingerprintHandle = await control.registerInitScript(buildBuildNvidiaFingerprintScript());
+	fingerprintAttachedFor = browser;
+	DEBUG('build-nvidia', 'persona init script installed for this browser session');
+	return true;
+}
 
 const NGC_API = 'https://api.ngc.nvidia.com/v2';
 const BUILD_API = 'https://build.nvidia.com/api';
@@ -356,6 +384,19 @@ export const routes: DomainRoute[] = [
 				: (lastUser.content as string);
 
 			DEBUG('build-nvidia', `browser chat: ${body.model} (${message.length} chars)`);
+			// Install the persona before driving the chat. Init scripts only
+			// fire on FUTURE document loads — so if we just registered the
+			// persona for the first time but the page is already on the
+			// target URL, force a reload so the persona's overrides apply
+			// before hCaptcha's bundle reads navigator/screen/WebGL.
+			const personaInstalled = await ensurePersona(browser);
+			if (personaInstalled) {
+				const page = browser.getPage();
+				if (page && page.url().startsWith('https://build.nvidia.com')) {
+					DEBUG('build-nvidia', 'persona freshly installed; reloading page so it takes effect');
+					await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+				}
+			}
 			let result: Awaited<ReturnType<typeof browserDrivenChat>>;
 			try {
 				result = await browserDrivenChat(browser, { model: body.model, message });
