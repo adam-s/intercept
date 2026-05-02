@@ -30,7 +30,12 @@
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
 import type { InitScriptHandle, RemoteBrowserService } from '@interceptor/browser/remote';
 import { DEBUG, rateLimitedFetch } from '@interceptor/shared';
-import { browserDrivenChat } from './browser-chat';
+import {
+	browserDrivenChat,
+	browserDrivenChatCapture,
+	type CapturedPredictPost,
+	captureUnburned,
+} from './browser-chat';
 import {
 	captureHCaptchaPostMessages,
 	mintTokenFromFrame,
@@ -40,6 +45,7 @@ import {
 } from './captcha-frame';
 import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { BuildNvidiaInstrument } from './instrument';
+import { type ReplayOptions, replayPredict } from './replay';
 import {
 	attachRuntimeTap,
 	detachRuntimeTap,
@@ -79,6 +85,10 @@ async function ensurePersona(browser: RemoteBrowserService): Promise<boolean> {
 	DEBUG('build-nvidia', 'persona init script installed for this browser session');
 	return true;
 }
+
+/** E1 experiment state: the most recent predict POST captured by
+ *  /debug/capture-predict, available for replay via /debug/replay-predict. */
+let lastCapturedPredict: CapturedPredictPost | null = null;
 
 const NGC_API = 'https://api.ngc.nvidia.com/v2';
 const BUILD_API = 'https://build.nvidia.com/api';
@@ -635,6 +645,120 @@ export const routes: DomainRoute[] = [
 			const drain = await drainRuntimeTap(page);
 			const summary = computeRuntimeTapSummary(drain.frames);
 			return c.json({ ok: true, ...drain, summary });
+		},
+	},
+
+	// ─── DEBUG: E1 — capture predict POST + Bun-side replay ─────────
+	// Drives a real chat in the browser, records the predict POST as
+	// Patchright sees it (URL/headers/body/cookies), then enables a
+	// Bun-fetch replay test to determine: is the nv-captcha-token
+	// reusable? bound to cookies? bound to TLS fingerprint?
+	{
+		method: 'POST',
+		path: '/debug/capture-predict',
+		description:
+			'Drive a chat and capture the predict POST (URL, headers, body, cookies) for E1 token-replay testing. Body: {"model":"openai/gpt-oss-20b","message":"hello"}. Persists in memory; subsequent /debug/replay-predict replays the captured tuple.',
+		handler: async (c, browser) => {
+			const body = await c.req
+				.json<{ model?: string; message?: string }>()
+				.catch(() => ({}) as { model?: string; message?: string });
+			const model = body.model ?? 'openai/gpt-oss-20b';
+			const message = body.message ?? `What is 2+2? Answer in one word.`;
+			await ensurePersona(browser);
+			try {
+				const result = await browserDrivenChatCapture(browser, { model, message });
+				lastCapturedPredict = result.capture;
+				return c.json({
+					ok: true,
+					chat: { status: result.chat.status, body: result.chat.body },
+					capture: {
+						url: result.capture.url,
+						method: result.capture.method,
+						headerCount: Object.keys(result.capture.headers).length,
+						headerKeys: Object.keys(result.capture.headers),
+						postDataLen: result.capture.postData?.length ?? 0,
+						cookieCount: result.capture.cookies.length,
+						cookieNames: result.capture.cookies.map((ck) => ck.name),
+						pageUrl: result.capture.pageUrl,
+						capturedAt: result.capture.capturedAt,
+						ageMs: Date.now() - result.capture.capturedAt,
+					},
+				});
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ ok: false, error: msg }, 502);
+			}
+		},
+	},
+
+	{
+		method: 'POST',
+		path: '/debug/capture-unburned',
+		description:
+			'E2/E3: capture a fresh, UN-BURNED predict POST. Drives the captcha mint as normal, but uses page.route to abort the browser\'s outgoing POST before it reaches the server. The captured nv-captcha-token is unused. Body: {"model":"openai/gpt-oss-20b","message":"hello"}.',
+		handler: async (c, browser) => {
+			const body = await c.req
+				.json<{ model?: string; message?: string }>()
+				.catch(() => ({}) as { model?: string; message?: string });
+			const model = body.model ?? 'openai/gpt-oss-20b';
+			const message = body.message ?? `What is 2+2? Answer in one word.`;
+			await ensurePersona(browser);
+			try {
+				const cap = await captureUnburned(browser, { model, message });
+				lastCapturedPredict = cap;
+				return c.json({
+					ok: true,
+					capture: {
+						url: cap.url,
+						method: cap.method,
+						headerCount: Object.keys(cap.headers).length,
+						headerKeys: Object.keys(cap.headers),
+						postDataLen: cap.postData?.length ?? 0,
+						cookieCount: cap.cookies.length,
+						capturedAt: cap.capturedAt,
+					},
+					hint: 'Token is fresh. Use POST /debug/replay-predict to test it from Bun.',
+				});
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ ok: false, error: msg }, 502);
+			}
+		},
+	},
+
+	{
+		method: 'GET',
+		path: '/debug/last-predict',
+		description:
+			'Inspect the most recently captured predict POST (from /debug/capture-predict). Returns full headers + body for inspection. The nv-captcha-token is in the headers map.',
+		handler: async (c) => {
+			if (!lastCapturedPredict) return c.json({ ok: false, error: 'No capture yet' }, 412);
+			return c.json({
+				ok: true,
+				ageMs: Date.now() - lastCapturedPredict.capturedAt,
+				capture: lastCapturedPredict,
+			});
+		},
+	},
+
+	{
+		method: 'POST',
+		path: '/debug/replay-predict',
+		description:
+			'Replay the most recently captured predict POST from Bun fetch. Body (all optional): {"skipCookies":bool, "headerDenylist":["nv-captcha-token","cookie",...], "headerOverrides":{...}, "body":"...", "timeoutMs":60000}. Returns status, response headers, body, and duration. Never throws — errors land in `error` field.',
+		handler: async (c) => {
+			if (!lastCapturedPredict) return c.json({ ok: false, error: 'No capture yet' }, 412);
+			const opts = await c.req.json<ReplayOptions>().catch(() => ({}) as ReplayOptions);
+			const result = await replayPredict(lastCapturedPredict, opts);
+			return c.json({
+				ok: result.status >= 200 && result.status < 300,
+				ageMsAtReplay: Date.now() - lastCapturedPredict.capturedAt,
+				...result,
+				bodyText:
+					result.bodyText.length > 4000
+						? `${result.bodyText.slice(0, 4000)}…[${result.bodyText.length} bytes total]`
+						: result.bodyText,
+			});
 		},
 	},
 ];

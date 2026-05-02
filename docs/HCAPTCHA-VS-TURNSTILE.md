@@ -676,6 +676,75 @@ Three concrete next moves implied by these findings:
 
 ---
 
+## Live findings — 2026-05-02 evening (E1 + E2)
+
+Targeted experiments to answer "can we run NVIDIA chat completions from pure
+Bun fetch with one-time browser warm-up?"
+
+### Setup
+
+- New helpers in [`domains/build-nvidia/src/browser-chat.ts`](../domains/build-nvidia/src/browser-chat.ts):
+  - `browserDrivenChatCapture` — drives a chat AND records the predict POST tuple via `page.on('request')`. Used by E1.
+  - `captureUnburned` — pre-arms `page.route(predict-url, abort)` so the browser's outgoing POST is aborted at the protocol layer BEFORE leaving the box. Captcha minting still runs (it precedes the POST), so we get the request tuple with a FRESH token that the server has never seen. Used by E2.
+- New file [`domains/build-nvidia/src/replay.ts`](../domains/build-nvidia/src/replay.ts) — Bun `fetch()` replay with header allowlist/denylist/overrides + cookie skip, for elimination tests.
+- Three debug routes in [`domains/build-nvidia/src/routes.ts`](../domains/build-nvidia/src/routes.ts):
+  - `POST /api/build-nvidia/debug/capture-predict` — drive chat, capture tuple (token gets burned by the chat itself).
+  - `POST /api/build-nvidia/debug/capture-unburned` — drive captcha mint, abort POST, capture tuple with fresh token.
+  - `GET  /api/build-nvidia/debug/last-predict` — inspect captured tuple.
+  - `POST /api/build-nvidia/debug/replay-predict` — replay last capture from Bun with header tweaks.
+
+### E1 results (token-burned replay)
+
+| Test | Headers/body | Status | Server msg |
+|---|---|---|---|
+| Replay captured tuple as-is, immediately | Full headers + cookies | **400** | `"Token is invalid"` |
+| Re-replay 2× more back-to-back | Same | 400 / 400 | `"Token is invalid"` |
+| Strip `nv-captcha-token` | Drop captcha header | 400 | `"Captcha required"` |
+| Strip cookies + Origin + Referer | Token kept | 400 | `"Token is invalid"` |
+
+**Conclusion**: Tokens are **single-use**, server-side validated. Once any client (browser OR Bun) consumes a token, it's "invalid" forever. `nv-captcha-token` is the load-bearing field: without it the server returns the *different* error `"Captcha required"`.
+
+### E2 results (un-burned token replay — the breakthrough)
+
+Captured a fresh token via `captureUnburned` (browser mints, Bun's fetch never sees it) and replayed from Bun.
+
+| Test | Stripped | Status | Conclusion |
+|---|---|---|---|
+| Full replay | nothing | **200 ✓** | Browser-minted token works from Bun |
+| Different prompt body | swap entire `messages` | **200 ✓** | **Token is NOT body-bound** — works for any chat content within TTL |
+| Re-replay same token | same call again | 400 | Single-use confirmed |
+| Strip all 40 cookies | `skipCookies: true` | **200 ✓** | Cookies NOT required |
+| Strip Origin + Referer | `headerDenylist` | **200 ✓** | CORS headers NOT required |
+| Strip User-Agent | `headerDenylist` | **200 ✓** | UA NOT required |
+| Strip all `sec-ch-ua-*` | `headerDenylist` | **200 ✓** | Client hints NOT required |
+| Allowlist `[token, function-id, content-type, accept]` | drop everything else | **200 ✓** | Subset of these 4 is the minimum |
+| Allowlist `[token, function-id, content-type]` | drop accept too | **200 ✓** | accept implied; stripped works |
+| Allowlist `[token, function-id]` | drop content-type | 415 | content-type required (Bun defaults to text/plain) |
+
+**Minimum required surface for a NVIDIA chat completion POST**:
+- `nv-captcha-token: P1_<JWT>` — fresh, single-use, browser-minted
+- `nv-function-id: <uuid>` — per-model, public, from `/v2/endpoints/<org>/<model>/spec`
+- `content-type: application/json`
+- Body: standard OpenAI chat completion JSON (model, messages, stream, …)
+
+**Token is NOT bound to**: body content, cookies, Origin, Referer, User-Agent, sec-ch-ua-*, TLS fingerprint (Bun's BoringSSL TLS differs from Chrome's and still works).
+
+### Architectural implications
+
+The path to truly browserless chat is now clear:
+
+1. **One-time per server lifetime**: Open one warmed browser session.
+2. **Per chat completion**: Capture one un-burned token from that session (`captureUnburned`), then send the actual chat from Bun fetch with just 3 headers. No browser per-chat in the data path.
+3. **Throughput is bounded by token-mint rate** in the browser, not by request transport. The next experiment (E3) tests how many tokens we can mint per second from one warmed page — if it's > 1 token/sec, we're shipping.
+
+### Next experiments
+
+- **E3** (token pooling): mint N tokens in a tight loop from one page; measure tokens/sec.
+- **E4** (multi-page parallelism): N pages × token-mint loop; measure scaling.
+- **E5** (bundle in jsdom): only worth pursuing if E3/E4 mint rate is too slow OR if the long-term goal is to eliminate the browser entirely.
+
+---
+
 ## Reading order if you're new to this
 
 1. Read [`domains/chatgpt/TURNSTILE.md`](../domains/chatgpt/TURNSTILE.md)

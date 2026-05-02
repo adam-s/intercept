@@ -45,6 +45,188 @@ export interface BrowserChatResult {
 	body: string;
 }
 
+/**
+ * The full snapshot of a successful chat completion POST as Patchright
+ * observed it: enough to replay the request from Bun fetch later. Used by
+ * the E1 token-replay experiments — see /chat/completions/browser/capture.
+ */
+export interface CapturedPredictPost {
+	url: string;
+	method: string;
+	headers: Record<string, string>;
+	postData: string | null;
+	cookies: Array<{ name: string; value: string; domain?: string; path?: string }>;
+	pageUrl: string;
+	capturedAt: number;
+}
+
+/**
+ * Drive a chat WITHOUT letting the browser actually consume the captcha
+ * token. Used by E2/E3: we want a real captured tuple (URL, headers, body
+ * including a fresh `nv-captcha-token`) but with the token UN-BURNED so we
+ * can replay it from Bun fetch as a true browserless test.
+ *
+ * Flow:
+ *   1. Pre-arm `page.route(predict-url, abort)` so the browser's outgoing
+ *      POST gets aborted at the protocol layer BEFORE it leaves the box.
+ *   2. Pre-arm `page.on('request')` to record the request tuple at the
+ *      moment Patchright sees it (which is BEFORE the route abort).
+ *   3. Drive the UI to click Send. The captcha minting still runs (browser
+ *      doesn't know its POST will be aborted). React's Send handler builds
+ *      the request, our request listener records it, the route aborts it.
+ *   4. Browser shows an error in the chat UI (expected — we cancelled).
+ *   5. Return the captured tuple. The token is fresh and unused.
+ *
+ * Throws if no predict POST was attempted (mint failed or never fired).
+ */
+export async function captureUnburned(
+	browser: RemoteBrowserService,
+	opts: BrowserChatOptions,
+): Promise<CapturedPredictPost> {
+	const page = browser.getPage();
+	if (!page) throw new Error('Browser not connected');
+
+	const bareModel = opts.model.includes('/')
+		? (opts.model.split('/').pop() ?? opts.model)
+		: opts.model;
+	const targetPath = `${NGC_PREDICT_PREFIX}${bareModel}`;
+	// Patchright route patterns use glob — match the exact URL we'll send to.
+	const routePattern = `**${targetPath}`;
+
+	const captureBox: { value: CapturedPredictPost | null } = { value: null };
+
+	const onRequest = (req: import('patchright').Request) => {
+		try {
+			if (captureBox.value) return;
+			const url = req.url();
+			if (!url.includes(NGC_HOST) || !url.includes(targetPath)) return;
+			if (req.method() !== 'POST') return;
+			captureBox.value = {
+				url,
+				method: req.method(),
+				headers: req.headers(),
+				postData: req.postData(),
+				cookies: [],
+				pageUrl: page.url(),
+				capturedAt: Date.now(),
+			};
+		} catch {
+			/* best-effort */
+		}
+	};
+
+	// Pre-arm the abort route. `page.route` runs BEFORE the request leaves the
+	// network stack — even for OOPIF-originated requests Patchright catches them.
+	await page.route(routePattern, async (route) => {
+		try {
+			await route.abort('blockedbyclient');
+		} catch {
+			/* route may have already been handled */
+		}
+	});
+	page.on('request', onRequest);
+
+	try {
+		// Drive the UI. browserDrivenChat will try to wait for a response that
+		// will never come (we aborted) — it'll throw on timeout. That's expected.
+		// We use a short inner timeout so we don't wait the full 180s.
+		await browserDrivenChat(browser, { ...opts, timeoutMs: 15_000 }).catch(() => {});
+	} finally {
+		page.off('request', onRequest);
+		await page.unroute(routePattern).catch(() => {});
+	}
+
+	const cap = captureBox.value;
+	if (!cap) {
+		throw new Error('No predict POST attempted — captcha mint failed or never fired');
+	}
+	try {
+		const ctx = page.context();
+		const cookies = await ctx.cookies();
+		cap.cookies = cookies.map((c) => ({
+			name: c.name,
+			value: c.value,
+			domain: c.domain,
+			path: c.path,
+		}));
+	} catch {
+		/* leave empty */
+	}
+	return cap;
+}
+
+/**
+ * Drive a chat AND capture the predict POST request as Patchright sees it
+ * just before the page sends it. Used by the E1 token-replay experiments.
+ *
+ * The chat itself still runs end-to-end (we want a real, valid token from a
+ * real successful mint); the capture is purely additive — `page.on('request')`
+ * fires on every outgoing request including OOPIF-originated ones, which is
+ * how we see the predict POST that `setupNetworkCapture` (parent-page CDP)
+ * misses.
+ */
+export async function browserDrivenChatCapture(
+	browser: RemoteBrowserService,
+	opts: BrowserChatOptions,
+): Promise<{ chat: BrowserChatResult; capture: CapturedPredictPost }> {
+	const page = browser.getPage();
+	if (!page) throw new Error('Browser not connected');
+
+	const bareModel = opts.model.includes('/')
+		? (opts.model.split('/').pop() ?? opts.model)
+		: opts.model;
+	const targetPath = `${NGC_PREDICT_PREFIX}${bareModel}`;
+
+	const captureBox: { value: CapturedPredictPost | null } = { value: null };
+	const onRequest = (req: import('patchright').Request) => {
+		try {
+			if (captureBox.value) return; // first match wins
+			const url = req.url();
+			if (!url.includes(NGC_HOST) || !url.includes(targetPath)) return;
+			if (req.method() !== 'POST') return;
+			captureBox.value = {
+				url,
+				method: req.method(),
+				headers: req.headers(),
+				postData: req.postData(),
+				cookies: [], // filled in below from context
+				pageUrl: page.url(),
+				capturedAt: Date.now(),
+			};
+		} catch {
+			// best-effort; don't break the chat
+		}
+	};
+	page.on('request', onRequest);
+
+	let chat: BrowserChatResult;
+	try {
+		chat = await browserDrivenChat(browser, opts);
+	} finally {
+		page.off('request', onRequest);
+	}
+
+	const cap = captureBox.value;
+	if (!cap) {
+		throw new Error('Did not see a predict POST during chat — request listener missed it');
+	}
+	// Harvest cookies — playwright/patchright exposes them on the context.
+	try {
+		const ctx = page.context();
+		const cookies = await ctx.cookies();
+		cap.cookies = cookies.map((c) => ({
+			name: c.name,
+			value: c.value,
+			domain: c.domain,
+			path: c.path,
+		}));
+	} catch {
+		/* leave empty */
+	}
+
+	return { chat, capture: cap };
+}
+
 export async function browserDrivenChat(
 	browser: RemoteBrowserService,
 	opts: BrowserChatOptions,
