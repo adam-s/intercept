@@ -41,6 +41,38 @@ import type { ChatGPTInterceptorMode, FingerprintProfile } from './types';
 const CHATGPT_BASE = 'https://chatgpt.com';
 const CHROME_UA =
 	'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
+// These need to track chatgpt.com's deployed build. If they go stale enough,
+// chatgpt's anti-abuse layer flags the requests as "Unusual activity". Refresh
+// from a real browser session: open chatgpt.com, watch a /conversation/prepare
+// request in DevTools → copy `oai-client-version` and `oai-client-build-number`.
+const CLIENT_VERSION = 'prod-4987068829830ddc3ae6683bd4e633f61b79dec9';
+const CLIENT_BUILD_NUMBER = '6325146';
+
+/**
+ * Per-page mutex so two `sentinelGatedConversation` calls on the same
+ * browser page never overlap. chatgpt's anti-abuse layer flags two
+ * prepare/conversation pairs from the same `oai-did` within milliseconds
+ * as "Unusual activity"; the UI can't submit two messages at once, so
+ * we mirror that constraint. Distribution across profiles still
+ * happens via `BrowserPool.pick()`'s round-robin upstream.
+ */
+const conversationTails = new WeakMap<object, Promise<unknown>>();
+
+/**
+ * Pre-mint hook for the rate-limit-gate bisection (see
+ * docs/HANDOFF-RATE-LIMIT-INVESTIGATION.md).
+ *
+ * If non-empty, this JS string is `page.evaluate`'d immediately before
+ * `SentinelSDK.token('next')` runs. Lets the bisection harness inject
+ * behavioral signals (set `window.__oai_so_*`, dispatch synthetic events,
+ * etc.) per call without forking `runSubmit`. Set via
+ * `POST /experiments/set-pre-mint-script` and cleared by sending an
+ * empty body.
+ *
+ * Lives at module scope (one value per server process) — the bisection
+ * runs one variant at a time, so this is sufficient.
+ */
+let preMintScript = '';
 
 /**
  * Hybrid Priority-1 conversation submitter.
@@ -70,6 +102,8 @@ export async function sentinelGatedConversation(
 		parentMessageId?: string;
 		flow?: string;
 		messageId?: string;
+		/** Forwarded to the upstream `system_hints` field. ['search'] forces web search. */
+		systemHints?: string[];
 	} = {},
 ): Promise<{ status: number; contentType: string | null; body: string }> {
 	const page = browser.getPage();
@@ -78,7 +112,54 @@ export async function sentinelGatedConversation(
 		throw new Error(`Browser not on chatgpt.com (currently: ${page.url()})`);
 	}
 
-	// 1. Mint tokens. SDK loads on first call; subsequent calls reuse the
+	// Serialize concurrent calls on the same page. Concurrent submits from one
+	// `oai-did` look like burst abuse and trip the per-device 403; the UI
+	// itself disables the composer between turns, so we mirror that here.
+	const prev = conversationTails.get(page) ?? Promise.resolve();
+	let resolveTail!: () => void;
+	const next = new Promise<void>((res) => {
+		resolveTail = res;
+	});
+	conversationTails.set(
+		page,
+		prev.then(() => next),
+	);
+	await prev;
+	try {
+		return await runSubmit(browser, page, message, opts);
+	} finally {
+		resolveTail();
+	}
+}
+
+async function runSubmit(
+	browser: RemoteBrowserService,
+	page: NonNullable<ReturnType<RemoteBrowserService['getPage']>>,
+	message: string,
+	opts: {
+		model?: string;
+		parentMessageId?: string;
+		flow?: string;
+		messageId?: string;
+		systemHints?: string[];
+	},
+): Promise<{ status: number; contentType: string | null; body: string }> {
+	// 1. Pre-mint hook (bisection harness injection point). Runs before the
+	//    token mint so it can mutate `window.__oai_so_*` or dispatch synthetic
+	//    DOM events whose values get folded into the proof token. Empty by
+	//    default.
+	if (preMintScript) {
+		try {
+			await page.evaluate(preMintScript);
+		} catch (err) {
+			console.warn(
+				'[sentinel] preMintScript threw:',
+				err instanceof Error ? err.message : String(err),
+			);
+		}
+	}
+
+	// 2. Mint tokens. SDK loads on first call; subsequent calls reuse the
 	//    in-page module. Tokens come back as JSON {p, t, c, id, flow}.
 	const tokenJson = await page.evaluate(`(async () => {
 		if (!window.SentinelSDK) {
@@ -108,14 +189,97 @@ export async function sentinelGatedConversation(
 		throw new Error(`SentinelSDK.token missing fields: ${JSON.stringify(Object.keys(tokens))}`);
 	}
 
-	// 2. Harvest cookies + device id.
+	// 3. Harvest cookies + device id.
 	const cookies = (await page.evaluate(() => document.cookie)) as string;
 	const did = (cookies.match(/oai-did=([a-f0-9-]+)/) ?? [])[1] ?? tokens.id ?? '';
 
-	// 3. Build conversation body.
+	// 4. Per-turn identifiers — turn_trace_id and session_id are SHARED between
+	//    /conversation/prepare and /conversation. The chatgpt UI does this and
+	//    skipping prepare flags the request as anti-abuse.
 	const messageId = opts.messageId ?? crypto.randomUUID();
 	const turnTraceId = crypto.randomUUID();
 	const sessionId = crypto.randomUUID();
+
+	// Common headers that appear on both /prepare and /conversation. Match the
+	// UI as closely as possible — header order is preserved by Bun fetch.
+	const baseHeaders: Record<string, string> = {
+		'user-agent': CHROME_UA,
+		cookie: cookies,
+		'content-type': 'application/json',
+		'accept-language': 'en-US',
+		origin: 'https://chatgpt.com',
+		referer: 'https://chatgpt.com/',
+		'sec-ch-ua': '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+		'sec-ch-ua-mobile': '?0',
+		'sec-ch-ua-platform': '"macOS"',
+		'sec-fetch-mode': 'cors',
+		'sec-fetch-dest': 'empty',
+		'sec-fetch-site': 'same-origin',
+		'oai-language': 'en-US',
+		'oai-device-id': did,
+		'oai-client-version': CLIENT_VERSION,
+		'oai-client-build-number': CLIENT_BUILD_NUMBER,
+		'oai-session-id': sessionId,
+		'x-oai-turn-trace-id': turnTraceId,
+	};
+
+	// 5. POST /conversation/prepare. The body mirrors what the React app
+	//    sends on each keystroke — a `partial_query` that represents the
+	//    in-flight draft. Response: `{"status":"ok","conduit_token":"<JWT,
+	//    60s TTL>"}`. The token is required on the subsequent
+	//    /conversation request; without it chatgpt returns "Unusual
+	//    activity" 403s and eventually the IP-wide "messages per hour" 429s.
+	const prepareBody = {
+		action: 'next',
+		fork_from_shared_post: false,
+		parent_message_id: opts.parentMessageId ?? 'client-created-root',
+		model: opts.model ?? 'auto',
+		client_prepare_state: 'none',
+		timezone_offset_min: 240,
+		timezone: 'America/New_York',
+		conversation_mode: { kind: 'primary_assistant' },
+		system_hints: opts.systemHints ?? [],
+		partial_query: {
+			id: messageId,
+			author: { role: 'user' },
+			content: { content_type: 'text', parts: [message] },
+		},
+		supports_buffering: true,
+		supported_encodings: ['v1'],
+		client_contextual_info: { app_name: 'chatgpt.com' },
+	};
+	// Fire /prepare twice with a typing-dwell delay between, mimicking the
+	// React app's per-keystroke prepares. A single bare /prepare → /conversation
+	// pair fires too tight to look human and trips the per-device 403 on cold
+	// profiles. The conduit_token from the LAST /prepare is what we send to
+	// /conversation (each /prepare returns a fresh token chained off the prior).
+	let conduitToken = 'no-token';
+	for (let i = 0; i < 2; i++) {
+		if (i > 0) await new Promise((r) => setTimeout(r, 250 + Math.random() * 200));
+		const prepareResp = await fetch(`${CHATGPT_BASE}/backend-anon/f/conversation/prepare`, {
+			method: 'POST',
+			headers: {
+				...baseHeaders,
+				'x-openai-target-path': '/backend-anon/f/conversation/prepare',
+				'x-openai-target-route': '/backend-anon/f/conversation/prepare',
+				'x-conduit-token': conduitToken,
+			},
+			body: JSON.stringify(prepareBody),
+		});
+		if (prepareResp.ok) {
+			try {
+				const prepareJson = (await prepareResp.json()) as { conduit_token?: string };
+				if (typeof prepareJson.conduit_token === 'string') {
+					conduitToken = prepareJson.conduit_token;
+				}
+			} catch {
+				/* if prepare body isn't JSON, fall through with whatever token we have */
+			}
+		}
+	}
+
+	// 6. Build conversation body. `client_prepare_state` is 'success' to match
+	//    what the UI sends after a successful /prepare round-trip.
 	const reqBody = {
 		action: 'next',
 		messages: [
@@ -133,22 +297,22 @@ export async function sentinelGatedConversation(
 		],
 		parent_message_id: opts.parentMessageId ?? 'client-created-root',
 		model: opts.model ?? 'auto',
-		client_prepare_state: 'sent',
+		client_prepare_state: 'success',
 		timezone_offset_min: 240,
 		timezone: 'America/New_York',
 		conversation_mode: { kind: 'primary_assistant' },
 		enable_message_followups: true,
-		system_hints: [],
+		system_hints: opts.systemHints ?? [],
 		supports_buffering: true,
 		supported_encodings: ['v1'],
 		client_contextual_info: {
 			is_dark_mode: false,
-			time_since_loaded: 5000,
-			page_height: 576,
-			page_width: 1024,
+			time_since_loaded: 15,
+			page_height: 800,
+			page_width: 1280,
 			pixel_ratio: 1,
-			screen_height: 576,
-			screen_width: 1024,
+			screen_height: 800,
+			screen_width: 1280,
 			app_name: 'chatgpt.com',
 		},
 		no_auth_ad_preferences: {
@@ -160,35 +324,18 @@ export async function sentinelGatedConversation(
 		force_parallel_switch: 'auto',
 	};
 
-	// 4. Bun fetch with the freshly-minted tokens. We send the same TLS+HTTP/2
-	//    fingerprint Bun's BoringSSL produces — Cloudflare passes, and the
-	//    server-side device-bind is consistent because we're using the live
-	//    browser's own cookies.
+	// 7. POST /conversation with the freshly-minted Sentinel tokens + the
+	//    conduit_token from /prepare.
 	const r = await fetch(`${CHATGPT_BASE}/backend-anon/f/conversation`, {
 		method: 'POST',
 		headers: {
-			'user-agent': CHROME_UA,
-			cookie: cookies,
-			'content-type': 'application/json',
+			...baseHeaders,
 			accept: 'text/event-stream',
-			origin: 'https://chatgpt.com',
-			referer: 'https://chatgpt.com/',
-			'sec-ch-ua': '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
-			'sec-ch-ua-mobile': '?0',
-			'sec-ch-ua-platform': '"macOS"',
-			'sec-fetch-mode': 'cors',
-			'sec-fetch-dest': 'empty',
-			'sec-fetch-site': 'same-origin',
-			'oai-language': 'en-US',
-			'oai-device-id': did,
-			'oai-client-version': 'prod-e72ce87e983a564c22178e7872785a3f094cfdff',
-			'oai-client-build-number': '6311184',
-			'oai-session-id': sessionId,
 			'x-openai-target-path': '/backend-api/f/conversation',
 			'x-openai-target-route': '/backend-api/f/conversation',
-			'oai-echo-logs': '0,42000',
+			'oai-echo-logs': '0,1536',
 			'oai-telemetry': '[1,null]',
-			'x-oai-turn-trace-id': turnTraceId,
+			'x-conduit-token': conduitToken,
 			'openai-sentinel-chat-requirements-token': tokens.c,
 			'openai-sentinel-proof-token': tokens.p,
 			'openai-sentinel-turnstile-token': tokens.t,
@@ -565,6 +712,106 @@ function experimentRoutes(): DomainRoute[] {
 					return { cleared: n };
 				})()`);
 				return c.json({ ok: true, ...(result ?? { cleared: 0 }) });
+			},
+		},
+
+		{
+			method: 'POST',
+			path: '/experiments/set-pre-mint-script',
+			description:
+				'EXPERIMENTAL (rate-limit-gate bisection): set or clear the JS string ' +
+				'page.evaluate-d immediately before SentinelSDK.token mints. ' +
+				'Body: { script: string }. Empty string clears the hook. Used by ' +
+				'experiments/bisect-harness.ts to inject behavioral mutations (V4/V5/V6).',
+			browserRequired: false,
+			handler: async (c) => {
+				let body: { script?: string };
+				try {
+					body = await c.req.json();
+				} catch {
+					return c.json({ error: 'Body must be JSON: { script: string }' }, 400);
+				}
+				preMintScript = typeof body.script === 'string' ? body.script : '';
+				return c.json({ ok: true, length: preMintScript.length });
+			},
+		},
+
+		{
+			method: 'GET',
+			path: '/experiments/get-pre-mint-script',
+			description: 'EXPERIMENTAL: read the current pre-mint hook (length + preview).',
+			browserRequired: false,
+			handler: async (c) => {
+				return c.json({
+					length: preMintScript.length,
+					preview: preMintScript.slice(0, 200),
+				});
+			},
+		},
+
+		{
+			method: 'POST',
+			path: '/experiments/keyboard-burst',
+			description:
+				'EXPERIMENTAL (rate-limit-gate bisection): fire a burst of trusted ' +
+				'keyboard + mouse events into the active chatgpt page using ' +
+				'`page.keyboard.type` and `page.mouse.move`. This generates ' +
+				"`isTrusted: true` events that should drive the Sentinel SDK's " +
+				'behavioral counters. Body: { chars?: number, includeMouse?: boolean }.',
+			handler: async (c, browser) => {
+				const page = browser.getPage();
+				if (!page) return c.json({ error: 'Browser not connected.' }, 503);
+				let body: { chars?: number; includeMouse?: boolean };
+				try {
+					body = (await c.req.json().catch(() => ({}))) as typeof body;
+				} catch {
+					body = {};
+				}
+				const chars = Math.max(1, Math.min(40, body.chars ?? 8));
+				const includeMouse = body.includeMouse !== false;
+
+				// Move mouse a bit (no specific target — just generate movement events).
+				if (includeMouse) {
+					try {
+						const startX = 200 + Math.floor(Math.random() * 600);
+						const startY = 200 + Math.floor(Math.random() * 400);
+						await page.mouse.move(startX, startY);
+						for (let i = 0; i < 4; i++) {
+							const dx = startX + Math.floor((Math.random() - 0.5) * 200);
+							const dy = startY + Math.floor((Math.random() - 0.5) * 200);
+							await page.mouse.move(dx, dy, { steps: 4 });
+						}
+					} catch {}
+				}
+
+				// Type into a hidden offscreen contentEditable so we don't trigger the
+				// React composer's /prepare path. We blur it after.
+				try {
+					await page.evaluate(() => {
+						const id = '__bisect_typing_target';
+						let el = document.getElementById(id) as HTMLElement | null;
+						if (!el) {
+							el = document.createElement('div');
+							el.id = id;
+							el.contentEditable = 'true';
+							el.style.cssText =
+								'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0';
+							document.body.appendChild(el);
+						}
+						el.focus();
+					});
+					const sample = 'abcdefghijklmnopqrstuvwxyz';
+					let s = '';
+					for (let i = 0; i < chars; i++) s += sample[Math.floor(Math.random() * sample.length)];
+					await page.keyboard.type(s, { delay: 40 + Math.floor(Math.random() * 80) });
+					await page.evaluate(() => {
+						const el = document.getElementById('__bisect_typing_target');
+						if (el && el instanceof HTMLElement) el.blur();
+					});
+				} catch (err) {
+					return c.json({ ok: false, error: (err as Error).message }, 500);
+				}
+				return c.json({ ok: true, chars, includeMouse });
 			},
 		},
 	];

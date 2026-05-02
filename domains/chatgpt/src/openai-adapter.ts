@@ -49,6 +49,18 @@ interface OAIChatRequest {
 	stream?: boolean;
 	temperature?: number;
 	max_tokens?: number;
+	/**
+	 * Non-standard pass-through (mirrors the OpenAI SDK's `extra_body`).
+	 * `search: true` forces ChatGPT's web-search tool by sending
+	 * `system_hints: ["search"]` upstream. Citations come back appended
+	 * to the assistant text and on the non-streaming `citations` field.
+	 */
+	extra_body?: { search?: boolean };
+}
+
+interface Citation {
+	title: string;
+	url: string;
 }
 
 // ─── ChatGPT SSE event shape ───────────────────────────────────────────────
@@ -82,7 +94,7 @@ interface ChatGPTSSEEvent {
  * We support both. For v1 we walk the patches and emit the final
  * `message.content.parts.join('')`.
  */
-function extractFinalText(rawSSE: string): string {
+function extractFinalText(rawSSE: string): { text: string; citations: Citation[] } {
 	const lines = rawSSE.split('\n');
 
 	// Detect encoding
@@ -96,7 +108,7 @@ function extractFinalText(rawSSE: string): string {
 	}
 
 	if (!isV1) {
-		// Legacy parser
+		// Legacy parser — no patch state, so no citations.
 		let lastText = '';
 		for (const line of lines) {
 			if (!line.startsWith('data: ')) continue;
@@ -115,7 +127,7 @@ function extractFinalText(rawSSE: string): string {
 				/* skip malformed events */
 			}
 		}
-		return lastText;
+		return { text: lastText, citations: [] };
 	}
 
 	// v1 delta-patch parser. Walk each `data:` payload, apply the patch
@@ -174,7 +186,53 @@ function extractFinalText(rawSSE: string): string {
 			if (text) lastAssistantText = text;
 		}
 	}
-	return lastAssistantText;
+	return { text: lastAssistantText, citations: collectCitations(docState) };
+}
+
+/**
+ * Walk a docState and pull every {title, url} pair we can find under
+ * `message.metadata.search_result_groups`. The shape varies — sometimes
+ * each group has `entries`, sometimes `items`; sometimes the leaf is
+ * `{ url, title }`, sometimes nested inside `{ ref: {...} }`. Be lenient.
+ */
+function collectCitations(doc: Record<string, unknown>): Citation[] {
+	const groups = (doc as { message?: { metadata?: { search_result_groups?: unknown } } }).message
+		?.metadata?.search_result_groups;
+	if (!Array.isArray(groups)) return [];
+
+	const out: Citation[] = [];
+	const seen = new Set<string>();
+	const visit = (node: unknown) => {
+		if (!node || typeof node !== 'object') return;
+		if (Array.isArray(node)) {
+			for (const item of node) visit(item);
+			return;
+		}
+		const obj = node as Record<string, unknown>;
+		const url = typeof obj.url === 'string' ? obj.url : undefined;
+		const title =
+			typeof obj.title === 'string'
+				? obj.title
+				: typeof obj.name === 'string'
+					? obj.name
+					: undefined;
+		if (url && !seen.has(url)) {
+			seen.add(url);
+			out.push({ title: title ?? url, url });
+		}
+		for (const v of Object.values(obj)) {
+			if (v && typeof v === 'object') visit(v);
+		}
+	};
+	visit(groups);
+	return out;
+}
+
+/** Render citations as a markdown Sources block. Returns '' when empty. */
+function renderSources(citations: Citation[]): string {
+	if (citations.length === 0) return '';
+	const lines = citations.map((c, i) => `- [${i + 1}] [${c.title}](${c.url})`);
+	return `\n\n**Sources:**\n${lines.join('\n')}`;
 }
 
 /**
@@ -263,7 +321,12 @@ function applyPatch(doc: Record<string, unknown>, patch: { p: string; o: string;
  * what we've already emitted. We do this in one pass per `data:` line so
  * the user sees deltas as they arrive (when consumed via streaming).
  */
-function* toOpenAIChunks(rawSSE: string, completionId: string, model: string): Generator<string> {
+function* toOpenAIChunks(
+	rawSSE: string,
+	completionId: string,
+	model: string,
+	wantsCitations: boolean,
+): Generator<string> {
 	const lines = rawSSE.split('\n');
 
 	// Detect encoding (same heuristic as extractFinalText).
@@ -286,6 +349,19 @@ function* toOpenAIChunks(rawSSE: string, completionId: string, model: string): G
 		const payload = line.slice(6).trim();
 
 		if (payload === '[DONE]') {
+			if (wantsCitations) {
+				const sources = renderSources(collectCitations(doc));
+				if (sources) {
+					const sourcesChunk = {
+						id: completionId,
+						object: 'chat.completion.chunk',
+						created: Math.floor(Date.now() / 1000),
+						model,
+						choices: [{ index: 0, delta: { content: sources }, finish_reason: null }],
+					};
+					yield `data: ${JSON.stringify(sourcesChunk)}\n\n`;
+				}
+			}
 			const finishChunk = {
 				id: completionId,
 				object: 'chat.completion.chunk',
@@ -438,6 +514,7 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 			}
 
 			const model = body.model ?? DEFAULT_MODEL;
+			const wantsSearch = body.extra_body?.search === true;
 			const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, '').slice(0, 28)}`;
 
 			const page = browser.getPage();
@@ -462,7 +539,9 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 
 			let result: { status: number; contentType: string | null; body: string };
 			try {
-				result = await sentinelGatedConversation(browser, lastUserMsg);
+				result = await sentinelGatedConversation(browser, lastUserMsg, {
+					systemHints: wantsSearch ? ['search'] : undefined,
+				});
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				return c.json(
@@ -504,7 +583,7 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 							],
 						};
 						controller.enqueue(enc.encode(`data: ${JSON.stringify(roleChunk)}\n\n`));
-						for (const chunk of toOpenAIChunks(rawSSE, completionId, model)) {
+						for (const chunk of toOpenAIChunks(rawSSE, completionId, model, wantsSearch)) {
 							controller.enqueue(enc.encode(chunk));
 						}
 						controller.close();
@@ -521,7 +600,7 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 			}
 
 			// ── Non-streaming response ─────────────────────────────────
-			const fullText = extractFinalText(rawSSE);
+			const { text: fullText, citations } = extractFinalText(rawSSE);
 			if (!fullText) {
 				return c.json(
 					{
@@ -533,6 +612,7 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 					502,
 				);
 			}
+			const finalText = wantsSearch ? fullText + renderSources(citations) : fullText;
 			return c.json({
 				id: completionId,
 				object: 'chat.completion',
@@ -541,11 +621,12 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 				choices: [
 					{
 						index: 0,
-						message: { role: 'assistant', content: fullText },
+						message: { role: 'assistant', content: finalText },
 						finish_reason: 'stop',
 					},
 				],
 				usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+				...(wantsSearch ? { citations } : {}),
 			});
 		},
 	},
