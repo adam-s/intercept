@@ -13,6 +13,8 @@ export {
 } from './cdp-script-control';
 export { FingerprintController } from './fingerprint-controller';
 export { browserLogger } from './logger';
+export { PERSONAS, type PoolPersona, pickPersona } from './personas';
+export { BrowserPool, type BrowserPoolConfig, type PersonaAttacher } from './pool';
 export {
 	cleanProfile,
 	createProfile,
