@@ -46,6 +46,7 @@ import {
 import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { attachHcapXhrTap, detachHcapXhrTap, drainHcapXhrTap } from './hcap-xhr-tap';
 import { attachHswTap, detachHswTap, drainHswTap } from './hsw-tap';
+import { attachRandomTap, detachRandomTap, drainRandomTap } from './random-tap';
 import { BuildNvidiaInstrument } from './instrument';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
 import {
@@ -74,6 +75,9 @@ let sdkTrapAttachedFor: RemoteBrowserService | null = null;
 let hcapXhrTapHandle: InitScriptHandle | null = null;
 /** hsw I/O tap (E7) — wraps window.hsw to log mode/input/output bytes. */
 let hswTapHandle: InitScriptHandle | null = null;
+/** crypto.getRandomValues tap (E7-D-real-trace) — counts RNG calls per
+ *  hsw invocation, to compare browser-side count to our Node 176. */
+let randomTapHandle: InitScriptHandle | null = null;
 
 /**
  * Install the build-nvidia persona init script on this browser session if
@@ -1234,6 +1238,43 @@ export const routes: DomainRoute[] = [
 			const control = browser.getScriptControl();
 			if (control) await detachHswTap(control, hswTapHandle);
 			hswTapHandle = null;
+			return c.json({ ok: true });
+		},
+	},
+
+	// ─── DEBUG: E7-D — random/RNG tap (count getRandomValues calls) ──
+	{
+		method: 'POST',
+		path: '/debug/random-tap/attach',
+		description: 'E7: install init-script that wraps crypto.getRandomValues + window.hsw to count RNG calls per proof. Reload required.',
+		handler: async (c, browser) => {
+			if (randomTapHandle) return c.json({ ok: true, alreadyAttached: true });
+			const control = browser.getScriptControl();
+			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
+			randomTapHandle = await attachRandomTap(control);
+			return c.json({ ok: true, hint: 'Reload page, drive a mint, then GET /debug/random-tap/log.' });
+		},
+	},
+	{
+		method: 'GET',
+		path: '/debug/random-tap/log',
+		description: 'E7: drain RNG-call log per frame.',
+		handler: async (c, browser) => {
+			if (!randomTapHandle) return c.json({ ok: false, error: 'Not attached' }, 412);
+			const page = browser.getPage();
+			if (!page) return c.json({ ok: false, error: 'No page' }, 503);
+			return c.json({ ok: true, ...(await drainRandomTap(page)) });
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/random-tap/detach',
+		description: 'E7: detach RNG tap.',
+		handler: async (c, browser) => {
+			if (!randomTapHandle) return c.json({ ok: true, alreadyDetached: true });
+			const control = browser.getScriptControl();
+			if (control) await detachRandomTap(control, randomTapHandle);
+			randomTapHandle = null;
 			return c.json({ ok: true });
 		},
 	},
