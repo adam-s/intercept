@@ -987,6 +987,53 @@ The server rejects our smaller proof with 415 (misleading status — actually a 
 
 For production, **E6 (~330 ms mint via SDK trap, browser only at server boot) remains the recommended path.** All knowledge for closing the last 9 KB is captured here; future work on the hsw.js obfuscation can pick up directly.
 
+### E7 deeper still — systematic probing of the remaining 9 KB gap
+
+Spent another round trying to identify what bulks the proof in Chrome but not in Node. Apples-to-apples test: same captured (jwt, opts) pair → live Chrome iframe 19924 chars proof, our Node hsw 11296 chars. **Verified the inputs are identical** (same `match-jwt.txt`, same `match-opts.json`). So the difference is purely in hsw.js execution behaviour between the two environments.
+
+#### What does change the proof size in Node
+
+| Change | Δ proof | Notes |
+|--------|---------|-------|
+| Load inline.js BEFORE hsw.js in same vm context | **+1500** | Largest wedge found. Suggests hsw consumes prototype/state mods done by inline.js (Sentry/Raven wraps Function.prototype.toString and event handlers; `_sharedLibs` populated). |
+| `errors: Array(N).fill('msg')` | linear, ~+13/entry | But captured opts had only 3 entries (~40 b) |
+| `vm_data: 'x'.repeat(N)` | linear, ~+1.3× | We already pass captured 1797 b — saturated |
+| `performance` polyfill that throws on `getEntriesByType` | -150 | Smaller proof |
+| `OffscreenCanvas`, `WebGLRenderingContext`, `AudioContext` polyfills | ±32 b | Noise level |
+| `window.parent !== window` | 0 | Doesn't matter |
+| `__wdata` global set | 0 | hsw doesn't read it |
+| Setting `Raven={}` and `_sharedLibs={packages:{}}` manually | 0 | Empty stubs don't trigger whatever inline.js full-loaded versions do |
+| TLS / cookies / charset / sec-fetch headers | 0 | Outer transport, not the gate |
+
+#### What does NOT close the gap
+
+Setting plugins, mimeTypes, OffscreenCanvas, WebGL/Audio constructors, `frameElement`, real Chrome window dimensions, `top !== window`, fattening errors/messages — none move the proof more than ~1.5 KB. **The 9 KB delta requires the EFFECT of running inline.js, not just its outputs.** Specifically:
+
+- inline.js modifies `Function.prototype.toString` via Sentry/Raven monkey-patching (we saw `t.da = Function.prototype.toString` capture in our earlier bundle inspection).
+- inline.js installs error handlers and probably modifies `console`, `setTimeout`, `XMLHttpRequest` prototypes.
+- inline.js probably installs property getters with side effects on `navigator`, `screen`, etc.
+
+Hsw.js seems to fingerprint these prototype modifications and produce more bulk when they're present (probably an "I trust this environment more" branch). Our combined `e7-combined-sandboxes.mjs` (load inline.js then hsw.js in same context) does close ~1.5 KB of the gap.
+
+#### Files added in this round
+
+- [`e7-combined-sandboxes.mjs`](../domains/build-nvidia/scripts/e7-combined-sandboxes.mjs) — load inline.js (challenge mode) + hsw.js in the same Node vm. Demonstrates the +1500-byte wedge.
+
+#### Where to dig if someone keeps pushing
+
+The remaining gap is **definitely inside hsw.js's runtime behaviour** (every input is matched). The 906 KB hsw.js is heavily obfuscated:
+- Identifier mangling (FI, qQ, bK, …)
+- String table behind `aV(N)` / `o$(N)` decoders (computed from a base array `Tr` that gets shifted at module init)
+- Large bytecode-VM-style dispatch tables
+- ECDSA-signed (mutation breaks the load); CSP-pinned (in iframe only — Node doesn't enforce)
+
+Three concrete paths that would close the gap:
+1. **Differential trace.** Wrap hsw.js source with a tracer that logs every `aV(N)` / `o$(N)` string lookup and every `crypto.subtle.X` / `navigator.X` access. Run identical inputs in Chrome (via init script) and Node, diff the access traces. The first divergence is the answer.
+2. **Decode the string table.** Build the runtime string table once, then static-analyse hsw.js with the strings substituted in. Find branches that key on browser-specific values.
+3. **Run hsw.js in a real Chromium via Node-driven CDP.** Ship a tiny headless Chromium binary with the project, pin it, drive it from Node — eliminates the "real iframe" requirement but keeps Chromium dependency. Hybrid posture between E6 and pure-Node. Fastest engineering path if the goal is "no per-server browser at boot but still reliable."
+
+For a shipping product, **E6 remains correct.** This investigation has fully characterised the wall: it's not crypto, not protocol, not network, not vmdata generation, not TLS — it's specifically that hsw.js produces less proof bytes when running in a Node vm than in Chrome's V8, for reasons hidden inside obfuscated runtime branches that we'd need to trace into to identify.
+
 Captured artifacts on disk for posterity:
 - [`/tmp/hsw-mode1-in.bin`](file:///tmp/hsw-mode1-in.bin) — full plaintext msgpack input to the live iframe's `hsw(1, …)` call. Decodes to `{v, sitekey, host, hl, motionData, pdc, pem, n: <19924-char proof>, e: null}`. The `n` field is what we need to reproduce.
 - [`/tmp/hsw-proof-opts.json`](file:///tmp/hsw-proof-opts.json) — captured opts passed to `hsw(jwt, opts)`. Drop-in for the Node mint.
