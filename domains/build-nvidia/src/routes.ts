@@ -46,6 +46,11 @@ import {
 	pollHCaptchaPostMessages,
 	probeHCaptchaFrame,
 } from './captcha-frame';
+import {
+	type CatalogSummary,
+	enrichModel,
+	parseModelId,
+} from './model-metadata';
 import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { attachHcapXhrTap, detachHcapXhrTap, drainHcapXhrTap } from './hcap-xhr-tap';
 import {
@@ -298,7 +303,10 @@ interface CatalogResponse {
 }
 
 /** Flatten a catalog resource's labels into a single map for easier consumption. */
-function summarizeResource(r: CatalogResource): Record<string, unknown> {
+function summarizeResource(r: CatalogResource): CatalogSummary & {
+	path: string;
+	dateModified: string;
+} {
 	const labels: Record<string, string[]> = {};
 	for (const l of r.labels) labels[l.key] = l.values;
 	const attrs: Record<string, string> = {};
@@ -737,72 +745,97 @@ export const routes: DomainRoute[] = [
 			} catch {
 				return c.json({ error: 'Invalid JSON body' }, 400);
 			}
-			if (typeof body.model !== 'string' || !body.model.includes('/')) {
+			if (typeof body.model !== 'string') {
 				return c.json(
-					{ error: "Field 'model' must be a vendor-prefixed slug like 'openai/gpt-oss-20b'." },
+					{ error: "Field 'model' must be a string like 'nvidia/openai/gpt-oss-20b' or 'openai/gpt-oss-20b'." },
 					400,
 				);
 			}
+			let parsed;
+			try {
+				parsed = parseModelId(body.model);
+			} catch (e) {
+				return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+			}
+			const playgroundModel = `${parsed.vendor}/${parsed.slug}`;
+			const fullId = `nvidia/${parsed.vendor}/${parsed.slug}`;
 
+			// SDK-binding mint: no UI driving, no abort race. The token is
+			// minted by calling _hcaptcha.execute() directly via CDP, so it
+			// has never touched NVIDIA's predict endpoint and cannot be burned.
 			const personaInstalled = await ensurePersona(browser);
-			if (personaInstalled) {
+			const trapInstalled = await ensureSdkTrap(browser);
+			if (personaInstalled || trapInstalled) {
 				const page = browser.getPage();
-				if (page && page.url().startsWith('https://build.nvidia.com')) {
+				if (page && page.url().startsWith(BUILD_NV_ORIGIN)) {
 					await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
 				}
 			}
-
-			let captured: CapturedPredictPost;
 			try {
-				captured = await captureUnburned(browser, { model: body.model, message: '_' });
+				await ensurePageReadyForMint(browser, playgroundModel);
 			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				return c.json({ error: `Token mint failed: ${msg}` }, 502);
+				return c.json({ error: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}` }, 502);
+			}
+			let captchaToken: string;
+			try {
+				captchaToken = await withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
+			} catch (err) {
+				return c.json({ error: `Mint failed: ${err instanceof Error ? err.message : String(err)}` }, 502);
 			}
 
-			// Strip the headers down to ONLY what's needed downstream. Per E2
-			// elimination, the predict POST works with just these three.
-			const minHeaders: Record<string, string> = {};
-			const allow = new Set(['nv-captcha-token', 'nv-function-id', 'content-type']);
-			for (const [k, v] of Object.entries(captured.headers)) {
-				if (allow.has(k.toLowerCase())) minHeaders[k.toLowerCase()] = v;
+			let functionId: string;
+			try {
+				functionId = await getFunctionId(playgroundModel);
+			} catch (err) {
+				return c.json(
+					{ error: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}` },
+					502,
+				);
 			}
-			minHeaders['content-type'] = 'application/json';
 
-			const captchaToken = minHeaders['nv-captcha-token'];
-			const functionId = minHeaders['nv-function-id'];
+			const url = `${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`;
+			const headers = {
+				'content-type': 'application/json',
+				'nv-captcha-token': captchaToken,
+				'nv-function-id': functionId,
+			};
 			const expiresAt = Math.floor(Date.now() / 1000) + 120;
-
-			// A ready-to-paste curl example. Single-line so it stays valid JSON
-			// without literal newlines in the string (some strict parsers
-			// reject control chars in JSON strings).
+			// NVIDIA's predict endpoint expects body.model in bare <vendor>/<slug> form,
+			// not the provider-prefixed nvidia/<vendor>/<slug> form we use in our /v1 routes.
+			const upstreamModelField = playgroundModel;
 			const curlExample =
-				`curl -N -X POST '${captured.url}'` +
+				`curl -N -X POST '${url}'` +
 				` -H 'content-type: application/json'` +
 				` -H 'nv-captcha-token: ${captchaToken}'` +
 				` -H 'nv-function-id: ${functionId}'` +
-				` -d '{"model":"${body.model}","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":256}'`;
+				` -d '{"model":"${upstreamModelField}","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":256,"reasoning_effort":"medium","temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0}'`;
 
 			return c.json({
-				url: captured.url,
+				model: fullId,
+				url,
 				method: 'POST',
-				headers: minHeaders,
+				headers,
 				function_id: functionId,
 				captcha_token: captchaToken,
 				expires_at: expiresAt,
 				ttl_seconds: 120,
 				sample_body: {
-					model: body.model,
+					model: upstreamModelField,
 					messages: [{ role: 'user', content: 'hello' }],
 					stream: true,
 					max_tokens: 256,
 					temperature: 1,
+					top_p: 1,
+					presence_penalty: 0,
+					frequency_penalty: 0,
+					reasoning_effort: 'medium',
 				},
 				curl_example: curlExample,
 				notes: [
 					'Single-use: each captcha_token mints one chat call. Re-mint per request.',
 					'TTL ~120 seconds. expires_at is a unix timestamp (seconds).',
-					"Replay works with just three headers: 'content-type', 'nv-captcha-token', 'nv-function-id'. No cookies, Origin, Referer, UA, or sec-ch-ua-* needed.",
+					"Replay needs three headers: 'content-type', 'nv-captcha-token', 'nv-function-id'. No cookies, Origin, Referer, UA, or sec-ch-ua-* needed.",
+					"Body field 'model' must be the BARE <vendor>/<slug> form (e.g. 'openai/gpt-oss-20b'), NOT the provider-prefixed full id.",
 					'Response is OpenAI-shaped streaming SSE. Set stream:false in your body for a single JSON response (you must aggregate chunks yourself, since the upstream always streams).',
 				],
 			});
@@ -821,12 +854,15 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/v1/models',
 		description:
-			'OpenAI-compatible models list. Returns chat-capable models from build.nvidia.com (preview/free anonymous endpoints). Use ?all=1 to include non-chat models too.',
+			'OpenAI-compatible models list with rich metadata. Filters: ?modality=chat|image|embedding|audio_speech|audio_transcription|video|vision|safety|biology|retrieval, ?provider=nvidia, ?preview=1, ?capability=tool_calling (repeatable), ?all=1 to disable default chat-only filter. Each entry has modality, capabilities, parameters, and endpoints fields.',
 		browserRequired: false,
 		handler: async (c) => {
 			const url = new URL(c.req.url);
 			const includeAll = url.searchParams.get('all') === '1';
 			const previewOnly = url.searchParams.get('preview') === '1';
+			const modalityFilter = url.searchParams.get('modality');
+			const providerFilter = url.searchParams.get('provider');
+			const requiredCaps = url.searchParams.getAll('capability');
 			const q = JSON.stringify({
 				orderBy: [{ field: 'dateCreated', value: 'DESC' }],
 				page: 0,
@@ -840,31 +876,51 @@ export const routes: DomainRoute[] = [
 			const data = (await res.json()) as CatalogResponse;
 			const group = data.results.find((g) => g.groupValue === 'ENDPOINT') ?? data.results[0];
 			const all = (group?.resources ?? []).map(summarizeResource);
-			const filtered = all.filter((m) => {
-				if (!m.guestAccess) return false;
-				if (previewOnly && !m.preview) return false;
-				// `available=false` is normal for preview tier — only require it for GA models.
-				if (!m.preview && !m.available) return false;
-				if (!includeAll) {
-					const labels = (m.labels as string[]).map((l) => l.toLowerCase());
-					if (!labels.some((l) => l === 'chat' || l === 'conversational')) return false;
-				}
-				return true;
+			if (providerFilter && providerFilter !== 'nvidia') return c.json({ object: 'list', data: [] });
+			const enriched = all
+				.filter((m) => m.guestAccess)
+				.filter((m) => (previewOnly ? m.preview : true))
+				.filter((m) => (m.preview ? true : m.available))
+				.map((m) => enrichModel(m))
+				.filter((m) => {
+					if (modalityFilter) return m.modality === modalityFilter;
+					if (includeAll) return true;
+					return m.modality === 'chat' || m.modality === 'vision';
+				})
+				.filter((m) => {
+					const caps = m.capabilities as unknown as Record<string, boolean>;
+					return requiredCaps.every((cap) => caps[cap] === true);
+				});
+			return c.json({ object: 'list', data: enriched });
+		},
+	},
+	{
+		method: 'GET',
+		path: '/v1/models/:provider/:vendor/:slug',
+		description: 'Single model by full ID (nvidia/<vendor>/<slug>). Returns the same shape as a /v1/models entry — useful for capability/parameter introspection.',
+		browserRequired: false,
+		handler: async (c) => {
+			const { provider, vendor, slug } = c.req.param() as { provider: string; vendor: string; slug: string };
+			if (provider !== 'nvidia') return c.json({ error: { message: 'Unknown provider', type: 'invalid_request_error' } }, 404);
+			const q = JSON.stringify({
+				orderBy: [{ field: 'dateCreated', value: 'DESC' }],
+				page: 0,
+				pageSize: 1000,
+				query: `orgName:"${NIM_ORG}"`,
+				scoredSize: 1000,
 			});
-			return c.json({
-				object: 'list',
-				data: filtered.map((m) => ({
-					id: `${m.publisher}/${m.slug}`,
-					object: 'model',
-					created: Math.floor(new Date(m.dateCreated as string).getTime() / 1000),
-					owned_by: m.publisher,
-					// Non-OpenAI metadata, useful for clients
-					_display_name: m.displayName,
-					_description: m.description,
-					_labels: m.labels,
-					_preview: m.preview,
-				})),
-			});
+			const res = await rateLimitedFetch(
+				`${NGC_API}/search/catalog/resources/ENDPOINT?q=${encodeURIComponent(q)}`,
+				{ headers: UA_HEADER },
+			);
+			if (!res.ok) return c.json({ error: { message: `Upstream ${res.status}`, type: 'upstream_error' } }, 502);
+			const data = (await res.json()) as CatalogResponse;
+			const group = data.results.find((g) => g.groupValue === 'ENDPOINT') ?? data.results[0];
+			const summary = (group?.resources ?? [])
+				.map(summarizeResource)
+				.find((m) => m.publisher === vendor && m.slug === slug);
+			if (!summary) return c.json({ error: { message: 'Model not found', type: 'invalid_request_error' } }, 404);
+			return c.json(enrichModel(summary));
 		},
 	},
 	{
@@ -889,11 +945,11 @@ export const routes: DomainRoute[] = [
 			} catch {
 				return c.json({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }, 400);
 			}
-			if (typeof body.model !== 'string' || !body.model.includes('/')) {
+			if (typeof body.model !== 'string') {
 				return c.json(
 					{
 						error: {
-							message: "Field 'model' must be a vendor-prefixed slug like 'openai/gpt-oss-20b'.",
+							message: "Field 'model' must be a string like 'nvidia/openai/gpt-oss-20b' or 'openai/gpt-oss-20b'.",
 							type: 'invalid_request_error',
 							param: 'model',
 						},
@@ -901,6 +957,17 @@ export const routes: DomainRoute[] = [
 					400,
 				);
 			}
+			let parsed;
+			try {
+				parsed = parseModelId(body.model);
+			} catch (e) {
+				return c.json(
+					{ error: { message: e instanceof Error ? e.message : String(e), type: 'invalid_request_error', param: 'model' } },
+					400,
+				);
+			}
+			const playgroundModel = `${parsed.vendor}/${parsed.slug}`;
+			const upstreamModel = playgroundModel; // upstream NVIDIA expects the same shape in body.model
 			if (!Array.isArray(body.messages) || body.messages.length === 0) {
 				return c.json(
 					{
@@ -915,34 +982,56 @@ export const routes: DomainRoute[] = [
 			}
 
 			const wantsStream = body.stream === true;
-			DEBUG('build-nvidia', `v1 chat: ${body.model} stream=${wantsStream}`);
+			DEBUG('build-nvidia', `v1 chat: ${playgroundModel} stream=${wantsStream}`);
 
-			// 1. Persona + reload if newly installed.
+			// 1. Persona + SDK trap. Reload page if either was newly installed.
 			const personaInstalled = await ensurePersona(browser);
-			if (personaInstalled) {
+			const trapInstalled = await ensureSdkTrap(browser);
+			if (personaInstalled || trapInstalled) {
 				const page = browser.getPage();
-				if (page && page.url().startsWith('https://build.nvidia.com')) {
+				if (page && page.url().startsWith(BUILD_NV_ORIGIN)) {
 					await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
 				}
 			}
 
-			// 2. Mint a fresh un-burned token (browser is just a token factory).
-			let captured: CapturedPredictPost;
+			// 2. Navigate to the model page if needed; wait for SDK + widget.
 			try {
-				captured = await captureUnburned(browser, { model: body.model, message: '_' });
+				await ensurePageReadyForMint(browser, playgroundModel);
 			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
 				return c.json(
-					{ error: { message: `Token mint failed: ${msg}`, type: 'captcha_error' } },
+					{ error: { message: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}`, type: 'captcha_error' } },
 					502,
 				);
 			}
 
-			// 3. Build the upstream request body. Always-streaming on the wire
+			// 3. Mint via SDK binding (no UI driving, no abort race).
+			const mintToken = () => withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
+			let captchaToken: string;
+			try {
+				captchaToken = await mintToken();
+			} catch (err) {
+				return c.json(
+					{ error: { message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`, type: 'captcha_error' } },
+					502,
+				);
+			}
+
+			// 4. Resolve nvcfFunctionId (cached after first lookup).
+			let functionId: string;
+			try {
+				functionId = await getFunctionId(playgroundModel);
+			} catch (err) {
+				return c.json(
+					{ error: { message: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`, type: 'upstream_error' } },
+					502,
+				);
+			}
+
+			// 5. Build the upstream request body. Always-streaming on the wire
 			//    (the playground only speaks SSE) — for non-streaming clients,
 			//    we collect chunks and synthesize a single response below.
 			const upstreamBody = JSON.stringify({
-				model: body.model,
+				model: upstreamModel,
 				messages: body.messages,
 				stream: true,
 				...(typeof body.max_tokens === 'number' ? { max_tokens: body.max_tokens } : { max_tokens: 4096 }),
@@ -959,25 +1048,27 @@ export const routes: DomainRoute[] = [
 					: { reasoning_effort: 'medium' }),
 			});
 
-			// 4. Send via Bun fetch with minimum headers. Re-mint once on token rejection.
-			const sendOnce = (cap: CapturedPredictPost) =>
-				replayPredictStreaming(cap, {
+			// 6. Send via Bun fetch with minimum headers. Re-mint once on token rejection.
+			const upstreamUrl = `${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`;
+			const sendOnce = (token: string) =>
+				fetch(upstreamUrl, {
+					method: 'POST',
+					headers: {
+						'content-type': 'application/json',
+						'nv-captcha-token': token,
+						'nv-function-id': functionId,
+					},
 					body: upstreamBody,
-					headerAllowlist: ['nv-captcha-token', 'nv-function-id', 'content-type'],
-					headerOverrides: { 'content-type': 'application/json' },
 				});
 
 			let upstream: Response;
 			try {
-				upstream = await sendOnce(captured);
+				upstream = await sendOnce(captchaToken);
 				if (upstream.status === 400) {
 					const errText = await upstream.text();
 					if (errText.includes('Token is invalid') || errText.includes('Captcha required')) {
 						DEBUG('build-nvidia', `v1: token rejected, re-minting once`);
-						const fresh = await captureUnburned(browser, {
-							model: body.model,
-							message: '_',
-						});
+						const fresh = await mintToken();
 						upstream = await sendOnce(fresh);
 					} else {
 						return c.json(
@@ -1082,6 +1173,102 @@ export const routes: DomainRoute[] = [
 					prompt_tokens: promptTokens ?? 0,
 					completion_tokens: completionTokens ?? 0,
 					total_tokens: (promptTokens ?? 0) + (completionTokens ?? 0),
+				},
+			});
+		},
+	},
+
+	// ─── POST /v1/raw/:provider/:vendor/:slug ────────────────────────
+	// Modality-agnostic passthrough. Mints a fresh nv-captcha-token via
+	// the playground UI, then ships the caller's request body verbatim
+	// to the predict URL. Returns the upstream response unchanged
+	// (status, content-type, body — including streaming SSE).
+	//
+	// Use this for any model whose body shape doesn't fit OpenAI's
+	// /v1/chat/completions or /v1/embeddings (image gen, video,
+	// safety/moderation, retrievers, etc.).
+	{
+		method: 'POST',
+		path: '/v1/raw/:provider/:vendor/:slug',
+		description:
+			'Modality-agnostic passthrough. Mint a fresh captcha token + post raw body to the predict URL. Returns upstream response unchanged. Use for image/video/embedding/safety models whose request shape does not fit /v1/chat/completions.',
+		handler: async (c, browser) => {
+			const { provider, vendor, slug } = c.req.param() as { provider: string; vendor: string; slug: string };
+			if (provider !== 'nvidia') {
+				return c.json({ error: { message: `Unknown provider '${provider}'`, type: 'invalid_request_error' } }, 404);
+			}
+			let userBody: string;
+			try {
+				userBody = await c.req.text();
+			} catch {
+				return c.json({ error: { message: 'Could not read request body', type: 'invalid_request_error' } }, 400);
+			}
+			const playgroundModel = `${vendor}/${slug}`;
+			DEBUG('build-nvidia', `v1 raw: ${playgroundModel} body=${userBody.length}b`);
+
+			const personaInstalled = await ensurePersona(browser);
+			const trapInstalled = await ensureSdkTrap(browser);
+			if (personaInstalled || trapInstalled) {
+				const page = browser.getPage();
+				if (page && page.url().startsWith(BUILD_NV_ORIGIN)) {
+					await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+				}
+			}
+			try {
+				await ensurePageReadyForMint(browser, playgroundModel);
+			} catch (err) {
+				return c.json({ error: { message: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}`, type: 'captcha_error' } }, 502);
+			}
+			const mintToken = () => withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
+			let captchaToken: string;
+			try {
+				captchaToken = await mintToken();
+			} catch (err) {
+				return c.json({ error: { message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`, type: 'captcha_error' } }, 502);
+			}
+			let functionId: string;
+			try {
+				functionId = await getFunctionId(playgroundModel);
+			} catch (err) {
+				return c.json({ error: { message: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`, type: 'upstream_error' } }, 502);
+			}
+
+			const upstreamUrl = `${NGC_API}/predict/models/${NIM_ORG}/${slug}`;
+			const upstreamCt = c.req.header('content-type') ?? 'application/json';
+			const sendOnce = (token: string) =>
+				fetch(upstreamUrl, {
+					method: 'POST',
+					headers: {
+						'content-type': upstreamCt,
+						'nv-captcha-token': token,
+						'nv-function-id': functionId,
+					},
+					body: userBody,
+				});
+			let upstream: Response;
+			try {
+				upstream = await sendOnce(captchaToken);
+				if (upstream.status === 400) {
+					const errText = await upstream.text();
+					if (errText.includes('Token is invalid') || errText.includes('Captcha required')) {
+						const fresh = await mintToken();
+						upstream = await sendOnce(fresh);
+					} else {
+						return c.json({ error: { message: errText, type: 'upstream_error' } }, 400);
+					}
+				}
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ error: { message: `Upstream fetch failed: ${msg}`, type: 'upstream_error' } }, 502);
+			}
+
+			// Stream the response through verbatim, preserving content-type.
+			return new Response(upstream.body, {
+				status: upstream.status,
+				headers: {
+					'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
+					'Cache-Control': 'no-cache',
+					'X-Accel-Buffering': 'no',
 				},
 			});
 		},
