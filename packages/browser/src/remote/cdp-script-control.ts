@@ -144,6 +144,29 @@ interface AddScriptResult {
 	identifier: string;
 }
 
+interface RuntimeBindingCalledEvent {
+	name: string;
+	payload: string;
+	executionContextId: number;
+}
+
+interface InstalledBinding {
+	name: string;
+	handler: BindingHandler;
+}
+
+/**
+ * Page-side `window[name](payload)` -> Node. The page calls a globally-
+ * exposed function with a single string argument and gets back `undefined`
+ * synchronously. The Node-side handler receives the payload (and the CDP
+ * execution context id, useful for distinguishing parent vs iframe calls).
+ *
+ * Bindings are a one-way channel by design (CDP gives no return-value
+ * route). For request/response, dispatch a custom event back into the page
+ * via `Runtime.evaluate` keyed on a request id you embed in the payload.
+ */
+export type BindingHandler = (payload: string, executionContextId: number) => void | Promise<void>;
+
 // ─── Implementation ───────────────────────────────────────────────────────
 
 /**
@@ -161,6 +184,7 @@ export class CdpScriptControl extends EventEmitter {
 	private fetchPatterns: Map<string, FetchCaptureOptions> = new Map();
 	private mutateHandlers: Map<string, ScriptMutator> = new Map(); // handle.id → mutator
 	private mutatePatterns: Map<string, FetchCaptureOptions> = new Map();
+	private bindings: Map<string, InstalledBinding> = new Map(); // name -> handler
 	private fetchListenerInstalled = false;
 	private attached = false;
 	private contextPageHandler: ((p: Page) => void) | null = null;
@@ -246,6 +270,7 @@ export class CdpScriptControl extends EventEmitter {
 		this.fetchHandlers.clear();
 		this.fetchPatterns.clear();
 		this.fetchListenerInstalled = false;
+		this.bindings.clear();
 	}
 
 	/**
@@ -289,6 +314,14 @@ export class CdpScriptControl extends EventEmitter {
 		// Install Fetch capture too (per-session — Fetch.enable must be sent
 		// to each session that should pause requests).
 		await this.applyFetchToSession(session).catch(() => {});
+
+		// Re-install all currently-registered bindings on the child.
+		if (this.bindings.size > 0) {
+			this.installBindingListener(session);
+			for (const name of this.bindings.keys()) {
+				await session.send('Runtime.addBinding', { name }).catch(() => {});
+			}
+		}
 
 		// Clean up when page closes.
 		page.once('close', () => {
@@ -647,6 +680,73 @@ export class CdpScriptControl extends EventEmitter {
 		} catch {
 			return null;
 		}
+	}
+
+	// ─── Page → Node bindings (Runtime.addBinding) ────────────────────
+
+	/**
+	 * Expose `window[name]` on every current and future page session. The
+	 * page calls `window[name](stringPayload)` and the Node-side handler is
+	 * invoked with the payload + the CDP execution context id (useful for
+	 * disambiguating parent vs OOPIF callers).
+	 *
+	 * Notes:
+	 *  - `Runtime.addBinding` only takes effect for execution contexts
+	 *    created AFTER the call. For existing pages we install bindings on
+	 *    every session we own; new pages adopted later get them in
+	 *    `adoptChildPage`.
+	 *  - Binding propagation to OOPIFs requires the child target to be
+	 *    attached. Patchright auto-attaches same-origin iframes; cross-
+	 *    origin iframes (like the hCaptcha SDK at newassets.hcaptcha.com)
+	 *    live in a separate target that we typically do NOT see on these
+	 *    sessions. Reach the cross-origin iframe via parent-page postMessage
+	 *    rather than expecting the binding to land directly inside it.
+	 *  - There is NO return-value channel — the page-side function returns
+	 *    `undefined`. Build request/response on top by dispatching a custom
+	 *    event back into the page from Node via `evaluateInMainWorld`.
+	 */
+	async addBinding(name: string, handler: BindingHandler): Promise<void> {
+		if (!this.attached || !this.rootSession) {
+			throw new Error('CdpScriptControl.addBinding called before attach()');
+		}
+		if (this.bindings.has(name)) {
+			throw new Error(`Binding "${name}" already registered`);
+		}
+		this.bindings.set(name, { name, handler });
+
+		this.installBindingListener(this.rootSession);
+		await this.rootSession.send('Runtime.addBinding', { name }).catch(() => {});
+
+		for (const state of this.childSessions.values()) {
+			this.installBindingListener(state.session);
+			await state.session.send('Runtime.addBinding', { name }).catch(() => {});
+		}
+	}
+
+	async removeBinding(name: string): Promise<void> {
+		if (!this.bindings.delete(name)) return;
+		if (this.rootSession) {
+			await this.rootSession.send('Runtime.removeBinding', { name }).catch(() => {});
+		}
+		for (const state of this.childSessions.values()) {
+			await state.session.send('Runtime.removeBinding', { name }).catch(() => {});
+		}
+	}
+
+	private installBindingListener(session: CDPSession): void {
+		const sessionAny = session as unknown as { __cdpBindingBound?: boolean };
+		if (sessionAny.__cdpBindingBound) return;
+		sessionAny.__cdpBindingBound = true;
+		session.on('Runtime.bindingCalled', (raw: unknown) => {
+			const ev = raw as RuntimeBindingCalledEvent;
+			const b = this.bindings.get(ev.name);
+			if (!b) return;
+			void Promise.resolve()
+				.then(() => b.handler(ev.payload, ev.executionContextId))
+				.catch((err) => {
+					this.emit('error', new Error(`binding ${ev.name} handler threw: ${String(err)}`));
+				});
+		});
 	}
 
 	// ─── Diagnostics ───────────────────────────────────────────────────

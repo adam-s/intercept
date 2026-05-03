@@ -53,6 +53,7 @@ import {
 	type RuntimeTapEntry,
 } from './runtime-tap';
 import { getBundleCapture, startBundleCapture, stopBundleCapture } from './script-capture';
+import { buildSdkTrapScript, SDK_TRAP_GLOBALS } from './sdk-trap';
 
 /** Singleton — one active instrumentation per server. */
 let instrument: BuildNvidiaInstrument | null = null;
@@ -62,6 +63,10 @@ let runtimeTapHandle: InitScriptHandle | null = null;
  *  script's `__bn_fp_installed` IIFE guard makes re-installs idempotent. */
 let fingerprintHandle: InitScriptHandle | null = null;
 let fingerprintAttachedFor: RemoteBrowserService | null = null;
+/** SDK-trap init script (E6) — captures the hCaptcha SDK ref before
+ *  react-hcaptcha hides it and exposes `window.__bn_mintToken(siteKey)`. */
+let sdkTrapHandle: InitScriptHandle | null = null;
+let sdkTrapAttachedFor: RemoteBrowserService | null = null;
 
 /**
  * Install the build-nvidia persona init script on this browser session if
@@ -84,6 +89,146 @@ async function ensurePersona(browser: RemoteBrowserService): Promise<boolean> {
 	fingerprintAttachedFor = browser;
 	DEBUG('build-nvidia', 'persona init script installed for this browser session');
 	return true;
+}
+
+/**
+ * Install the E6 SDK-trap init script on this browser session if not
+ * already done. Captures `window.hcaptcha` BEFORE react-hcaptcha can hide
+ * it and exposes `window.__bn_mintToken(siteKey)` for binding-style minting.
+ *
+ * Returns true if newly installed (caller should reload the page so init
+ * fires before the SDK loads).
+ */
+async function ensureSdkTrap(browser: RemoteBrowserService): Promise<boolean> {
+	if (sdkTrapAttachedFor === browser && sdkTrapHandle) return false;
+	const control = browser.getScriptControl();
+	if (!control) return false;
+	sdkTrapHandle = await control.registerInitScript(buildSdkTrapScript());
+	sdkTrapAttachedFor = browser;
+	DEBUG('build-nvidia', 'SDK-trap init script installed for this browser session');
+	return true;
+}
+
+/** Per-browser-session mint mutex — hCaptcha SDK uses an internal
+ *  `_pendingExecute` that two concurrent execute() calls would race on. */
+const mintTails = new WeakMap<object, Promise<unknown>>();
+
+async function withMintLock<T>(browser: RemoteBrowserService, fn: () => Promise<T>): Promise<T> {
+	const key: object = browser as unknown as object;
+	const prev = mintTails.get(key) ?? Promise.resolve();
+	let release!: () => void;
+	const next = new Promise<void>((r) => {
+		release = r;
+	});
+	mintTails.set(
+		key,
+		prev.then(() => next),
+	);
+	await prev;
+	try {
+		return await fn();
+	} finally {
+		release();
+	}
+}
+
+/** Function-id cache keyed by `vendor/slug` — the spec endpoint is cheap
+ *  but doing it per-request adds 100ms+ for no gain (function IDs are
+ *  effectively immutable per model). */
+const functionIdCache = new Map<string, string>();
+
+async function getFunctionId(model: string): Promise<string> {
+	const cached = functionIdCache.get(model);
+	if (cached) return cached;
+	const url = `${NGC_API}/endpoints/${NIM_ORG}/${encodeURIComponent(model.split('/').pop() ?? model)}/spec`;
+	const res = await rateLimitedFetch(url, { headers: UA_HEADER });
+	if (!res.ok) throw new Error(`Spec lookup failed: ${res.status}`);
+	const data = (await res.json()) as { nvcfFunctionId?: string };
+	if (!data.nvcfFunctionId) throw new Error('Spec missing nvcfFunctionId');
+	functionIdCache.set(model, data.nvcfFunctionId);
+	return data.nvcfFunctionId;
+}
+
+const BUILD_NV_ORIGIN = 'https://build.nvidia.com';
+
+/**
+ * Ensure the page is on the model's playground URL, the SDK trap has
+ * captured the hCaptcha SDK, and a widget is rendered. Reloads if the
+ * trap wasn't yet captured. Bounded poll — throws on timeout.
+ */
+async function ensurePageReadyForMint(
+	browser: RemoteBrowserService,
+	model: string,
+	timeoutMs = 15_000,
+): Promise<void> {
+	const page = browser.getPage();
+	if (!page) throw new Error('No browser page');
+	const targetUrl = `${BUILD_NV_ORIGIN}/${model}`;
+	if (!page.url().startsWith(targetUrl)) {
+		await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+	}
+	const control = browser.getScriptControl();
+	if (!control) throw new Error('No CdpScriptControl');
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const r = (await control.evaluateInMainWorld<{
+			captured: boolean;
+			hasExecute?: boolean;
+			hasWidget?: boolean;
+		}>(
+			`(() => { const i = window.__bn_sdkInfo ? window.__bn_sdkInfo() : { captured: false }; return Object.assign({}, i, { hasWidget: !!document.querySelector('[data-hcaptcha-widget-id]') }); })()`,
+		)) as { captured: boolean; hasExecute?: boolean; hasWidget?: boolean } | null;
+		if (r && r.captured && r.hasExecute && r.hasWidget) return;
+		await new Promise((res) => setTimeout(res, 200));
+	}
+	throw new Error('SDK trap or widget not ready before timeout');
+}
+
+/**
+ * Mint a fresh hCaptcha token by calling `window.__bn_mintToken(siteKey)`
+ * via raw-CDP main-world evaluate. Requires the SDK trap to be installed
+ * and the page to have loaded the hCaptcha SDK at least once after install
+ * (so the trap captured the SDK ref).
+ */
+async function mintViaBinding(
+	browser: RemoteBrowserService,
+	siteKey: string,
+	timeoutMs = 30_000,
+): Promise<string> {
+	const control = browser.getScriptControl();
+	if (!control) throw new Error('No CdpScriptControl on browser session');
+	// Wrap in try/catch INSIDE the page so a rejected mint surfaces as a
+	// structured object instead of being swallowed by evaluateInMainWorld's
+	// `null` return on exceptionDetails.
+	const expr = `(async () => {
+		try {
+			const t = await window.${SDK_TRAP_GLOBALS.mint}(${JSON.stringify(siteKey)});
+			return { ok: true, token: t };
+		} catch (e) {
+			return { ok: false, error: (e && e.message) ? String(e.message) : String(e), stack: (e && e.stack) ? String(e.stack).slice(0, 1000) : null };
+		}
+	})()`;
+	const result = (await control.evaluateInMainWorld<{
+		ok: boolean;
+		token?: string;
+		error?: string;
+		stack?: string | null;
+	}>(expr, {
+		awaitPromise: true,
+		timeoutMs,
+	})) as { ok: boolean; token?: string; error?: string; stack?: string | null } | null;
+	if (!result) {
+		throw new Error(
+			'mintViaBinding: evaluateInMainWorld returned null (exception or eval failure)',
+		);
+	}
+	if (!result.ok) {
+		throw new Error(`mintViaBinding: ${result.error ?? 'unknown error'}`);
+	}
+	if (typeof result.token !== 'string' || result.token.length === 0) {
+		throw new Error('mintViaBinding: token missing or empty');
+	}
+	return result.token;
 }
 
 /** E1 experiment state: the most recent predict POST captured by
@@ -542,6 +687,129 @@ export const routes: DomainRoute[] = [
 		},
 	},
 
+	// ─── POST /chat/completions/binding ──────────────────────────────
+	// E6 — pure SDK-call mint, no UI drive at all. Captures the hCaptcha
+	// SDK reference via init-script trap before react-hcaptcha hides it,
+	// then calls `_hcaptcha.execute(widgetId, {async:true})` directly via
+	// CDP main-world evaluate. ~330ms per mint vs ~2s+30%-retry for the
+	// /browserless route. Browser still required at boot to render the
+	// widget once; per-request transport is pure Bun fetch.
+	{
+		method: 'POST',
+		path: '/chat/completions/binding',
+		description:
+			'OpenAI-shaped chat completions via the SDK-trap mint path (E6). The browser captures the hCaptcha SDK once, then each request mints a fresh token by calling execute() directly — no UI drive. ~330ms/mint, single-flight per page. Same body shape as /chat/completions/browser.',
+		handler: async (c, browser) => {
+			let body: { model?: unknown; messages?: unknown };
+			try {
+				body = (await c.req.json()) as typeof body;
+			} catch {
+				return c.json({ error: 'Invalid JSON body' }, 400);
+			}
+			if (typeof body.model !== 'string' || !body.model.includes('/')) {
+				return c.json(
+					{ error: "Field 'model' must be a vendor-prefixed slug like 'openai/gpt-oss-20b'." },
+					400,
+				);
+			}
+			if (!Array.isArray(body.messages) || body.messages.length === 0) {
+				return c.json({ error: "Field 'messages' must be a non-empty array." }, 400);
+			}
+
+			DEBUG('build-nvidia', `binding chat: ${body.model}`);
+
+			// 1. Install persona + SDK trap if not already present. Both must
+			//    fire BEFORE the SDK loads, so reload if either was newly
+			//    installed.
+			const personaInstalled = await ensurePersona(browser);
+			const trapInstalled = await ensureSdkTrap(browser);
+			if (personaInstalled || trapInstalled) {
+				const page = browser.getPage();
+				if (page && page.url().startsWith(BUILD_NV_ORIGIN)) {
+					await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+				}
+			}
+
+			// 2. Ensure we're on the model page and the SDK + widget are ready.
+			try {
+				await ensurePageReadyForMint(browser, body.model);
+			} catch (err) {
+				return c.json(
+					{ error: `Page not ready: ${err instanceof Error ? err.message : String(err)}` },
+					502,
+				);
+			}
+
+			// 3. Mint a token (serialised per browser session).
+			let token: string;
+			try {
+				token = await withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
+			} catch (err) {
+				return c.json(
+					{ error: `Mint failed: ${err instanceof Error ? err.message : String(err)}` },
+					502,
+				);
+			}
+
+			// 4. Resolve the model's nvcfFunctionId (cached after first lookup).
+			let functionId: string;
+			try {
+				functionId = await getFunctionId(body.model);
+			} catch (err) {
+				return c.json(
+					{
+						error: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+					},
+					502,
+				);
+			}
+
+			// 5. Send the chat completion from Bun fetch with the minimum
+			//    surface (per E2: nv-captcha-token, nv-function-id, content-type).
+			const bareModel = body.model.split('/').pop() ?? body.model;
+			const realBody = JSON.stringify({
+				reasoning_effort: 'medium',
+				stream: true,
+				model: body.model,
+				max_tokens: 4096,
+				presence_penalty: 0,
+				frequency_penalty: 0,
+				top_p: 1,
+				temperature: 1,
+				messages: body.messages,
+			});
+			let upstream: Response;
+			try {
+				upstream = await fetch(
+					`https://api.ngc.nvidia.com/v2/predict/models/${NIM_ORG}/${bareModel}`,
+					{
+						method: 'POST',
+						headers: {
+							'content-type': 'application/json',
+							'nv-captcha-token': token,
+							'nv-function-id': functionId,
+						},
+						body: realBody,
+					},
+				);
+			} catch (err) {
+				return c.json(
+					{ error: `Upstream fetch failed: ${err instanceof Error ? err.message : String(err)}` },
+					502,
+				);
+			}
+
+			return new Response(upstream.body, {
+				status: upstream.status,
+				headers: {
+					'Content-Type': upstream.headers.get('content-type') ?? 'text/event-stream',
+					'Cache-Control': 'no-cache',
+					'X-Accel-Buffering': 'no',
+				},
+			});
+		},
+	},
+
 	// ─── DEBUG: hCaptcha frame probing ───────────────────────────────
 	// Phase 2 of docs/HCAPTCHA-VS-TURNSTILE.md — diagnose whether
 	// Patchright's frame.evaluate gives us reach into the hCaptcha
@@ -855,6 +1123,73 @@ export const routes: DomainRoute[] = [
 				ageMs: Date.now() - lastCapturedPredict.capturedAt,
 				capture: lastCapturedPredict,
 			});
+		},
+	},
+
+	// ─── DEBUG: E6 — SDK-trap mint (binding path, no UI drive) ──────
+	{
+		method: 'POST',
+		path: '/debug/sdk-trap/install',
+		description:
+			'E6: install the hCaptcha SDK trap on this browser session and reload the page so the init script fires before the SDK loads. After this, /debug/sdk-trap/info should show a captured SDK with execute().',
+		handler: async (c, browser) => {
+			const installed = await ensureSdkTrap(browser);
+			const page = browser.getPage();
+			let reloaded = false;
+			if (installed && page && page.url().startsWith('https://build.nvidia.com')) {
+				await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+				reloaded = true;
+			}
+			return c.json({ ok: true, newlyInstalled: installed, reloaded });
+		},
+	},
+
+	{
+		method: 'GET',
+		path: '/debug/sdk-trap/info',
+		description:
+			'E6: report whether the SDK trap captured the hCaptcha SDK on the current page. Returns the keys + function-shape of the captured SDK. Run /debug/sdk-trap/install first.',
+		handler: async (c, browser) => {
+			const control = browser.getScriptControl();
+			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
+			const info = (await control.evaluateInMainWorld(
+				`(() => { try { return window.__bn_sdkInfo ? window.__bn_sdkInfo() : { trapInstalled: false }; } catch (e) { return { error: String(e) }; } })()`,
+			)) as Record<string, unknown> | null;
+			return c.json({ ok: true, info });
+		},
+	},
+
+	{
+		method: 'POST',
+		path: '/debug/sdk-trap/mint',
+		description:
+			'E6: mint a fresh hCaptcha token via the SDK trap binding (no UI drive). Body (optional): {"sitekey":"...","timeoutMs":30000}. Defaults to NVIDIA_SITEKEY.',
+		handler: async (c, browser) => {
+			const body = await c.req
+				.json<{ sitekey?: string; timeoutMs?: number }>()
+				.catch(() => ({}) as { sitekey?: string; timeoutMs?: number });
+			const sitekey = body.sitekey ?? NVIDIA_SITEKEY;
+			const timeoutMs = body.timeoutMs ?? 30_000;
+			const t0 = Date.now();
+			try {
+				const token = await mintViaBinding(browser, sitekey, timeoutMs);
+				return c.json({
+					ok: true,
+					tokenLength: token.length,
+					tokenPrefix: token.slice(0, 4),
+					token,
+					durationMs: Date.now() - t0,
+				});
+			} catch (err) {
+				return c.json(
+					{
+						ok: false,
+						error: err instanceof Error ? err.message : String(err),
+						durationMs: Date.now() - t0,
+					},
+					502,
+				);
+			}
 		},
 	},
 

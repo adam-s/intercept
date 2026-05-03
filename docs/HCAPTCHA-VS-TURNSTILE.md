@@ -753,6 +753,39 @@ The route abort in `captureUnburned` is racy ~30% of the time (the browser's POS
 
 Next: **E4** is now lower priority — the single-page rate is already useful. If we need throughput >1 chat/sec, we'd build the multi-page pool. **E5/E6/E7** (jsdom, addBinding, hsw VM) become "remove the browser entirely" optimizations; the mint-then-replay shape works today.
 
+### E6 results — SDK trap mint (binding path)
+
+Goal: skip the UI drive entirely and call `_hcaptcha.execute(widgetId, {async:true})` directly. Builds on E3.
+
+**The shape of the surface, empirically:**
+- `js.hcaptcha.com/1/api.js?onload=hCaptchaOnLoad&render=explicit` IS loaded by NVIDIA's bundle (visible via `performance.getEntriesByType('resource')`), even though no `<script>` tag survives in `document.scripts`.
+- The loader calls `window.hcaptcha = { render, execute, getResponse, reset, close, setData, getRespKey, remove }`.
+- `@hcaptcha/react-hcaptcha` does `this._hcaptcha = e.window.hcaptcha`, then NVIDIA's bundle (or react-hcaptcha's own teardown — exact site unidentified) makes `window.hcaptcha` `undefined` again before any `page.evaluate` can read it. From an isolated-world perspective `window.hcaptcha` is *never* visible.
+- `execute()`'s first arg is the **widget id** (returned by `render()` and exposed on the iframe as `data-hcaptcha-widget-id`), not the sitekey. Passing the sitekey raises `invalid-captcha-id`. NVIDIA's page renders one invisible widget on every model URL.
+
+**The trap, [`domains/build-nvidia/src/sdk-trap.ts`](../domains/build-nvidia/src/sdk-trap.ts):** install a main-world init script that re-defines `window.hcaptcha` as an accessor BEFORE the loader runs. The setter mirrors every assignment to a hidden cache (`_captured`) that survives any later `delete window.hcaptcha`. Exposes `window.__bn_mintToken(idOrSitekey?)` — auto-discovers the widget id from the DOM if the caller passed a sitekey-shape (UUID).
+
+**The Node-side surface:** `CdpScriptControl.evaluateInMainWorld(expr, { awaitPromise: true })` runs `await window.__bn_mintToken(...)` and returns the token string. Wrapped in a per-page mutex because the SDK shares an internal `_pendingExecute` slot.
+
+**Soak (8 sequential `/chat/completions/binding` calls, single page, no UI drive between them):**
+
+| Call | dur | result |
+|------|-----|--------|
+| 1 | 5746 ms | ok (cold start: persona+trap install, page reload, SDK load) |
+| 2 | 1093 ms | ok |
+| 3 | 1351 ms | ok |
+| 4 | 1088 ms | ok |
+| 5 | 1075 ms | ok |
+| 6 | 1073 ms | ok |
+| 7 | 1140 ms | ok |
+| 8 |  999 ms | ok |
+
+**8/8** with no race-loss retries. Mint itself averages ~330 ms; full chat round-trip (mint + Bun fetch + first SSE chunk) ~1100 ms at steady state. **2x faster than `/browserless`** (which sat at ~2s + 30% retry chance) and the failure mode is gone — there is no abortable-but-racy outgoing POST to lose.
+
+**Production:** [`POST /api/build-nvidia/chat/completions/binding`](../domains/build-nvidia/src/routes.ts). Same body shape as `/browserless`; cached `nvcfFunctionId` per model; per-browser-session mint mutex; transparently navigates to the model page if not already there. Browser still required at boot (to render the widget once and capture the SDK ref); per-request transport is pure Bun fetch with three headers.
+
+**What this does NOT solve:** the browser is still load-bearing as a one-time SDK host. **E7** (reimplementing the `hsw` bytecode VM in pure Node) remains the path to true browserless — no Patchright, no Chromium, no widget render — and is now the only meaningful next step on the ladder.
+
 ---
 
 ## Reading order if you're new to this
