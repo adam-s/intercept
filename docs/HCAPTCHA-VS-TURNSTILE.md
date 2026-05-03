@@ -1063,6 +1063,31 @@ The remaining work to close the last ~5 KB of proof bulk:
 
 The wall is now fully characterised at the **execution-time-budget** level: it's not what hsw reads, it's how many iterations of an internal CPU loop fit within whatever wall-clock budget hsw self-imposes. Real Chrome has slower-per-op crypto/perf APIs, so it accumulates more iterations and produces more proof bulk. **No amount of polyfilling fixes this without artificially slowing down our Node hsw to match.**
 
+#### Falsifying the time-budget hypothesis
+
+Followup direct test: artificially slow `getRandomValues` from 0us to 2000us per call (spin-loop between calls). Result: proof stayed at exactly 11324 across all settings:
+
+```text
+baseline (0us slowdown): proof=11324, total time=45ms
++10us per call:          proof=11324, total time=39ms
++50us per call:          proof=11324, total time=40ms
++100us per call:         proof=11324, total time=52ms
++500us per call:         proof=11328, total time=121ms
++2000us per call:        proof=11324, total time=385ms
+```
+
+So the time-budget hypothesis is **false**. The proof size is deterministic given the JS environment shape — it does not depend on per-call timing. The earlier "+1500 wedge with inline.js" turned out to be sandbox-specific noise: re-running the same comparison with a slightly different sandbox shape yielded baseline 12264, with-inline 12292 (delta +28, basically nothing). The proof size is **highly sensitive to subtle aspects of the JS environment** — sandbox object identities, Function.prototype.toString output, vm context state — but these effects are environment-particular and don't predict Chrome's proof bulk in any actionable way.
+
+#### Final position
+
+Across all probing, **the proof size is deterministic for given (jwt, opts) inputs in a given environment shape**, but the SHAPE of "Node vm" produces a smaller proof than the SHAPE of "Chrome iframe with full DOM and Sentry/Raven loaded". The remaining work is no longer characterisation — it's either:
+
+1. **Build a sufficiently-complete browser-like JS environment in Node** to make our hsw produce Chrome-equivalent proof sizes. This is the jsdom-with-everything path. Hard to predict size without trying — could close the gap in days, could need months.
+2. **Hybrid posture: ship a pinned headless Chromium binary** with the project, drive it from Node via CDP. Eliminates per-server-boot Patchright dependency but keeps real V8.
+3. **Accept E6** as the production posture (~330 ms mint via SDK trap, browser only at server boot).
+
+Recommendation: **(3)** is shipping-quality today. **(2)** is the engineering path if you want browserless-after-boot. **(1)** is research, not engineering.
+
 Captured artifacts on disk for posterity:
 - [`/tmp/hsw-mode1-in.bin`](file:///tmp/hsw-mode1-in.bin) — full plaintext msgpack input to the live iframe's `hsw(1, …)` call. Decodes to `{v, sitekey, host, hl, motionData, pdc, pem, n: <19924-char proof>, e: null}`. The `n` field is what we need to reproduce.
 - [`/tmp/hsw-proof-opts.json`](file:///tmp/hsw-proof-opts.json) — captured opts passed to `hsw(jwt, opts)`. Drop-in for the Node mint.
