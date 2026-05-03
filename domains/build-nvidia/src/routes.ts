@@ -44,6 +44,7 @@ import {
 	probeHCaptchaFrame,
 } from './captcha-frame';
 import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
+import { attachHcapXhrTap, detachHcapXhrTap, drainHcapXhrTap } from './hcap-xhr-tap';
 import { BuildNvidiaInstrument } from './instrument';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
 import {
@@ -67,6 +68,9 @@ let fingerprintAttachedFor: RemoteBrowserService | null = null;
  *  react-hcaptcha hides it and exposes `window.__bn_mintToken(siteKey)`. */
 let sdkTrapHandle: InitScriptHandle | null = null;
 let sdkTrapAttachedFor: RemoteBrowserService | null = null;
+/** hCaptcha XHR/fetch tap (E7) — focused capture of iframe's traffic to
+ *  api.hcaptcha.com with full request + response bodies. */
+let hcapXhrTapHandle: InitScriptHandle | null = null;
 
 /**
  * Install the build-nvidia persona init script on this browser session if
@@ -1190,6 +1194,49 @@ export const routes: DomainRoute[] = [
 					502,
 				);
 			}
+		},
+	},
+
+	// ─── DEBUG: E7 — hCaptcha XHR/fetch tap (full bodies) ────────────
+	{
+		method: 'POST',
+		path: '/debug/hcap-xhr/attach',
+		description:
+			'E7: install the focused hCaptcha XHR/fetch tap on every current and future frame. Captures full bodies (req+res) for any URL on api.hcaptcha.com / *.hcaptcha.com, plus <script src=*hcaptcha*> tag loads (challenge JS via SRI). Reload the page after attach for it to take effect.',
+		handler: async (c, browser) => {
+			if (hcapXhrTapHandle) return c.json({ ok: true, alreadyAttached: true });
+			const control = browser.getScriptControl();
+			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
+			hcapXhrTapHandle = await attachHcapXhrTap(control);
+			return c.json({
+				ok: true,
+				hint: 'Reload the page, drive a mint, then GET /debug/hcap-xhr/log.',
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/debug/hcap-xhr/log',
+		description:
+			'E7: drain the hcap-xhr tap. Returns base64-encoded request + response bodies bucketed by frame URL.',
+		handler: async (c, browser) => {
+			if (!hcapXhrTapHandle) return c.json({ ok: false, error: 'Tap not attached' }, 412);
+			const page = browser.getPage();
+			if (!page) return c.json({ ok: false, error: 'No page' }, 503);
+			const drain = await drainHcapXhrTap(page);
+			return c.json({ ok: true, ...drain });
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/hcap-xhr/detach',
+		description: 'E7: detach the hcap-xhr tap. Already-installed shims in existing frames remain.',
+		handler: async (c, browser) => {
+			if (!hcapXhrTapHandle) return c.json({ ok: true, alreadyDetached: true });
+			const control = browser.getScriptControl();
+			if (control) await detachHcapXhrTap(control, hcapXhrTapHandle);
+			hcapXhrTapHandle = null;
+			return c.json({ ok: true });
 		},
 	},
 

@@ -784,7 +784,55 @@ Goal: skip the UI drive entirely and call `_hcaptcha.execute(widgetId, {async:tr
 
 **Production:** [`POST /api/build-nvidia/chat/completions/binding`](../domains/build-nvidia/src/routes.ts). Same body shape as `/browserless`; cached `nvcfFunctionId` per model; per-browser-session mint mutex; transparently navigates to the model page if not already there. Browser still required at boot (to render the widget once and capture the SDK ref); per-request transport is pure Bun fetch with three headers.
 
-**What this does NOT solve:** the browser is still load-bearing as a one-time SDK host. **E7** (reimplementing the `hsw` bytecode VM in pure Node) remains the path to true browserless — no Patchright, no Chromium, no widget render — and is now the only meaningful next step on the ladder.
+**What this does NOT solve:** the browser is still load-bearing as a one-time SDK host. **E7** (true browserless, no widget render at all) remains the only meaningful step beyond this — see findings below.
+
+### E7 reconnaissance — reframed (NOT a "bytecode VM in Node")
+
+Captured a real mint via [`hcap-xhr-tap`](../domains/build-nvidia/src/hcap-xhr-tap.ts) — a focused init script that records full request + response bytes for any URL on `*.hcaptcha.com` from the iframe (auto-propagates to OOPIFs; integrity preserved). Findings overturn the bytecode-VM hypothesis from the original plan:
+
+**Each `_hcaptcha.execute()` makes exactly ONE network call:** `POST https://api.hcaptcha.com/getcaptcha/<sitekey>` with `Content-Type: application/octet-stream`. Request ~25 KB, response ~2.5 KB, ~300 ms round-trip. No follow-up `check`/`siteverify`. The server returns the token directly in this response.
+
+**Request body is a 2-element msgpack array:**
+- `[0]` — **plaintext JSON** (~700 bytes), the spec from the *previous* call:
+  ```json
+  {"type":"hsw","req":"<JWT>"}
+  ```
+  The JWT payload `{f,s,t,d,l,i,e,n,c}`:
+  - `t:"w"` matches type `hsw` (proof-of-work)
+  - `d` = ~1.5 KB base64 challenge bytecode (changes each call)
+  - `l:"/c/d104b9aae0221727…"` = path to the proof JS (stable across calls)
+  - `i:"sha256-wXAi/tlOeOQe+p/Tc79B1CsxPV5cQ1jyoI/1m/RrtH8="` = SRI integrity hash for the proof JS
+  - `n:"hsw"` = global function name set by the proof JS
+  - `c:1000` = challenge difficulty count
+  - `e:<unix>` = expiration (bumped each call)
+- `[1]` — **encrypted** 24 KB blob (random-looking; site config has `enc_get_req:true`). Holds the fingerprint + motion data + computed proof.
+
+**Response is also encrypted** — first byte `0xf7`, decodes as a stream containing a custom msgpack `ExtType(code=102)` envelope. Not a standard msgpack type — hCaptcha-specific.
+
+**The chained protocol:**
+```
+mint N:   client POSTs (spec_{N-1}, enc(proof_{N-1} + fingerprint))
+          server returns (token_{N-1}, spec_N)  ← both in one response
+mint N+1: client POSTs (spec_N, enc(proof_N + fingerprint))
+          ...
+```
+
+So `execute()` is a single chained round-trip. The proof JS is only fetched + parsed ONCE per session (cached by `Wr` in `inline.js` keyed by `payload.n`). Subsequent mints re-call `window.hsw(prev_d, opts)` synchronously to compute the next proof.
+
+**Why this is harder than the original plan thought:**
+
+The plan called for "reimplement the hsw bytecode VM" — there is no separate VM to reimplement. The proof JS is just code, easily run in Node `vm`. But the actual blocker is **two layers of custom symmetric crypto**:
+1. Request item [1] is encrypted with `enc_get_req:true` — key derivation unknown (probably HMAC of sitekey + per-page nonce, possibly ECDH-derived from a server pubkey baked into the bundle).
+2. Response wraps with `ExtType(code=102)` — custom envelope, decryption path lives inside `inline.js`.
+
+Reversing both is the gate. Plus we'd need to reimplement the fingerprint + motionData encoder (the bundle has ~70 fields per d4c5d1e0). 2-4 days minimum, high uncertainty.
+
+**Practical conclusion:** the gap from E6 to E7 is substantial reverse engineering of crypto + fingerprint encoding for a marginal benefit (E6 already mints in ~330 ms with a one-time-per-server browser). Recommended pause point unless throughput beyond E6 is needed — at which point **E4 (multi-page parallelism)** is the cheaper next step (linear scale-out via `RemoteBrowserService.getOrCreatePage(id)`, no new reverse engineering).
+
+Captured artifacts on disk for posterity:
+- [`/tmp/hcap-xhr-200.bin`](file:///tmp/hcap-xhr-200.bin) — full encrypted response (2491 bytes)
+- [`/tmp/hcap-xhr-req.bin`](file:///tmp/hcap-xhr-req.bin) — full request including plaintext spec + encrypted body (25311 bytes)
+- [`/tmp/hcap-xhr-req2.bin`](file:///tmp/hcap-xhr-req2.bin) — second mint, for diffing
 
 ---
 
