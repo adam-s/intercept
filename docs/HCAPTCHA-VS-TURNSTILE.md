@@ -829,6 +829,47 @@ Reversing both is the gate. Plus we'd need to reimplement the fingerprint + moti
 
 **Practical conclusion:** the gap from E6 to E7 is substantial reverse engineering of crypto + fingerprint encoding for a marginal benefit (E6 already mints in ~330 ms with a one-time-per-server browser). Recommended pause point unless throughput beyond E6 is needed — at which point **E4 (multi-page parallelism)** is the cheaper next step (linear scale-out via `RemoteBrowserService.getOrCreatePage(id)`, no new reverse engineering).
 
+### E7 — pure-Node crypto control (CRYPTO SOLVED, server-side validation remains)
+
+After the original E7 plan was reframed (above), pulled the proof JS into a Node `vm` sandbox to verify deterministic control. **The crypto reverse-engineering is no longer the gate** — the proof JS itself does both encryption and the bytecode VM, so we never need to reimplement either.
+
+Files:
+- [`domains/build-nvidia/scripts/e7-isolate.mjs`](../domains/build-nvidia/scripts/e7-isolate.mjs) — load proof JS in Node `vm`, decrypt a captured response.
+- [`domains/build-nvidia/scripts/e7-mint.mjs`](../domains/build-nvidia/scripts/e7-mint.mjs) — chained mint (decrypt prev response → encrypt next payload → POST).
+- [`domains/build-nvidia/scripts/e7-mint-fresh.mjs`](../domains/build-nvidia/scripts/e7-mint-fresh.mjs) — cold-start (checksiteconfig → hsw → encrypt → POST).
+- [`domains/build-nvidia/src/hcap-xhr-tap.ts`](../domains/build-nvidia/src/hcap-xhr-tap.ts) — full-body XHR/fetch capture for `*.hcaptcha.com`.
+- [`domains/build-nvidia/src/hsw-tap.ts`](../domains/build-nvidia/src/hsw-tap.ts) — wraps `window.hsw` to log every `(mode, in, out)` call.
+
+#### What was solved
+
+- ✅ **Decrypt deterministically**: `hsw(0, captured_response_bytes)` returns msgpack of `{pass, generated_pass_UUID, expiration, c}`. The token is just `decoded.generated_pass_UUID`.
+- ✅ **Encrypt to correct wire format**: `hsw(1, msgpack(payload))` returns the encrypted blob; the request body is `msgpack-lite.encode([prev_spec_str, encrypted_blob])`. **Critical wire detail**: msgpack-lite encodes `Uint8Array` as **ExtType code 18** (non-standard convention from msgpack-lite's registry), not standard `bin8/16/32`. The `@msgpack/msgpack` package encodes `bin` and the server returns 415 Unsupported Media Type.
+- ✅ **Proof execution**: `hsw(<JWT>, {href, ardata, vm_data, uj_data})` runs the bytecode VM and returns a base64 proof string in ~30-50 ms in Node. Goes into payload field `n`.
+- ✅ **Cold-start sequence**: `POST /checksiteconfig` (returns initial spec + sets `__cf_bm` Cloudflare cookie) → `hsw(spec.req, opts)` → encrypt → POST `/getcaptcha/<sitekey>`.
+
+#### What is NOT yet solved — server-side anti-bot validation
+
+End-to-end mint from a fresh Node process consistently gets HTTP 200 BUT a **plaintext** JSON response of the form:
+
+```json
+{ "c": { "type": "hsw", "req": "<NEW JWT>" }, "success": false, "error-codes": [] }
+```
+
+A real browser session gets an **encrypted** response containing `{pass:true, generated_pass_UUID:"P1_…", expiration:120, c:<next_spec>}` — this is the encrypted-token issuance path. Our pure-Node session is downgraded to "issue a fresh challenge but no token."
+
+Investigation differentials:
+- Cookies don't gate this — replaying with the live browser's `hmt_id` cookie produces the same plaintext rejection.
+- Proof JS produces a 8316-byte proof from cold-start; the live browser produces 20448 bytes. **2.46× ratio is consistent across runs**, suggesting the proof incorporates either accumulated session state (vm_data / uj_data we pass as `null`) or browser-environment values our polyfills don't supply (perhaps the SDK silently extends the proof with a fingerprint signature or a ratchet from prior calls).
+- The 24 KB browser request body vs. our ~10 KB body lines up with the proof differential — payload size differs primarily because of the `n` field length.
+
+The remaining gate is therefore one (or both) of:
+1. **TLS / JA3 fingerprint** at Cloudflare (`server: cloudflare`, `__cf_bm` cookie issued). Bun's BoringSSL TLS may flag as bot.
+2. **Proof completeness** — the in-iframe SDK accumulates state during page-load fingerprint collection that we'd need to fake.
+
+#### Status
+
+The crypto, protocol, and proof execution are now fully under our control in pure Node. The remaining gap is server-side validation — substantial work to either (a) match the browser's TLS fingerprint via curl-impersonate or similar, and/or (b) reverse-engineer what the SDK puts in `vm_data`/`uj_data` to bulk up the proof. Multi-day with uncertain outcome — the cleaner production posture remains **E6** (~330 ms mint via SDK trap, browser is required only to keep the SDK warm).
+
 Captured artifacts on disk for posterity:
 - [`/tmp/hcap-xhr-200.bin`](file:///tmp/hcap-xhr-200.bin) — full encrypted response (2491 bytes)
 - [`/tmp/hcap-xhr-req.bin`](file:///tmp/hcap-xhr-req.bin) — full request including plaintext spec + encrypted body (25311 bytes)

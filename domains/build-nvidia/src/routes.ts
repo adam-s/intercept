@@ -45,6 +45,7 @@ import {
 } from './captcha-frame';
 import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { attachHcapXhrTap, detachHcapXhrTap, drainHcapXhrTap } from './hcap-xhr-tap';
+import { attachHswTap, detachHswTap, drainHswTap } from './hsw-tap';
 import { BuildNvidiaInstrument } from './instrument';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
 import {
@@ -71,6 +72,8 @@ let sdkTrapAttachedFor: RemoteBrowserService | null = null;
 /** hCaptcha XHR/fetch tap (E7) — focused capture of iframe's traffic to
  *  api.hcaptcha.com with full request + response bodies. */
 let hcapXhrTapHandle: InitScriptHandle | null = null;
+/** hsw I/O tap (E7) — wraps window.hsw to log mode/input/output bytes. */
+let hswTapHandle: InitScriptHandle | null = null;
 
 /**
  * Install the build-nvidia persona init script on this browser session if
@@ -1194,6 +1197,59 @@ export const routes: DomainRoute[] = [
 					502,
 				);
 			}
+		},
+	},
+
+	// ─── DEBUG: E7 — hsw I/O tap (capture exact mode-1 payloads) ────
+	{
+		method: 'POST',
+		path: '/debug/hsw-tap/attach',
+		description:
+			'E7: install init-script that wraps window.hsw to log every (mode, input, output) call. Reload required.',
+		handler: async (c, browser) => {
+			if (hswTapHandle) return c.json({ ok: true, alreadyAttached: true });
+			const control = browser.getScriptControl();
+			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
+			hswTapHandle = await attachHswTap(control);
+			return c.json({ ok: true, hint: 'Reload page, drive a mint, then GET /debug/hsw-tap/log.' });
+		},
+	},
+	{
+		method: 'GET',
+		path: '/debug/hsw-tap/log',
+		description: 'E7: drain hsw I/O log per frame.',
+		handler: async (c, browser) => {
+			if (!hswTapHandle) return c.json({ ok: false, error: 'Not attached' }, 412);
+			const page = browser.getPage();
+			if (!page) return c.json({ ok: false, error: 'No page' }, 503);
+			return c.json({ ok: true, ...(await drainHswTap(page)) });
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/hsw-tap/detach',
+		description: 'E7: detach hsw I/O tap.',
+		handler: async (c, browser) => {
+			if (!hswTapHandle) return c.json({ ok: true, alreadyDetached: true });
+			const control = browser.getScriptControl();
+			if (control) await detachHswTap(control, hswTapHandle);
+			hswTapHandle = null;
+			return c.json({ ok: true });
+		},
+	},
+
+	// ─── DEBUG: dump browser cookies (E7 needs hcaptcha.com cookies) ──
+	{
+		method: 'GET',
+		path: '/debug/cookies',
+		description: 'Dump browser context cookies. ?domain=hcaptcha.com filters.',
+		handler: async (c, browser) => {
+			const page = browser.getPage();
+			if (!page) return c.json({ ok: false, error: 'No page' }, 503);
+			const filter = new URL(c.req.url).searchParams.get('domain');
+			const all = await page.context().cookies();
+			const list = filter ? all.filter((ck) => ck.domain.includes(filter)) : all;
+			return c.json({ ok: true, count: list.length, cookies: list });
 		},
 	},
 
