@@ -665,11 +665,24 @@ export class CdpScriptControl extends EventEmitter {
 	 */
 	async evaluateInMainWorld<T = unknown>(
 		expression: string,
-		opts: { awaitPromise?: boolean; timeoutMs?: number } = {},
+		opts: { awaitPromise?: boolean; timeoutMs?: number; page?: Page } = {},
 	): Promise<T | null> {
-		if (!this.rootSession) return null;
+		// Default: evaluate on the root session. If `page` is provided, find
+		// the matching child session so callers can target a specific
+		// adopted page's main world.
+		let session: CDPSession | null = this.rootSession;
+		if (opts.page && opts.page !== this.rootPage) {
+			session = null;
+			for (const state of this.childSessions.values()) {
+				if (state.page === opts.page) {
+					session = state.session;
+					break;
+				}
+			}
+		}
+		if (!session) return null;
 		try {
-			const result = (await this.rootSession.send('Runtime.evaluate', {
+			const result = (await session.send('Runtime.evaluate', {
 				expression,
 				returnByValue: true,
 				awaitPromise: opts.awaitPromise ?? false,

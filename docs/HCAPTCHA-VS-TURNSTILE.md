@@ -1148,6 +1148,96 @@ Captured artifacts on disk for posterity:
 
 ---
 
+## Live findings — 2026-05-03 (WASM gap synthesis + warm-mint + Lambda smoke)
+
+### The WASM gap, definitively measured
+
+`hsw.js` (906 KB JS) is a thin bridge around a 530 KB WebAssembly module that does the actual proof-of-work. The JS exposes a 158-key object `Yu` whose functions are passed to the WASM as imports — every WASM-side `import.<fn>(handle)` call dispatches into a JS callback that probes browser environment (`navigator.platform`, `instanceof Window`, `getEntriesByType('resource')`, etc.). The WASM is deterministic given the same import-callback returns; the difference between Chrome (`19848`-char proof) and Node + happy-dom is **purely** in what those callbacks return.
+
+| Patch state | Proof len | vs Chrome 19848 | Server |
+| --- | ---: | ---: | --- |
+| Vanilla Node + happy-dom | 13,688 | 69.0% | 415 |
+| + 6× `instanceof DOMClass → Object` patches | 15,764 | 79.4% | 415 |
+| + `vf(qQ)[IE(316)] → "en-US"` patch | 15,764 | 79.4% | 415 |
+
+**The patches that worked** (cumulative +2076 chars, ~10% of target): `instanceof Window/PerformanceResourceTiming/HTMLCanvasElement/CanvasRenderingContext/DOMStringList/PerformanceNavigationTiming → instanceof Object`. All literal-string `instanceof` checks in the source. Each one had been gating an entire fingerprint-collection branch.
+
+**Patches that didn't move the needle**: language reader (already returned `"en-US"` in our env), additional Yu-property reads we suspected (`vf(FI)[IE(366)]` for `.versions`, `[IE(328)]` for `.node`, `[IE(336)]` for `.process`).
+
+### Why the remaining 21% won't yield to more patching
+
+Three independent reasons:
+
+1. **Obfuscated probes outnumber visible ones.** `IE(N)` is a 400-entry runtime string lookup. Many call sites are `vf(handle)[IE(qQ)]` where `qQ` is computed at runtime — grep-and-replace can't reach them.
+
+2. **Some probes need actually-implemented behavior.** `Function.prototype.toString` must return `function X() { [native code] }` for natives, `performance.getEntriesByType('resource')` must return populated `PerformanceResourceTiming` instances with plausible timing values, WebGL `getParameter(UNMASKED_VENDOR_WEBGL)` must return a real GL renderer string. Polyfills get exposed.
+
+3. **The verifier doesn't just check length.** Our 15,764-char proof parses as well-formed msgpack. HTTP 415 = "your proof byte sequence doesn't validate against our crypto signature." Shorter proof = WASM iterated fewer rounds = wrong signature. Length is a proxy, not the gate.
+
+Independent confirmation: minzique/hsw-srv applies the exact patch set that gets us to 15764 — but their README never claims server acceptance. Implex/hcaptcha-reverse achieves pure-Node mint by **replacing the entire 530KB WASM module** with a 5.5MB hand-modified WAT recompile. Multi-week effort, breaks every bundle-hash rotation.
+
+**Verdict**: pure-Node mint is infeasible at acceptable engineering cost given current `hsw.js`. The minimum-browser path (E6 / warm-mint) is the realistic floor.
+
+### Warm-mint — strips NVIDIA's UI from the critical path
+
+E6 still required driving the NVIDIA model page (~3-5MB React app, `/openai/gpt-oss-20b` etc.). The warm-mint approach replaces NVIDIA's HTML with a 200-byte stub served via Patchright `page.route` at `https://build.nvidia.com/__warm`:
+
+```html
+<!DOCTYPE html><html><head>
+<script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+</head><body>
+<div class="h-captcha" data-sitekey="0c6a1e45-…" data-size="invisible"></div>
+</body></html>
+```
+
+Origin is preserved (sitekey-bound to `build.nvidia.com`), so hCaptcha accepts. The persona init script and SDK trap auto-attach via `CdpScriptControl`. After page boot:
+
+- Per-mint: ~340-540ms (single browser), ~300ms (round-robin across N-browser pool)
+- First mint includes ~1.7s page boot; pool boot ~12s for size=4
+
+`evaluateInMainWorld` was extended to accept `{ page }` so we could target the warm child page's main world (was previously root-session-only).
+
+### Per-IP rate ceiling — measured
+
+60-second sustained load test against `pool=4 concurrency=6`:
+
+| Window | Mints | Rate |
+| --- | ---: | ---: |
+| 0-15s (burst) | 55 | ~3.5/s |
+| 15-30s (throttle kicks in) | 22 | ~1.5/s |
+| 30-60s (steady-state under throttle) | 7 | ~0.23/s |
+
+**~70 free mints, then ~720/hour sustained from a single IP.** All tokens unique (no caching).
+
+### Lambda smoke test — definitive answer on token detachability
+
+The chatgpt-toolkit `poc-lambda-fanout` pattern (mint locally, ship `{token, cookies, message}` to Lambda, Lambda fires the API POST from a rotating AWS IP) is **not portable to build-nvidia**. Smoke results:
+
+| Test | Result |
+| --- | --- |
+| `/chat/completions/browser` (browser mints + browser POSTs) | ✅ 200 |
+| `/chat/completions/browserless` (browser mints + Bun replays from same Node, same IP) | ❌ 400 "Token is invalid" |
+| `/debug/capture-unburned` + Lambda replay (different AWS IP) | ❌ 400 "Token is invalid" |
+| `/debug/capture-unburned` + local replay (home IP, same Node) | ❌ 400 "Token is invalid" |
+
+**Local AND Lambda fail with identical error**, ruling out pure IP pinning. The token is bound to either (a) the browser TCP/TLS session that minted it, OR (b) `captureUnburned`'s `page.route` abort invalidates it via a side-channel (the captcha widget seeing its expected POST fail). The cleaner "mint via warm-pool, no abort, use from raw Node fetch" test couldn't run because hCaptcha was throttling our IP from earlier stress tests.
+
+**Implication**: the only Lambda-shaped path for build-nvidia is **Chromium-in-Lambda** (each Lambda runs the full warm-mint browser). Mint-and-ship-token is dead.
+
+**Cheaper alternative for capacity**: N small EC2s, each running our existing warm-pool, each with its own EIP. Same code, ~$15/box/mo, linear scaling per IP bucket. No Lambda packaging.
+
+### Code added this round
+
+- [`domains/build-nvidia/src/warm-mint.ts`](../domains/build-nvidia/src/warm-mint.ts) — single-browser warm-mint page
+- [`domains/build-nvidia/src/warm-pool.ts`](../domains/build-nvidia/src/warm-pool.ts) — N-browser persona pool wrapper around `BrowserPool`
+- [`packages/browser/src/remote/cdp-script-control.ts`](../packages/browser/src/remote/cdp-script-control.ts) — `evaluateInMainWorld` accepts `{ page }`
+- [`domains/build-nvidia/lambda-smoke/`](../domains/build-nvidia/lambda-smoke/) — Lambda PoC harness (kept for posterity; deployed function torn down)
+- [`domains/build-nvidia/scripts/stress-warm-pool.mjs`](../domains/build-nvidia/scripts/stress-warm-pool.mjs) — concurrency-sweep stress test
+
+Debug routes: `/debug/warm-mint/{inspect,mint}`, `/debug/warm-pool/{start,mint,stats}`.
+
+---
+
 ## Reading order if you're new to this
 
 1. Read [`domains/chatgpt/TURNSTILE.md`](../domains/chatgpt/TURNSTILE.md)

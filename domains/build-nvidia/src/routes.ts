@@ -45,11 +45,15 @@ import {
 } from './captcha-frame';
 import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { attachHcapXhrTap, detachHcapXhrTap, drainHcapXhrTap } from './hcap-xhr-tap';
+import {
+	attachHswInstrument,
+	detachHswInstrument,
+	drainHswInstrument,
+	type HswInstrumentHandle,
+} from './hsw-instrument';
 import { attachHswTap, detachHswTap, drainHswTap } from './hsw-tap';
-import { attachRandomTap, detachRandomTap, drainRandomTap } from './random-tap';
-import { attachHswInstrument, detachHswInstrument, drainHswInstrument, type HswInstrumentHandle } from './hsw-instrument';
-import { attachWasmImportTap, detachWasmImportTap, drainWasmImportTap } from './wasm-import-tap';
 import { BuildNvidiaInstrument } from './instrument';
+import { attachRandomTap, detachRandomTap, drainRandomTap } from './random-tap';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
 import {
 	attachRuntimeTap,
@@ -59,6 +63,9 @@ import {
 } from './runtime-tap';
 import { getBundleCapture, startBundleCapture, stopBundleCapture } from './script-capture';
 import { buildSdkTrapScript, SDK_TRAP_GLOBALS } from './sdk-trap';
+import { inspectWarmPage, mintViaWarmPage } from './warm-mint';
+import { BuildNvidiaWarmPool } from './warm-pool';
+import { attachWasmImportTap, detachWasmImportTap, drainWasmImportTap } from './wasm-import-tap';
 
 /** Singleton — one active instrumentation per server. */
 let instrument: BuildNvidiaInstrument | null = null;
@@ -1212,6 +1219,107 @@ export const routes: DomainRoute[] = [
 		},
 	},
 
+	// ─── DEBUG: warm-mint (single browser, minimal HTML stub) ───────
+	{
+		method: 'GET',
+		path: '/debug/warm-mint/inspect',
+		description:
+			'Diagnostic — dump warm-mint page state (URL, persona, scripts loaded, SDK trap status). Useful when /debug/warm-mint/mint reports a captureless trap.',
+		handler: async (c, browser) => {
+			const info = await inspectWarmPage(browser);
+			return c.json({ ok: true, info });
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/warm-mint/mint',
+		description:
+			'E6+: mint via the minimal warm page (no NVIDIA UI). First call boots the warm page on this browser session; later calls reuse it. Body (optional): {"sitekey":"...","timeoutMs":30000}.',
+		handler: async (c, browser) => {
+			const body = await c.req
+				.json<{ sitekey?: string; timeoutMs?: number }>()
+				.catch(() => ({}) as { sitekey?: string; timeoutMs?: number });
+			const t0 = Date.now();
+			try {
+				const token = await mintViaWarmPage(browser, body);
+				return c.json({
+					ok: true,
+					tokenLength: token.length,
+					tokenPrefix: token.slice(0, 4),
+					token,
+					durationMs: Date.now() - t0,
+				});
+			} catch (err) {
+				return c.json(
+					{
+						ok: false,
+						error: err instanceof Error ? err.message : String(err),
+						durationMs: Date.now() - t0,
+					},
+					502,
+				);
+			}
+		},
+	},
+
+	// ─── DEBUG: warm-pool (N browsers × N personas × N warm pages) ──
+	{
+		method: 'POST',
+		path: '/debug/warm-pool/start',
+		description:
+			'E6+: boot the warm-mint pool. Body: {"size":N,"headless":true}. Each pool member is its own browser process with its own profile dir + persona. Idempotent — second call returns the same singleton.',
+		handler: async (c) => {
+			const body = await c.req
+				.json<{ size?: number; headless?: boolean }>()
+				.catch(() => ({}) as { size?: number; headless?: boolean });
+			const size = Math.max(1, Math.min(8, body.size ?? 2));
+			const headless = body.headless ?? true;
+			const t0 = Date.now();
+			try {
+				const pool = BuildNvidiaWarmPool.getInstance({ size, headless });
+				await pool.start();
+				return c.json({ ok: true, durationMs: Date.now() - t0, ...pool.stats() });
+			} catch (err) {
+				return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 502);
+			}
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/warm-pool/mint',
+		description:
+			'E6+: round-robin mint via the warm-mint pool. /debug/warm-pool/start must have been called first. Returns the token + which slot served it.',
+		handler: async (c) => {
+			const body = await c.req
+				.json<{ timeoutMs?: number }>()
+				.catch(() => ({}) as { timeoutMs?: number });
+			const pool = BuildNvidiaWarmPool.getInstance({ size: 2 });
+			try {
+				const r = await pool.mint(body.timeoutMs ?? 30_000);
+				return c.json({
+					ok: true,
+					tokenLength: r.token.length,
+					tokenPrefix: r.token.slice(0, 4),
+					token: r.token,
+					persona: r.persona,
+					browserIndex: r.browserIndex,
+					durationMs: r.durationMs,
+				});
+			} catch (err) {
+				return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 502);
+			}
+		},
+	},
+	{
+		method: 'GET',
+		path: '/debug/warm-pool/stats',
+		description: 'Per-slot persona + inflight count for the warm-mint pool.',
+		handler: async (c) => {
+			const pool = BuildNvidiaWarmPool.getInstance({ size: 2 });
+			return c.json({ ok: true, ...pool.stats() });
+		},
+	},
+
 	// ─── DEBUG: E7 — hsw I/O tap (capture exact mode-1 payloads) ────
 	{
 		method: 'POST',
@@ -1254,13 +1362,17 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'POST',
 		path: '/debug/wasm-import-tap/attach',
-		description: 'E7: install init-script that wraps WebAssembly.instantiate; logs every WASM import callback (args + return value) during a mint.',
+		description:
+			'E7: install init-script that wraps WebAssembly.instantiate; logs every WASM import callback (args + return value) during a mint.',
 		handler: async (c, browser) => {
 			if (wasmImportTapHandle) return c.json({ ok: true, alreadyAttached: true });
 			const control = browser.getScriptControl();
 			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
 			wasmImportTapHandle = await attachWasmImportTap(control);
-			return c.json({ ok: true, hint: 'Reload, drive a mint, then GET /debug/wasm-import-tap/log.' });
+			return c.json({
+				ok: true,
+				hint: 'Reload, drive a mint, then GET /debug/wasm-import-tap/log.',
+			});
 		},
 	},
 	{
@@ -1291,9 +1403,15 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'POST',
 		path: '/debug/hsw-instrument/attach',
-		description: 'E7: install init-script that bypasses SRI on <script> tags + decorate hsw.js to inject per-function counters. Reload required.',
+		description:
+			'E7: install init-script that bypasses SRI on <script> tags + decorate hsw.js to inject per-function counters. Reload required.',
 		handler: async (c, browser) => {
-			if (hswInstrumentHandle) return c.json({ ok: true, alreadyAttached: true, totalFunctions: hswInstrumentHandle.totalFunctions });
+			if (hswInstrumentHandle)
+				return c.json({
+					ok: true,
+					alreadyAttached: true,
+					totalFunctions: hswInstrumentHandle.totalFunctions,
+				});
 			const control = browser.getScriptControl();
 			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
 			hswInstrumentHandle = await attachHswInstrument(control);
@@ -1307,7 +1425,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/debug/hsw-instrument/log',
-		description: 'E7: drain per-function call counts captured by the instrumented hsw.js. Bucketed by frame.',
+		description:
+			'E7: drain per-function call counts captured by the instrumented hsw.js. Bucketed by frame.',
 		handler: async (c, browser) => {
 			if (!hswInstrumentHandle) return c.json({ ok: false, error: 'Not attached' }, 412);
 			const page = browser.getPage();
@@ -1333,13 +1452,17 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'POST',
 		path: '/debug/random-tap/attach',
-		description: 'E7: install init-script that wraps crypto.getRandomValues + window.hsw to count RNG calls per proof. Reload required.',
+		description:
+			'E7: install init-script that wraps crypto.getRandomValues + window.hsw to count RNG calls per proof. Reload required.',
 		handler: async (c, browser) => {
 			if (randomTapHandle) return c.json({ ok: true, alreadyAttached: true });
 			const control = browser.getScriptControl();
 			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
 			randomTapHandle = await attachRandomTap(control);
-			return c.json({ ok: true, hint: 'Reload page, drive a mint, then GET /debug/random-tap/log.' });
+			return c.json({
+				ok: true,
+				hint: 'Reload page, drive a mint, then GET /debug/random-tap/log.',
+			});
 		},
 	},
 	{
