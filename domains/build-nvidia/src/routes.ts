@@ -47,6 +47,7 @@ import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { attachHcapXhrTap, detachHcapXhrTap, drainHcapXhrTap } from './hcap-xhr-tap';
 import { attachHswTap, detachHswTap, drainHswTap } from './hsw-tap';
 import { attachRandomTap, detachRandomTap, drainRandomTap } from './random-tap';
+import { attachHswInstrument, detachHswInstrument, drainHswInstrument, type HswInstrumentHandle } from './hsw-instrument';
 import { BuildNvidiaInstrument } from './instrument';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
 import {
@@ -78,6 +79,9 @@ let hswTapHandle: InitScriptHandle | null = null;
 /** crypto.getRandomValues tap (E7-D-real-trace) — counts RNG calls per
  *  hsw invocation, to compare browser-side count to our Node 176. */
 let randomTapHandle: InitScriptHandle | null = null;
+/** hsw.js source-instrumentation (E7-D) — patches function bodies with
+ *  per-id counter, bypasses SRI so the patched bytes load. */
+let hswInstrumentHandle: HswInstrumentHandle | null = null;
 
 /**
  * Install the build-nvidia persona init script on this browser session if
@@ -1238,6 +1242,48 @@ export const routes: DomainRoute[] = [
 			const control = browser.getScriptControl();
 			if (control) await detachHswTap(control, hswTapHandle);
 			hswTapHandle = null;
+			return c.json({ ok: true });
+		},
+	},
+
+	// ─── DEBUG: E7-D — hsw.js source instrumentation ────────────────
+	{
+		method: 'POST',
+		path: '/debug/hsw-instrument/attach',
+		description: 'E7: install init-script that bypasses SRI on <script> tags + decorate hsw.js to inject per-function counters. Reload required.',
+		handler: async (c, browser) => {
+			if (hswInstrumentHandle) return c.json({ ok: true, alreadyAttached: true, totalFunctions: hswInstrumentHandle.totalFunctions });
+			const control = browser.getScriptControl();
+			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
+			hswInstrumentHandle = await attachHswInstrument(control);
+			return c.json({
+				ok: true,
+				totalFunctionsInstrumented: hswInstrumentHandle.totalFunctions,
+				hint: 'Reload page so the patched hsw.js fetches and the SRI-bypass init script fires; then drive a mint and GET /debug/hsw-instrument/log.',
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/debug/hsw-instrument/log',
+		description: 'E7: drain per-function call counts captured by the instrumented hsw.js. Bucketed by frame.',
+		handler: async (c, browser) => {
+			if (!hswInstrumentHandle) return c.json({ ok: false, error: 'Not attached' }, 412);
+			const page = browser.getPage();
+			if (!page) return c.json({ ok: false, error: 'No page' }, 503);
+			const drain = await drainHswInstrument(page);
+			return c.json({ ok: true, totalFunctions: hswInstrumentHandle.totalFunctions, ...drain });
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/hsw-instrument/detach',
+		description: 'E7: detach hsw.js source instrumentation. Subsequent loads see original bytes.',
+		handler: async (c, browser) => {
+			if (!hswInstrumentHandle) return c.json({ ok: true, alreadyDetached: true });
+			const control = browser.getScriptControl();
+			if (control) await detachHswInstrument(control, hswInstrumentHandle);
+			hswInstrumentHandle = null;
 			return c.json({ ok: true });
 		},
 	},

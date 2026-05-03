@@ -11,6 +11,12 @@ win.document.documentElement.setAttribute(
 	'hcaptcha-frame-c6e277da86802178b920b24f7bd79dd5d0c81e0d',
 );
 
+// CRITICAL: happy-dom doesn't expose WebAssembly. hsw.js's fast path
+// requires WebAssembly.instantiate(). Without it, hsw falls back to a
+// JS-only path that produces ~58% size proof. Bridging Node's
+// WebAssembly into the happy-dom window unlocks the fast path.
+win.WebAssembly = WebAssembly;
+
 // Count RNG calls
 const orig = win.crypto.getRandomValues.bind(win.crypto);
 let rngCount = 0;
