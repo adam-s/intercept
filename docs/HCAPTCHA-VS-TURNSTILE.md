@@ -1088,6 +1088,55 @@ Across all probing, **the proof size is deterministic for given (jwt, opts) inpu
 
 Recommendation: **(3)** is shipping-quality today. **(2)** is the engineering path if you want browserless-after-boot. **(1)** is research, not engineering.
 
+### E7 even DEEPER — real-browser RNG trace inverts the diagnosis
+
+Built [`domains/build-nvidia/src/random-tap.ts`](../domains/build-nvidia/src/random-tap.ts): init script wrapping `crypto.getRandomValues`, `crypto.subtle.*`, and `window.hsw` in the LIVE iframe (auto-propagates to OOPIFs). Drove a real mint, captured per-call counts.
+
+**Result:** every prior mental model was wrong:
+
+| Environment | RNG calls / proof | Subtle calls / proof | Proof size |
+|-------------|-------|------|------|
+| Node (vm context, basic polyfills) | **176** | 0 | 11296 |
+| Node (vm context + HappyDOM) | **246** | 0 | 13288 |
+| Node (`runInThisContext`, same realm) | **210** | 0 | 12264 |
+| Node (`runInThisContext` + OffscreenCanvas) | **214** | 0 | 12376 |
+| **Live Chrome iframe** | **~3** | **0** | **19848** |
+
+Chrome's hsw.js makes essentially **NO** `crypto.getRandomValues` calls and **NO** `crypto.subtle.*` calls during the proof — yet produces a much larger proof. **Different code path entirely.** Chrome takes a "fast" path that computes a long deterministic chain seeded by a single random value (likely via internal JS bitwise hashing). Node's hsw falls back to a "slow" path that re-keys via `getRandomValues` ~200 times and produces a smaller chain.
+
+**The branch that triggers fast vs slow path is hidden inside obfuscated hsw.js.** None of these have flipped it:
+- TLS / cookies / Sec-Fetch headers
+- `Function.prototype.toString` wrapping (Sentry-style)
+- `OffscreenCanvas`, `WebGL`, `Audio`, `Worker`, `Blob` polyfills
+- Real `URL.createObjectURL`
+- `window.parent !== window`, `frameElement`
+- `_sharedLibs`, `Raven` globals (set or empty)
+- Wrapping `crypto.subtle` to return vm-context ArrayBuffers
+- Loading inline.js into the same realm before hsw.js
+- Using `vm.runInThisContext` to keep types consistent
+- HappyDOM with full DOM (gets us closest, +18% proof bulk over vm baseline, but still half of Chrome)
+
+**Files added:**
+- [`e7-happy-dom.mjs`](../domains/build-nvidia/scripts/e7-happy-dom.mjs) — load hsw in HappyDOM (best Node result so far: 13288)
+- [`e7-canvas.mjs`](../domains/build-nvidia/scripts/e7-canvas.mjs) — runInThisContext + functional OffscreenCanvas
+- [`e7-runinthiscontext.mjs`](../domains/build-nvidia/scripts/e7-runinthiscontext.mjs) — same-realm baseline
+- [`e7-subtle-fix.mjs`](../domains/build-nvidia/scripts/e7-subtle-fix.mjs) — vm-context ArrayBuffer wrap (no effect)
+- [`e7-worker.mjs`](../domains/build-nvidia/scripts/e7-worker.mjs) — Worker stub (no effect)
+
+#### Final wall location
+
+**The fast/slow branch is inside obfuscated hsw.js code keyed on something we haven't yet identified.** Without source-level instrumentation of hsw.js itself (which would require patching its bytes — and bypassing both ECDSA self-check + browser-enforced SRI), we can't see which check triggers the divergence.
+
+**The two viable paths to actually close the gap:**
+
+1. **Source-patch hsw.js with logging at every `function(`.** Implementation requires either (a) Node-side: edit our 906 KB hsw.js copy, run instrumented version, observe which functions Chrome calls but Node doesn't (still doesn't tell us WHY Chrome takes that path); or (b) browser-side: intercept the hsw.js fetch via CDP `Fetch.fulfillRequest`, replace bytes with instrumented version, AND bypass SRI by overriding `HTMLScriptElement.prototype.integrity` setter via init script before the `<script>` tag is created. Multi-day work with uncertain decoding success after.
+
+2. **Hybrid: bundle a pinned headless Chromium driven by Node CDP.** Real Chrome V8 + WebCrypto, no per-server browser dependency, Node owns transport. Most pragmatic.
+
+3. **Accept E6** (`/chat/completions/binding`, ~330ms mint via SDK trap, browser only at server boot). Ships today.
+
+The wall is **definitively** at the cryptographic-primitive-dispatch level inside hsw.js's obfuscated branches. Not crypto correctness, not protocol, not network, not DOM polyfills — there's a specific environment check that flips hsw between fast (~3 RNG, big chain) and slow (~200 RNG, small chain) paths. **What that check tests on, we don't know without disassembling the obfuscation.**
+
 Captured artifacts on disk for posterity:
 - [`/tmp/hsw-mode1-in.bin`](file:///tmp/hsw-mode1-in.bin) — full plaintext msgpack input to the live iframe's `hsw(1, …)` call. Decodes to `{v, sitekey, host, hl, motionData, pdc, pem, n: <19924-char proof>, e: null}`. The `n` field is what we need to reproduce.
 - [`/tmp/hsw-proof-opts.json`](file:///tmp/hsw-proof-opts.json) — captured opts passed to `hsw(jwt, opts)`. Drop-in for the Node mint.

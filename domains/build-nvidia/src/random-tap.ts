@@ -39,8 +39,24 @@ const TAP_SCRIPT = `(function() {
     push({ kind: 'rng', n: counter, len: buf?.byteLength || buf?.length || 0, t: performance.now() });
     return origGetRandom(buf);
   };
-  // Also expose count for direct read
   Object.defineProperty(window, '__bn_rng_count', { get: function() { return counter; }, configurable: true });
+
+  // Also wrap crypto.subtle.* methods to count calls
+  var subtleCounters = {};
+  if (crypto.subtle) {
+    var subtleMethods = ['encrypt','decrypt','sign','verify','digest','generateKey','deriveKey','deriveBits','importKey','exportKey','wrapKey','unwrapKey'];
+    subtleMethods.forEach(function(m) {
+      var orig = crypto.subtle[m];
+      if (typeof orig !== 'function') return;
+      subtleCounters[m] = 0;
+      crypto.subtle[m] = function() {
+        subtleCounters[m]++;
+        push({ kind: 'subtle', method: m, n: subtleCounters[m], t: performance.now() });
+        return orig.apply(crypto.subtle, arguments);
+      };
+    });
+  }
+  Object.defineProperty(window, '__bn_subtle_counts', { get: function() { return subtleCounters; }, configurable: true });
 
   // Also wrap hsw if it ever appears, so we can correlate with proof calls
   var capturedHsw = null;

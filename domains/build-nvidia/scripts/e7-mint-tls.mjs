@@ -11,7 +11,7 @@
  */
 
 import { webcrypto } from 'node:crypto';
-import { mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { TextDecoder, TextEncoder } from 'node:util';
@@ -320,7 +320,7 @@ async function main() {
 				JSON.stringify(
 					j,
 					(_k, v) =>
-						typeof v === 'string' && v.length > 80 ? v.slice(0, 40) + `…[${v.length}]` : v,
+						typeof v === 'string' && v.length > 80 ? `${v.slice(0, 40)}…[${v.length}]` : v,
 					2,
 				).slice(0, 800),
 			);
@@ -339,13 +339,13 @@ async function main() {
 				JSON.stringify(
 					obj,
 					(_k, v) =>
-						typeof v === 'string' && v.length > 80 ? v.slice(0, 40) + `…[${v.length}]` : v,
+						typeof v === 'string' && v.length > 80 ? `${v.slice(0, 40)}…[${v.length}]` : v,
 					2,
 				).slice(0, 800),
 			);
 			if (obj?.generated_pass_UUID) {
 				console.log('\n*** PURE-NODE TOKEN MINTED VIA TLS IMPERSONATION ***');
-				console.log(obj.generated_pass_UUID.slice(0, 80) + '…');
+				console.log(`${obj.generated_pass_UUID.slice(0, 80)}…`);
 				console.log(`\nlength: ${obj.generated_pass_UUID.length}, expiration: ${obj.expiration}s`);
 			}
 		} else {

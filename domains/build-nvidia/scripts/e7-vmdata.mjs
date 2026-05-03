@@ -179,7 +179,7 @@ sandbox.document = {
 	},
 	referrer: 'https://build.nvidia.com/openai/gpt-oss-20b',
 	location: {
-		href: 'https://newassets.hcaptcha.com/captcha/v1/' + BUNDLE_HASH + '/static/hcaptcha.html',
+		href: `https://newassets.hcaptcha.com/captcha/v1/${BUNDLE_HASH}/static/hcaptcha.html`,
 	},
 	cookie: '',
 	readyState: 'complete',
@@ -192,7 +192,7 @@ sandbox.document = {
 const HASH = `frame=challenge&id=${WIDGET_ID}&host=${HOST}&sentry=true&reportapi=https%3A%2F%2Faccounts.hcaptcha.com&recaptchacompat=true&custom=false&hl=en&tplinks=on&andint=off&pstissuer=https%3A%2F%2Fpst-issuer.hcaptcha.com&sitekey=${SITEKEY}&theme=dark&size=invisible&origin=https%3A%2F%2Fbuild.nvidia.com`;
 sandbox.location = {
 	href: `https://newassets.hcaptcha.com/captcha/v1/${BUNDLE_HASH}/static/hcaptcha.html#${HASH}`,
-	hash: '#' + HASH,
+	hash: `#${HASH}`,
 	host: 'newassets.hcaptcha.com',
 	hostname: 'newassets.hcaptcha.com',
 	origin: 'https://newassets.hcaptcha.com',
@@ -301,7 +301,7 @@ sandbox.self = sandbox;
 sandbox.frames = sandbox;
 sandbox.top = sandbox;
 sandbox.parent = {
-	postMessage: (msg, targetOrigin, transfer) => {
+	postMessage: (msg, _targetOrigin, _transfer) => {
 		console.log(
 			`[parent.postMessage]`,
 			typeof msg === 'object' ? JSON.stringify(msg).slice(0, 150) : String(msg).slice(0, 150),
@@ -457,7 +457,7 @@ const exposed = Object.keys(sandbox).filter((k) => k.startsWith('__bn_'));
 for (const k of exposed) {
 	const v = sandbox[k];
 	console.log(
-		`  ${k}: ${typeof v}${v && typeof v === 'object' ? ' keys=' + Object.keys(v).slice(0, 8).join(',') : ''}`,
+		`  ${k}: ${typeof v}${v && typeof v === 'object' ? ` keys=${Object.keys(v).slice(0, 8).join(',')}` : ''}`,
 	);
 }
 

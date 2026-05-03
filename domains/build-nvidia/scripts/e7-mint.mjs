@@ -301,7 +301,7 @@ async function main() {
 					JSON.stringify(
 						obj,
 						(_k, v) =>
-							typeof v === 'string' && v.length > 80 ? v.slice(0, 60) + `…[${v.length}]` : v,
+							typeof v === 'string' && v.length > 80 ? `${v.slice(0, 60)}…[${v.length}]` : v,
 						2,
 					),
 				);

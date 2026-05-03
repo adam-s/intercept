@@ -132,7 +132,7 @@ async function test(label, withInline) {
 	const HASH = `frame=challenge&id=0gtest&host=build.nvidia.com&sentry=true&reportapi=https%3A%2F%2Faccounts.hcaptcha.com&recaptchacompat=true&custom=false&hl=en&tplinks=on&andint=off&pstissuer=https%3A%2F%2Fpst-issuer.hcaptcha.com&sitekey=0c6a1e45-75d7-43cc-b836-a0c9d886b8ee&theme=dark&size=invisible&origin=https%3A%2F%2Fbuild.nvidia.com`;
 	sandbox.location = {
 		href: `https://newassets.hcaptcha.com/x#${HASH}`,
-		hash: '#' + HASH,
+		hash: `#${HASH}`,
 		host: 'newassets.hcaptcha.com',
 		hostname: 'newassets.hcaptcha.com',
 		origin: 'https://newassets.hcaptcha.com',

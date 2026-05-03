@@ -179,7 +179,7 @@ async function main() {
 	// Step 0: persistent cookie jar (server tracks session via Set-Cookie hmt_id)
 	const cookieJar = new Map();
 	const fetchWithCookies = async (url, opts = {}) => {
-		const u = new URL(url);
+		const _u = new URL(url);
 		const cookieHeader = [...cookieJar.entries()].map(([n, v]) => `${n}=${v}`).join('; ');
 		const headers = { ...(opts.headers || {}), ...(cookieHeader ? { cookie: cookieHeader } : {}) };
 		const res = await fetch(url, { ...opts, headers });
@@ -310,12 +310,12 @@ async function main() {
 				JSON.stringify(
 					obj,
 					(_k, v) =>
-						typeof v === 'string' && v.length > 80 ? v.slice(0, 60) + `…[${v.length}]` : v,
+						typeof v === 'string' && v.length > 80 ? `${v.slice(0, 60)}…[${v.length}]` : v,
 					2,
 				),
 			);
 			if (obj?.generated_pass_UUID)
-				console.log('\n*** PURE-NODE TOKEN: ***\n' + obj.generated_pass_UUID);
+				console.log(`\n*** PURE-NODE TOKEN: ***\n${obj.generated_pass_UUID}`);
 		} else console.log('hsw returned:', dec);
 	} catch (e) {
 		console.log('decrypt2 failed:', e.message);

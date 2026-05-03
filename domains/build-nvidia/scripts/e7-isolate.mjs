@@ -11,7 +11,7 @@ import { TextDecoder, TextEncoder } from 'node:util';
 import vm from 'node:vm';
 
 const HSW_PATH = '/tmp/hsw.js';
-const REQ_PATH = '/tmp/hcap-xhr-req.bin';
+const _REQ_PATH = '/tmp/hcap-xhr-req.bin';
 const RESP_PATH = '/tmp/hcap-xhr-200.bin';
 
 // ─── minimal browser-like sandbox ─────────────────────────────────────
@@ -229,7 +229,7 @@ async function main() {
 					JSON.stringify(
 						obj,
 						(_k, v) =>
-							typeof v === 'string' && v.length > 200 ? v.slice(0, 80) + `…[${v.length}]` : v,
+							typeof v === 'string' && v.length > 200 ? `${v.slice(0, 80)}…[${v.length}]` : v,
 						2,
 					).slice(0, 1500),
 				);

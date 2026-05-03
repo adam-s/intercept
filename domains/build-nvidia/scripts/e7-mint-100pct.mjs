@@ -35,7 +35,7 @@ const SITEKEY = '0c6a1e45-75d7-43cc-b836-a0c9d886b8ee';
 const HOST = 'build.nvidia.com';
 const PARENT_URL = 'https://build.nvidia.com/openai/gpt-oss-20b';
 const BUNDLE_HASH = 'c6e277da86802178b920b24f7bd79dd5d0c81e0d';
-const WIDGET_ID = '0g' + Math.random().toString(36).slice(2, 12);
+const WIDGET_ID = `0g${Math.random().toString(36).slice(2, 12)}`;
 
 // ─── shared sandbox builder ────────────────────────────────────────────
 function makeSandbox({ asChallenge = false } = {}) {
@@ -171,7 +171,7 @@ function makeSandbox({ asChallenge = false } = {}) {
 		dispatchEvent: () => true,
 		referrer: PARENT_URL, // ← tells the iframe what the parent's URL is
 		location: {
-			href: 'https://newassets.hcaptcha.com/captcha/v1/' + BUNDLE_HASH + '/static/hcaptcha.html',
+			href: `https://newassets.hcaptcha.com/captcha/v1/${BUNDLE_HASH}/static/hcaptcha.html`,
 		},
 		cookie: '',
 		readyState: 'complete',
@@ -183,7 +183,7 @@ function makeSandbox({ asChallenge = false } = {}) {
 	const HASH = `frame=${asChallenge ? 'challenge' : 'checkbox-invisible'}&id=${WIDGET_ID}&host=${HOST}&sentry=true&reportapi=https%3A%2F%2Faccounts.hcaptcha.com&recaptchacompat=true&custom=false&hl=en&tplinks=on&andint=off&pstissuer=https%3A%2F%2Fpst-issuer.hcaptcha.com&sitekey=${SITEKEY}&theme=dark&size=invisible&origin=https%3A%2F%2Fbuild.nvidia.com`;
 	s.location = {
 		href: `https://newassets.hcaptcha.com/captcha/v1/${BUNDLE_HASH}/static/hcaptcha.html#${HASH}`,
-		hash: '#' + HASH,
+		hash: `#${HASH}`,
 		host: 'newassets.hcaptcha.com',
 		hostname: 'newassets.hcaptcha.com',
 		origin: 'https://newassets.hcaptcha.com',
@@ -568,7 +568,7 @@ async function main() {
 		console.log(
 			JSON.stringify(
 				j,
-				(_k, v) => (typeof v === 'string' && v.length > 80 ? v.slice(0, 40) + `…[${v.length}]` : v),
+				(_k, v) => (typeof v === 'string' && v.length > 80 ? `${v.slice(0, 40)}…[${v.length}]` : v),
 				2,
 			).slice(0, 600),
 		);
@@ -583,7 +583,7 @@ async function main() {
 		console.log(
 			JSON.stringify(
 				obj,
-				(_k, v) => (typeof v === 'string' && v.length > 80 ? v.slice(0, 40) + `…[${v.length}]` : v),
+				(_k, v) => (typeof v === 'string' && v.length > 80 ? `${v.slice(0, 40)}…[${v.length}]` : v),
 				2,
 			),
 		);
