@@ -870,6 +870,90 @@ The remaining gate is therefore one (or both) of:
 
 The crypto, protocol, and proof execution are now fully under our control in pure Node. The remaining gap is server-side validation — substantial work to either (a) match the browser's TLS fingerprint via curl-impersonate or similar, and/or (b) reverse-engineer what the SDK puts in `vm_data`/`uj_data` to bulk up the proof. Multi-day with uncertain outcome — the cleaner production posture remains **E6** (~330 ms mint via SDK trap, browser is required only to keep the SDK warm).
 
+### E7 deeper dive — TLS falsified, vm_data identified
+
+Built two more harnesses + an instrumented hsw tap to test the two suspects.
+
+#### TLS fingerprint (FALSIFIED)
+
+[`domains/build-nvidia/scripts/curl-impersonate.mjs`](../domains/build-nvidia/scripts/curl-impersonate.mjs) wraps `curl_chrome145` (lexiforest's arm64-macos build, JA3 `adec69ef9a15aab61b53aa18c2532e3d`, JA4 `t13d1516h2_8daaf6152771_d8a2da3f94cd`) as a fetch-shaped helper. [`e7-mint-tls.mjs`](../domains/build-nvidia/scripts/e7-mint-tls.mjs) re-runs the cold-start mint through curl-impersonate so the TLS handshake matches a real Chrome.
+
+Definitive deterministic test:
+
+| Test | Body | Client | Result |
+|------|------|--------|--------|
+| 1 | captured browser body | Bun fetch | **200** ✓ |
+| 2 | captured browser body | curl-impersonate | **200** ✓ |
+| 3 | our generated body  | Bun fetch | **415** |
+| 4 | our generated body  | curl-impersonate | **415** |
+
+Tests 1 and 2 succeed regardless of client. Tests 3 and 4 fail regardless of client. **TLS fingerprint is not the gate.** The 415 is misleading — it's emitted when the server can't validate the encrypted payload (probably proof verification failure inside the blob), not when the wire format is wrong.
+
+(One small wire detail discovered along the way: `curl-impersonate-chrome145` defaults to navigation `Sec-Fetch-*` headers — `Sec-Fetch-Dest: document, Sec-Fetch-Mode: navigate, Sec-Fetch-Site: none` — but the iframe XHR uses `empty / cors / same-site`. Override explicitly. Doesn't change the 415 outcome.)
+
+#### Proof completeness (the actual gate)
+
+Extended [`hsw-tap.ts`](../domains/build-nvidia/src/hsw-tap.ts) to capture not just `(mode, in, out)` but also the **opts object** passed to `hsw(jwt, opts)`. The captured opts:
+
+```js
+{
+  href: 'https://build.nvidia.com/openai/gpt-oss-20b',
+  ardata: null,
+  vm_data: '<JSON string, ~1.7 KB of nested fingerprint state with screen size,
+             query selectors, class names, large numeric-keyed object map,
+             timestamps, and a base64 signature>',
+  uj_data: null,
+  errors: [],
+}
+```
+
+Plugged the captured `vm_data` into our Node mint via [`e7-proof-replay.mjs`](../domains/build-nvidia/scripts/e7-proof-replay.mjs). Proof size as a function of input:
+
+| Inputs | Proof size |
+|--------|-----------|
+| no opts (vm_data null) | 8316 chars |
+| vm_data: captured 1737-char blob | 11212 chars |
+| Same call repeated | 11240 / 11212 chars (**non-deterministic**) |
+| Live browser (target) | 19924-19952 chars |
+
+So vm_data closed ~1/3 of the gap, but the proof is still half the size the live iframe produces. Two facts emerged:
+1. The proof is **non-deterministic** — same `(jwt, opts)` produces different bytes each run. The proof embeds randomness (`crypto.getRandomValues` likely). So we can never byte-match — the test is whether the SERVER accepts our proof of the correct shape and size.
+2. We still have ~8 KB of missing proof bulk after providing vm_data.
+
+#### Where the missing 8 KB comes from
+
+Found the source by grep on the bundle:
+
+```js
+function p(t,n) {
+  ...
+  Cr(t && t.vmdata),  // sets gr (vm_data) from t.vmdata
+  ...
+}
+.then(t => Cr(t.vmdata),  // OR from another promise
+  Rr().then(...))
+```
+
+`vmdata` is **issued by the OTHER hCaptcha iframe** via `Yi.contact("check-api")` — an inter-frame postMessage RPC. The two iframes are:
+
+- `newassets.hcaptcha.com/.../hcaptcha.html#frame=checkbox-invisible` — runs the protocol (calls hsw, encrypts, POSTs)
+- `newassets.hcaptcha.com/.../hcaptcha.html#frame=challenge` — collects `vmdata` + `motiondata` from the page environment, replies via postMessage
+
+Both iframes load the SAME `inline.js`; the `#frame=` hash chooses the role. Our pure-Node sandbox runs only the proof side. To match the browser's full proof, we'd need to either:
+
+- **Run BOTH iframes' code paths in Node** — essentially the E5 jsdom path applied to `inline.js` (568 KB), with realistic DOM polyfills sufficient for the fingerprint collector. Multi-day, uncertain.
+- **Proxy through a live browser for vmdata** — defeats the purpose of pure-Node mint.
+
+#### Final E7 verdict
+
+The crypto, protocol, encryption, decryption, proof execution, and inter-call state are all under our control in pure Node. **The single remaining piece is a ~1.7 KB `vmdata` blob produced by inter-iframe RPC inside a real DOM.** Without it, the server's anti-bot scoring rejects our payload (returns plaintext "fresh challenge" instead of encrypted token).
+
+**Recommended posture:** **E6** is the production path. E7 is interesting research but the marginal benefit (no per-server browser at boot) does not justify the multi-day reverse-engineering of the cross-iframe RPC. If the vmdata gate is ever lifted by hCaptcha (or if a sitekey is configured without `enc_get_req:true`), E7 becomes trivially complete with the work already done.
+
+Captured artifacts on disk for posterity:
+- [`/tmp/hsw-mode1-in.bin`](file:///tmp/hsw-mode1-in.bin) — full plaintext msgpack input to the live iframe's `hsw(1, …)` call. Decodes to `{v, sitekey, host, hl, motionData, pdc, pem, n: <19924-char proof>, e: null}`. The `n` field is what we need to reproduce.
+- [`/tmp/hsw-proof-opts.json`](file:///tmp/hsw-proof-opts.json) — captured opts passed to `hsw(jwt, opts)`. Drop-in for the Node mint.
+
 Captured artifacts on disk for posterity:
 - [`/tmp/hcap-xhr-200.bin`](file:///tmp/hcap-xhr-200.bin) — full encrypted response (2491 bytes)
 - [`/tmp/hcap-xhr-req.bin`](file:///tmp/hcap-xhr-req.bin) — full request including plaintext spec + encrypted body (25311 bytes)

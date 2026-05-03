@@ -1,24 +1,30 @@
 /**
- * E7 — pure-Node mint, FRESH session (no captured browser state).
+ * E7-D-3: Cold-start hCaptcha mint via curl-impersonate (Chrome 145 TLS).
  *
- * Goal: discover the right call sequence by experimenting with different
- * input shapes to hsw(). We have no captured I/O for the FIRST getcaptcha
- * call (the browser already did one before our tap attached), so we have
- * to figure out the cold-start protocol from the bundle source + experiment.
+ * Tests whether the JA3/JA4 fingerprint is what gates the encrypted-token
+ * issuance path. Same protocol as e7-mint-fresh.mjs but every HTTP call
+ * goes through curl-impersonate instead of Bun fetch.
+ *
+ * Pass criterion: server returns msgpack-encrypted response decryptable by
+ * hsw(0, …) yielding {pass:true, generated_pass_UUID:"P1_…"}.
+ * Fail criterion: server still returns plaintext JSON {c, success:false}.
  */
 
 import { webcrypto } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { TextDecoder, TextEncoder } from 'node:util';
 import vm from 'node:vm';
 import { decode, encode } from '@msgpack/msgpack';
 import msgpackLite from 'msgpack-lite';
+import { curlImpersonate } from './curl-impersonate.mjs';
 
 const HSW_PATH = '/tmp/hsw.js';
 const SITEKEY = '0c6a1e45-75d7-43cc-b836-a0c9d886b8ee';
 const HOST = 'build.nvidia.com';
 
-// ─── sandbox bootstrap (identical to other scripts) ────────────────────
+// ─── sandbox ───────────────────────────────────────────────────────────
 const sandbox = {};
 sandbox.globalThis = sandbox;
 sandbox.console = console;
@@ -124,7 +130,7 @@ sandbox.innerHeight = 720;
 sandbox.devicePixelRatio = 2;
 sandbox.Intl = Intl;
 sandbox.clientInformation = sandbox.navigator;
-for (const Ctor of [
+for (const C of [
 	'Navigator',
 	'Document',
 	'Screen',
@@ -133,16 +139,16 @@ for (const Ctor of [
 	'RTCRtpReceiver',
 	'RTCPeerConnection',
 ])
-	sandbox[Ctor] = () => {};
-sandbox.Worker = function Worker() {
-	throw new Error('Worker called');
+	sandbox[C] = () => {};
+sandbox.Worker = () => {
+	throw new Error('Worker');
 };
-sandbox.fetch = function fetch() {
-	throw new Error('fetch called');
+sandbox.fetch = () => {
+	throw new Error('fetch');
 };
 sandbox.URL = URL;
 sandbox.URLSearchParams = URLSearchParams;
-sandbox.Blob = function Blob() {};
+sandbox.Blob = () => {};
 for (const k of [
 	'Error',
 	'JSON',
@@ -163,89 +169,79 @@ for (const k of [
 	sandbox[k] = globalThis[k];
 
 const ctx = vm.createContext(sandbox);
-new vm.Script(readFileSync(HSW_PATH, 'utf8'), { filename: 'hsw.js' }).runInContext(ctx, {
-	timeout: 10_000,
-});
+new vm.Script(readFileSync(HSW_PATH, 'utf8'), { filename: 'hsw.js' }).runInContext(ctx);
 console.log(`hsw loaded: ${typeof sandbox.hsw}`);
 
 async function awaitOrTimeout(p, ms, label) {
 	return Promise.race([
 		Promise.resolve(p),
-		new Promise((_r, rj) => setTimeout(() => rj(new Error(`${label} timeout ${ms}ms`)), ms)),
+		new Promise((_r, rj) => setTimeout(() => rj(new Error(`${label} timeout`)), ms)),
 	]);
 }
 
 async function main() {
-	// Step 0: persistent cookie jar (server tracks session via Set-Cookie hmt_id)
-	const cookieJar = new Map();
-	const fetchWithCookies = async (url, opts = {}) => {
-		const u = new URL(url);
-		const cookieHeader = [...cookieJar.entries()].map(([n, v]) => `${n}=${v}`).join('; ');
-		const headers = { ...(opts.headers || {}), ...(cookieHeader ? { cookie: cookieHeader } : {}) };
-		const res = await fetch(url, { ...opts, headers });
-		const setCookie = res.headers.getSetCookie
-			? res.headers.getSetCookie()
-			: [res.headers.get('set-cookie')].filter(Boolean);
-		for (const sc of setCookie || []) {
-			const m = sc.match(/^([^=]+)=([^;]*)/);
-			if (m) cookieJar.set(m[1], m[2]);
-		}
-		return res;
-	};
+	const cookieJar = path.join(mkdtempSync(path.join(tmpdir(), 'cj-')), 'cookies.txt');
+	console.log(`cookie jar: ${cookieJar}`);
 
-	// Step 1: Bootstrap hsw
+	// Step 1: bootstrap hsw
 	console.log('\n=== Step 1: bootstrap ===');
 	const boot = await awaitOrTimeout(
 		sandbox.hsw('IiI=.eyJzIjowLCJmIjowLCJjIjowfQ==.'),
 		5000,
-		'bootstrap',
+		'boot',
 	);
-	console.log(`bootstrap returned ${typeof boot} len=${boot?.length || 0}`);
+	console.log(`bootstrap len=${boot.length}`);
 
-	// Step 2: GET checksiteconfig — server initialises session, returns initial spec
-	console.log('\n=== Step 2: GET checksiteconfig ===');
+	// Step 2: GET checksiteconfig — via curl-impersonate (Chrome 145 TLS).
+	// The browser actually uses POST here per our trace, but with no body.
+	console.log('\n=== Step 2: POST checksiteconfig (Chrome 145 TLS) ===');
 	const cscUrl = `https://api.hcaptcha.com/checksiteconfig?v=c6e277da86802178b920b24f7bd79dd5d0c81e0d&host=${HOST}&sitekey=${SITEKEY}&sc=1&swa=1&spst=1`;
-	const r1 = await fetchWithCookies(cscUrl, {
+	// Use XHR Sec-Fetch-* headers (curl-impersonate defaults to navigation
+	// values which look wrong for an XHR-from-iframe).
+	const xhrHeaders = {
+		'sec-fetch-dest': 'empty',
+		'sec-fetch-mode': 'cors',
+		'sec-fetch-site': 'same-site',
+	};
+	const r1 = await curlImpersonate(cscUrl, {
 		method: 'POST',
 		headers: {
 			accept: 'application/json',
 			'content-type': 'text/plain',
 			origin: 'https://newassets.hcaptcha.com',
 			referer: 'https://newassets.hcaptcha.com/',
+			...xhrHeaders,
 		},
+		cookieJar,
 	});
-	console.log(`status=${r1.status}, cookies after: ${[...cookieJar.keys()].join(',')}`);
-	const j1 = await r1.json();
+	console.log(`status=${r1.status}, set-cookies=${r1.setCookies.length}`);
+	for (const sc of r1.setCookies) console.log(`  ← ${sc.split(';')[0]}`);
+	const j1 = JSON.parse(await r1.text());
 	console.log(`features: ${JSON.stringify(j1.features)}`);
 	const firstSpec = j1.c;
-	console.log(`spec.req[:80]: ${firstSpec?.req?.slice(0, 80)}…`);
-
 	if (!firstSpec) {
-		console.log('No spec — bailing.');
+		console.log('No spec — bail');
 		return;
 	}
+	console.log(`spec.req[:80]: ${firstSpec.req.slice(0, 80)}…`);
 
-	// Step 3 removed — we now know hsw(JWT) is the proof call (Step 4).
-
-	// Step 4: Compute proof for the fresh spec by passing the JWT to hsw.
-	console.log('\n=== Step 4: compute proof for fresh spec ===');
-	// Load real captured opts (vm_data) from prior /debug/hsw-tap dump.
-	const capturedOpts = JSON.parse(readFileSync('/tmp/hsw-proof-opts.json', 'utf8'));
+	// Step 3: compute proof
+	console.log('\n=== Step 3: compute proof in Node vm ===');
 	const tProof = Date.now();
-	const proofOpts = {
-		href: 'https://build.nvidia.com/openai/gpt-oss-20b',
-		ardata: null,
-		vm_data: capturedOpts.vm_data, // ← was null; now real fingerprint state
-		uj_data: capturedOpts.uj_data, // typically null
-		errors: capturedOpts.errors || [],
-	};
-	const proof = await awaitOrTimeout(sandbox.hsw(firstSpec.req, proofOpts), 30_000, 'proof');
-	console.log(
-		`proof (${Date.now() - tProof}ms): len=${proof?.length || 0}, vm_data ${proofOpts.vm_data ? 'PRESENT' : 'null'}`,
+	const proof = await awaitOrTimeout(
+		sandbox.hsw(firstSpec.req, {
+			href: 'https://build.nvidia.com/openai/gpt-oss-20b',
+			ardata: null,
+			vm_data: null,
+			uj_data: null,
+		}),
+		30_000,
+		'proof',
 	);
+	console.log(`proof (${Date.now() - tProof}ms): len=${proof.length}`);
 
-	// Step 5: build payload with proof embedded, encrypt, POST
-	console.log('\n=== Step 5: encrypted second call (with proof) ===');
+	// Step 4: encrypt fingerprint payload
+	console.log('\n=== Step 4: encrypt payload ===');
 	const payload = {
 		v: 'c6e277da86802178b920b24f7bd79dd5d0c81e0d',
 		sitekey: SITEKEY,
@@ -264,61 +260,99 @@ async function main() {
 			mu: [[120, 220, 350]],
 			mu_mp: 0.3,
 			v: 1,
-			topLevel: { st: Date.now() - 6000, sc: { availWidth: 2560, availHeight: 1400 } },
+			topLevel: {
+				st: Date.now() - 6000,
+				sc: { availWidth: 2560, availHeight: 1400, width: 2560, height: 1440 },
+			},
 			session: [],
 			widgetList: ['e7w'],
 			widgetId: 'e7w',
 			href: 'https://build.nvidia.com/openai/gpt-oss-20b',
 			prev: { escaped: false, passed: false, expiredChallenge: false, expiredResponse: false },
 		}),
-		pd: JSON.stringify({ s: Date.now(), n: 0, p: 0, gcs: 100 }),
-		pdc: JSON.stringify({ s: Date.now(), n: 0, p: 0, gcs: 100 }),
-		pem: JSON.stringify({ csc: 100, csch: 'api.hcaptcha.com', cscrt: 0, cscft: 100 }),
-		n: proof, // a.n = s.solved = the proof string
+		pdc: '{}',
+		pem: '{}',
+		n: proof,
 		e: null,
 	};
 	const fpBytes = encode(payload);
-	console.log(`payload msgpack: ${fpBytes.byteLength} bytes`);
-	const enc = await awaitOrTimeout(sandbox.hsw(1, fpBytes), 15000, 'encrypt');
+	const enc = await awaitOrTimeout(sandbox.hsw(1, fpBytes), 15_000, 'encrypt');
 	console.log(`encrypted: ${enc.byteLength} bytes`);
-	const body2 = msgpackLite.encode([JSON.stringify(firstSpec), enc]);
-	const r2 = await fetchWithCookies(`https://api.hcaptcha.com/getcaptcha/${SITEKEY}`, {
+	const body = msgpackLite.encode([JSON.stringify(firstSpec), enc]);
+	console.log(`body: ${body.length} bytes`);
+	const { writeFileSync } = await import('node:fs');
+	writeFileSync('/tmp/e7-tls-body.bin', body);
+	console.log(`(saved to /tmp/e7-tls-body.bin)`);
+
+	// Step 5: POST /getcaptcha via curl-impersonate
+	console.log('\n=== Step 5: POST /getcaptcha (Chrome 145 TLS) ===');
+	const r2 = await curlImpersonate(`https://api.hcaptcha.com/getcaptcha/${SITEKEY}`, {
 		method: 'POST',
 		headers: {
 			accept: 'application/json, application/octet-stream',
 			'content-type': 'application/octet-stream',
 			origin: 'https://newassets.hcaptcha.com',
 			referer: 'https://newassets.hcaptcha.com/',
+			...xhrHeaders,
 		},
-		body: body2,
+		body: Buffer.from(body),
+		cookieJar,
 	});
-	console.log(`POST 2 status=${r2.status}`);
-	const buf2 = new Uint8Array(await r2.arrayBuffer());
-	console.log(`resp: ${buf2.byteLength} bytes`);
-	console.log(`first 64 hex: ${Buffer.from(buf2).slice(0, 64).toString('hex')}`);
-	// Try every decode strategy
+	console.log(
+		`status=${r2.status}, content-type=${r2.headers.get('content-type')}, set-cookies=${r2.setCookies.length}`,
+	);
+	for (const sc of r2.setCookies) console.log(`  ← ${sc.split(';')[0]}`);
+	const buf = r2.bytes();
+	console.log(
+		`response: ${buf.byteLength} bytes, first 32 hex: ${Buffer.from(buf).slice(0, 32).toString('hex')}`,
+	);
+
+	// Decode strategies — JSON first, then encrypted via hsw
+	let asText = '';
 	try {
-		console.log('json:', JSON.parse(Buffer.from(buf2).toString('utf8')));
-		return;
+		asText = Buffer.from(buf).toString('utf8');
 	} catch {}
+	if (asText.startsWith('{') || asText.startsWith('[')) {
+		try {
+			const j = JSON.parse(asText);
+			console.log('\n--- PLAINTEXT JSON RESPONSE ---');
+			console.log(
+				JSON.stringify(
+					j,
+					(_k, v) =>
+						typeof v === 'string' && v.length > 80 ? v.slice(0, 40) + `…[${v.length}]` : v,
+					2,
+				).slice(0, 800),
+			);
+			if (j.success === false)
+				console.log('\n→ STILL DOWNGRADED. TLS fingerprint did NOT unblock.');
+			return;
+		} catch {}
+	}
+
 	try {
-		const dec = await awaitOrTimeout(sandbox.hsw(0, buf2), 5000, 'dec2');
+		const dec = await awaitOrTimeout(sandbox.hsw(0, buf), 5000, 'decrypt');
 		if (dec instanceof Uint8Array) {
 			const obj = decode(dec);
-			console.log('\n=== STEP-4 DECRYPTED ===');
+			console.log('\n--- DECRYPTED RESPONSE ---');
 			console.log(
 				JSON.stringify(
 					obj,
 					(_k, v) =>
-						typeof v === 'string' && v.length > 80 ? v.slice(0, 60) + `…[${v.length}]` : v,
+						typeof v === 'string' && v.length > 80 ? v.slice(0, 40) + `…[${v.length}]` : v,
 					2,
-				),
+				).slice(0, 800),
 			);
-			if (obj?.generated_pass_UUID)
-				console.log('\n*** PURE-NODE TOKEN: ***\n' + obj.generated_pass_UUID);
-		} else console.log('hsw returned:', dec);
+			if (obj?.generated_pass_UUID) {
+				console.log('\n*** PURE-NODE TOKEN MINTED VIA TLS IMPERSONATION ***');
+				console.log(obj.generated_pass_UUID.slice(0, 80) + '…');
+				console.log(`\nlength: ${obj.generated_pass_UUID.length}, expiration: ${obj.expiration}s`);
+			}
+		} else {
+			console.log('hsw decrypt returned:', dec);
+		}
 	} catch (e) {
-		console.log('decrypt2 failed:', e.message);
+		console.log('decrypt failed:', e.message);
 	}
 }
 

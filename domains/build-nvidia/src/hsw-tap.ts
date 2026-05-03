@@ -67,9 +67,28 @@ const HSW_TAP_SCRIPT = `(function() {
         var args = Array.prototype.slice.call(arguments);
         var t0 = Date.now();
         var inSummary;
-        if (args.length === 1 && typeof args[0] === 'string') {
-          inSummary = { mode: 'bootstrap', argLen: args[0].length, argPreview: args[0].slice(0, 80) };
-        } else if (args.length >= 2) {
+        // Reclassify based on args.
+        //   bootstrap: hsw("<JWT or 'IiI=...' string>")  — single string arg
+        //   proof:     hsw(jwtString, optsObject)        — string + object
+        //   encrypt:   hsw(1, msgpackBytes)              — number + bytes
+        //   decrypt:   hsw(0, encryptedBytes)            — number + bytes
+        if (typeof args[0] === 'string') {
+          // bootstrap or proof — distinguish by presence of opts arg
+          inSummary = {
+            mode: args.length === 1 ? 'bootstrap' : 'proof',
+            jwt: args[0],
+            jwtLen: args[0].length,
+          };
+          if (args.length >= 2) {
+            // opts is { href, ardata, vm_data, uj_data, errors?, messages? }
+            try {
+              inSummary.opts = JSON.stringify(args[1]);
+              inSummary.optsLen = inSummary.opts.length;
+            } catch (e) {
+              inSummary.optsErr = String(e.message || e);
+            }
+          }
+        } else if (typeof args[0] === 'number' && args.length >= 2) {
           var input = args[1];
           inSummary = {
             mode: args[0],
