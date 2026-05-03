@@ -48,6 +48,7 @@ import { attachHcapXhrTap, detachHcapXhrTap, drainHcapXhrTap } from './hcap-xhr-
 import { attachHswTap, detachHswTap, drainHswTap } from './hsw-tap';
 import { attachRandomTap, detachRandomTap, drainRandomTap } from './random-tap';
 import { attachHswInstrument, detachHswInstrument, drainHswInstrument, type HswInstrumentHandle } from './hsw-instrument';
+import { attachWasmImportTap, detachWasmImportTap, drainWasmImportTap } from './wasm-import-tap';
 import { BuildNvidiaInstrument } from './instrument';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
 import {
@@ -82,6 +83,9 @@ let randomTapHandle: InitScriptHandle | null = null;
 /** hsw.js source-instrumentation (E7-D) — patches function bodies with
  *  per-id counter, bypasses SRI so the patched bytes load. */
 let hswInstrumentHandle: HswInstrumentHandle | null = null;
+/** WASM import tap (E7-D) — wraps WebAssembly.instantiate to log every
+ *  import callback's args and return value during a real Chrome mint. */
+let wasmImportTapHandle: InitScriptHandle | null = null;
 
 /**
  * Install the build-nvidia persona init script on this browser session if
@@ -1242,6 +1246,43 @@ export const routes: DomainRoute[] = [
 			const control = browser.getScriptControl();
 			if (control) await detachHswTap(control, hswTapHandle);
 			hswTapHandle = null;
+			return c.json({ ok: true });
+		},
+	},
+
+	// ─── DEBUG: E7-D — WASM import tap ──────────────────────────────
+	{
+		method: 'POST',
+		path: '/debug/wasm-import-tap/attach',
+		description: 'E7: install init-script that wraps WebAssembly.instantiate; logs every WASM import callback (args + return value) during a mint.',
+		handler: async (c, browser) => {
+			if (wasmImportTapHandle) return c.json({ ok: true, alreadyAttached: true });
+			const control = browser.getScriptControl();
+			if (!control) return c.json({ ok: false, error: 'No CdpScriptControl' }, 503);
+			wasmImportTapHandle = await attachWasmImportTap(control);
+			return c.json({ ok: true, hint: 'Reload, drive a mint, then GET /debug/wasm-import-tap/log.' });
+		},
+	},
+	{
+		method: 'GET',
+		path: '/debug/wasm-import-tap/log',
+		description: 'E7: drain WASM import-call log per frame.',
+		handler: async (c, browser) => {
+			if (!wasmImportTapHandle) return c.json({ ok: false, error: 'Not attached' }, 412);
+			const page = browser.getPage();
+			if (!page) return c.json({ ok: false, error: 'No page' }, 503);
+			return c.json({ ok: true, ...(await drainWasmImportTap(page)) });
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/wasm-import-tap/detach',
+		description: 'E7: detach WASM import tap.',
+		handler: async (c, browser) => {
+			if (!wasmImportTapHandle) return c.json({ ok: true, alreadyDetached: true });
+			const control = browser.getScriptControl();
+			if (control) await detachWasmImportTap(control, wasmImportTapHandle);
+			wasmImportTapHandle = null;
 			return c.json({ ok: true });
 		},
 	},
