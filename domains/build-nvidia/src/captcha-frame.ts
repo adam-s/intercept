@@ -104,6 +104,160 @@ export interface MintResult {
 	raw?: unknown;
 }
 
+/**
+ * E7-D — call window.hsw(jwt, opts) directly inside the challenge iframe.
+ * Captures the proof STRING; combined with attached wasm-import-tap, gives
+ * us a complete (imports → proof) recording for replay in Node.
+ */
+export async function hswCallInFrame(
+	browser: RemoteBrowserService,
+	jwt: string,
+	opts: Record<string, unknown>,
+	timeoutMs = 30_000,
+): Promise<{
+	ok: boolean;
+	proof?: string;
+	proofLen?: number;
+	durationMs?: number;
+	error?: string;
+	frameUrl?: string;
+	hasHsw?: boolean;
+}> {
+	const page = browser.getPage();
+	if (!page) return { ok: false, error: 'No browser page connected' };
+	const challengeFrames = findHCaptchaFrames(page).filter((f) =>
+		f.url().includes('frame=challenge'),
+	);
+	if (challengeFrames.length === 0)
+		return { ok: false, error: 'No challenge iframe found' };
+	const frame = challengeFrames[0]!;
+	// frame.evaluate runs in ISOLATED world; window.hsw lives in MAIN world.
+	// Bridge via CustomEvent on document: detail crosses worlds via
+	// structured cloning. Main-world listener is installed by the
+	// wasm-import-tap init script.
+	const id = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+	const code = `(async () => {
+		const ID = ${JSON.stringify(id)};
+		const JWT = ${JSON.stringify(jwt)};
+		const OPTS = ${JSON.stringify(opts)};
+		const TIMEOUT_MS = ${timeoutMs};
+		const result = await new Promise((resolve) => {
+			const handler = (ev) => {
+				if (!ev || !ev.detail || ev.detail.id !== ID) return;
+				document.removeEventListener('__bn_hsw_resp', handler, false);
+				resolve(ev.detail);
+			};
+			document.addEventListener('__bn_hsw_resp', handler, false);
+			setTimeout(() => { document.removeEventListener('__bn_hsw_resp', handler, false); resolve({ ok: false, error: 'bridge-timeout' }); }, TIMEOUT_MS);
+			document.dispatchEvent(new CustomEvent('__bn_hsw_call', { detail: { id: ID, jwt: JWT, opts: OPTS } }));
+		});
+		return result;
+	})()`;
+	const r = (await frame.evaluate(code).catch((err: unknown) => ({
+		ok: false,
+		error: err instanceof Error ? err.message : String(err),
+	}))) as { ok: boolean; proof?: string; proofLen?: number; durationMs?: number; error?: string; hasHsw?: boolean };
+	return { ...r, frameUrl: frame.url() };
+}
+
+/**
+ * E7-D — Drive a FULL mint inside the challenge iframe and POST to
+ * /getcaptcha. Caller supplies pre-encoded msgpack payload bytes (since the
+ * iframe doesn't have a msgpack lib). Returns server response (status, body).
+ *
+ * Use to isolate which step of the mint pipeline breaks. If this returns
+ * status 200 from inside Chrome, every step is fine — only Node's mint
+ * differs.
+ */
+export async function iframeFullMint(
+	browser: RemoteBrowserService,
+	args: {
+		sitekey: string;
+		host: string;
+		version: string;
+		href: string;
+		packedPayload: Uint8Array;
+		specStr: string;
+	},
+	timeoutMs = 60_000,
+): Promise<{
+	ok: boolean;
+	status?: number;
+	contentType?: string;
+	bodyLen?: number;
+	bodyText?: string;
+	bodyB64?: string;
+	error?: string;
+}> {
+	const page = browser.getPage();
+	if (!page) return { ok: false, error: 'No browser page connected' };
+	const challengeFrames = findHCaptchaFrames(page).filter((f) => f.url().includes('frame=challenge'));
+	if (challengeFrames.length === 0) return { ok: false, error: 'No challenge iframe found' };
+	const frame = challengeFrames[0]!;
+	const id = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+
+	const code = `(async () => {
+		const ID = ${JSON.stringify(id)};
+		const SITEKEY = ${JSON.stringify(args.sitekey)};
+		const SPEC_STR = ${JSON.stringify(args.specStr)};
+		const PAYLOAD_B64 = ${JSON.stringify(Buffer.from(args.packedPayload).toString('base64'))};
+		const TIMEOUT_MS = ${timeoutMs};
+		const packed = Uint8Array.from(atob(PAYLOAD_B64), (c) => c.charCodeAt(0));
+		const result = await new Promise((resolve) => {
+			const handler = (ev) => {
+				if (!ev || !ev.detail || ev.detail.id !== ID) return;
+				document.removeEventListener('__bn_iframe_post_resp', handler, false);
+				resolve(ev.detail);
+			};
+			document.addEventListener('__bn_iframe_post_resp', handler, false);
+			setTimeout(() => { document.removeEventListener('__bn_iframe_post_resp', handler, false); resolve({ ok: false, error: 'bridge-timeout' }); }, TIMEOUT_MS);
+			document.dispatchEvent(new CustomEvent('__bn_iframe_post', { detail: { id: ID, sitekey: SITEKEY, packedPayload: packed, specStr: SPEC_STR } }));
+		});
+		return result;
+	})()`;
+	const r = (await frame.evaluate(code).catch((err: unknown) => ({
+		ok: false,
+		error: err instanceof Error ? err.message : String(err),
+	}))) as Awaited<ReturnType<typeof iframeFullMint>>;
+	return r;
+}
+
+/** Encrypt-only inside iframe — caller submits. Used for isolation tests. */
+export async function iframeEncrypt(
+	browser: RemoteBrowserService,
+	packedPayload: Uint8Array,
+	timeoutMs = 30_000,
+): Promise<{ ok: boolean; encB64?: string; encLen?: number; error?: string }> {
+	const page = browser.getPage();
+	if (!page) return { ok: false, error: 'No browser page connected' };
+	const challengeFrames = findHCaptchaFrames(page).filter((f) => f.url().includes('frame=challenge'));
+	if (challengeFrames.length === 0) return { ok: false, error: 'No challenge iframe found' };
+	const frame = challengeFrames[0]!;
+	const id = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+	const code = `(async () => {
+		const ID = ${JSON.stringify(id)};
+		const PAYLOAD_B64 = ${JSON.stringify(Buffer.from(packedPayload).toString('base64'))};
+		const TIMEOUT_MS = ${timeoutMs};
+		const packed = Uint8Array.from(atob(PAYLOAD_B64), (c) => c.charCodeAt(0));
+		const result = await new Promise((resolve) => {
+			const handler = (ev) => {
+				if (!ev || !ev.detail || ev.detail.id !== ID) return;
+				document.removeEventListener('__bn_iframe_encrypt_resp', handler, false);
+				resolve(ev.detail);
+			};
+			document.addEventListener('__bn_iframe_encrypt_resp', handler, false);
+			setTimeout(() => { document.removeEventListener('__bn_iframe_encrypt_resp', handler, false); resolve({ ok: false, error: 'bridge-timeout' }); }, TIMEOUT_MS);
+			document.dispatchEvent(new CustomEvent('__bn_iframe_encrypt', { detail: { id: ID, packedPayload: packed } }));
+		});
+		return result;
+	})()`;
+	const r = (await frame.evaluate(code).catch((err: unknown) => ({
+		ok: false,
+		error: err instanceof Error ? err.message : String(err),
+	}))) as { ok: boolean; encB64?: string; encLen?: number; error?: string };
+	return r;
+}
+
 /** Best-effort mint via direct SDK call — kept as a fallback / sanity check. */
 export async function mintTokenFromFrame(
 	browser: RemoteBrowserService,

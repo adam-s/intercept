@@ -38,6 +38,9 @@ import {
 } from './browser-chat';
 import {
 	captureHCaptchaPostMessages,
+	hswCallInFrame,
+	iframeEncrypt,
+	iframeFullMint,
 	mintTokenFromFrame,
 	NVIDIA_SITEKEY,
 	pollHCaptchaPostMessages,
@@ -708,6 +711,377 @@ export const routes: DomainRoute[] = [
 					'Content-Type': upstream.headers.get('content-type') ?? 'text/event-stream',
 					'Cache-Control': 'no-cache',
 					'X-Accel-Buffering': 'no',
+				},
+			});
+		},
+	},
+
+	// ─── POST /v1/mint ───────────────────────────────────────────────
+	// Mint a fresh hCaptcha token + capture the upstream request shape,
+	// without sending the chat completion. Returns everything needed to
+	// POST the actual chat request from anywhere — Lambda, edge worker,
+	// CI runner — using just a vanilla fetch().
+	//
+	// Token TTL: ~120s. Single-use — one mint per chat call.
+	// Body: { model: "vendor/slug" }
+	// Returns: { url, method, headers, function_id, captcha_token, expires_at, sample_body, curl_example }
+	{
+		method: 'POST',
+		path: '/v1/mint',
+		description:
+			'Mint a fresh hCaptcha token + capture the upstream request shape WITHOUT sending the chat completion. Returns everything a remote runtime (Lambda, etc.) needs to POST the chat request itself with vanilla fetch. Single-use; ~120s TTL.',
+		handler: async (c, browser) => {
+			let body: { model?: unknown };
+			try {
+				body = (await c.req.json()) as typeof body;
+			} catch {
+				return c.json({ error: 'Invalid JSON body' }, 400);
+			}
+			if (typeof body.model !== 'string' || !body.model.includes('/')) {
+				return c.json(
+					{ error: "Field 'model' must be a vendor-prefixed slug like 'openai/gpt-oss-20b'." },
+					400,
+				);
+			}
+
+			const personaInstalled = await ensurePersona(browser);
+			if (personaInstalled) {
+				const page = browser.getPage();
+				if (page && page.url().startsWith('https://build.nvidia.com')) {
+					await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+				}
+			}
+
+			let captured: CapturedPredictPost;
+			try {
+				captured = await captureUnburned(browser, { model: body.model, message: '_' });
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ error: `Token mint failed: ${msg}` }, 502);
+			}
+
+			// Strip the headers down to ONLY what's needed downstream. Per E2
+			// elimination, the predict POST works with just these three.
+			const minHeaders: Record<string, string> = {};
+			const allow = new Set(['nv-captcha-token', 'nv-function-id', 'content-type']);
+			for (const [k, v] of Object.entries(captured.headers)) {
+				if (allow.has(k.toLowerCase())) minHeaders[k.toLowerCase()] = v;
+			}
+			minHeaders['content-type'] = 'application/json';
+
+			const captchaToken = minHeaders['nv-captcha-token'];
+			const functionId = minHeaders['nv-function-id'];
+			const expiresAt = Math.floor(Date.now() / 1000) + 120;
+
+			// A ready-to-paste curl example. Single-line so it stays valid JSON
+			// without literal newlines in the string (some strict parsers
+			// reject control chars in JSON strings).
+			const curlExample =
+				`curl -N -X POST '${captured.url}'` +
+				` -H 'content-type: application/json'` +
+				` -H 'nv-captcha-token: ${captchaToken}'` +
+				` -H 'nv-function-id: ${functionId}'` +
+				` -d '{"model":"${body.model}","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":256}'`;
+
+			return c.json({
+				url: captured.url,
+				method: 'POST',
+				headers: minHeaders,
+				function_id: functionId,
+				captcha_token: captchaToken,
+				expires_at: expiresAt,
+				ttl_seconds: 120,
+				sample_body: {
+					model: body.model,
+					messages: [{ role: 'user', content: 'hello' }],
+					stream: true,
+					max_tokens: 256,
+					temperature: 1,
+				},
+				curl_example: curlExample,
+				notes: [
+					'Single-use: each captcha_token mints one chat call. Re-mint per request.',
+					'TTL ~120 seconds. expires_at is a unix timestamp (seconds).',
+					"Replay works with just three headers: 'content-type', 'nv-captcha-token', 'nv-function-id'. No cookies, Origin, Referer, UA, or sec-ch-ua-* needed.",
+					'Response is OpenAI-shaped streaming SSE. Set stream:false in your body for a single JSON response (you must aggregate chunks yourself, since the upstream always streams).',
+				],
+			});
+		},
+	},
+
+	// ─── OpenAI-compatible /v1 surface ───────────────────────────────
+	// Drop-in replacement for OpenAI's API for the free anonymous models
+	// at https://build.nvidia.com/models?filters=nimType%3Anim_type_preview.
+	// Use base URL `<server>/api/build-nvidia/v1` with the OpenAI SDK and
+	// no API key — the captcha mint happens server-side per request.
+	//
+	//   GET  /v1/models                — list chat-eligible models
+	//   POST /v1/chat/completions      — streaming or non-streaming chat
+	{
+		method: 'GET',
+		path: '/v1/models',
+		description:
+			'OpenAI-compatible models list. Returns chat-capable models from build.nvidia.com (preview/free anonymous endpoints). Use ?all=1 to include non-chat models too.',
+		browserRequired: false,
+		handler: async (c) => {
+			const url = new URL(c.req.url);
+			const includeAll = url.searchParams.get('all') === '1';
+			const previewOnly = url.searchParams.get('preview') === '1';
+			const q = JSON.stringify({
+				orderBy: [{ field: 'dateCreated', value: 'DESC' }],
+				page: 0,
+				pageSize: 1000,
+				query: `orgName:"${NIM_ORG}"`,
+				scoredSize: 1000,
+			});
+			const upstream = `${NGC_API}/search/catalog/resources/ENDPOINT?q=${encodeURIComponent(q)}`;
+			const res = await rateLimitedFetch(upstream, { headers: UA_HEADER });
+			if (!res.ok) return c.json({ error: { message: `Upstream ${res.status}`, type: 'upstream_error' } }, 502);
+			const data = (await res.json()) as CatalogResponse;
+			const group = data.results.find((g) => g.groupValue === 'ENDPOINT') ?? data.results[0];
+			const all = (group?.resources ?? []).map(summarizeResource);
+			const filtered = all.filter((m) => {
+				if (!m.guestAccess) return false;
+				if (previewOnly && !m.preview) return false;
+				// `available=false` is normal for preview tier — only require it for GA models.
+				if (!m.preview && !m.available) return false;
+				if (!includeAll) {
+					const labels = (m.labels as string[]).map((l) => l.toLowerCase());
+					if (!labels.some((l) => l === 'chat' || l === 'conversational')) return false;
+				}
+				return true;
+			});
+			return c.json({
+				object: 'list',
+				data: filtered.map((m) => ({
+					id: `${m.publisher}/${m.slug}`,
+					object: 'model',
+					created: Math.floor(new Date(m.dateCreated as string).getTime() / 1000),
+					owned_by: m.publisher,
+					// Non-OpenAI metadata, useful for clients
+					_display_name: m.displayName,
+					_description: m.description,
+					_labels: m.labels,
+					_preview: m.preview,
+				})),
+			});
+		},
+	},
+	{
+		method: 'POST',
+		path: '/v1/chat/completions',
+		description:
+			'OpenAI-compatible chat completions (streaming + non-streaming). Anonymous — no API key required. Each request mints a fresh hCaptcha token via the connected browser session, then sends the chat request from Bun fetch. Body shape matches OpenAI: { model, messages, stream?, max_tokens?, temperature?, top_p?, presence_penalty?, frequency_penalty?, reasoning_effort? }.',
+		handler: async (c, browser) => {
+			let body: {
+				model?: unknown;
+				messages?: unknown;
+				stream?: unknown;
+				max_tokens?: unknown;
+				temperature?: unknown;
+				top_p?: unknown;
+				presence_penalty?: unknown;
+				frequency_penalty?: unknown;
+				reasoning_effort?: unknown;
+			};
+			try {
+				body = (await c.req.json()) as typeof body;
+			} catch {
+				return c.json({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }, 400);
+			}
+			if (typeof body.model !== 'string' || !body.model.includes('/')) {
+				return c.json(
+					{
+						error: {
+							message: "Field 'model' must be a vendor-prefixed slug like 'openai/gpt-oss-20b'.",
+							type: 'invalid_request_error',
+							param: 'model',
+						},
+					},
+					400,
+				);
+			}
+			if (!Array.isArray(body.messages) || body.messages.length === 0) {
+				return c.json(
+					{
+						error: {
+							message: "Field 'messages' must be a non-empty array.",
+							type: 'invalid_request_error',
+							param: 'messages',
+						},
+					},
+					400,
+				);
+			}
+
+			const wantsStream = body.stream === true;
+			DEBUG('build-nvidia', `v1 chat: ${body.model} stream=${wantsStream}`);
+
+			// 1. Persona + reload if newly installed.
+			const personaInstalled = await ensurePersona(browser);
+			if (personaInstalled) {
+				const page = browser.getPage();
+				if (page && page.url().startsWith('https://build.nvidia.com')) {
+					await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+				}
+			}
+
+			// 2. Mint a fresh un-burned token (browser is just a token factory).
+			let captured: CapturedPredictPost;
+			try {
+				captured = await captureUnburned(browser, { model: body.model, message: '_' });
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json(
+					{ error: { message: `Token mint failed: ${msg}`, type: 'captcha_error' } },
+					502,
+				);
+			}
+
+			// 3. Build the upstream request body. Always-streaming on the wire
+			//    (the playground only speaks SSE) — for non-streaming clients,
+			//    we collect chunks and synthesize a single response below.
+			const upstreamBody = JSON.stringify({
+				model: body.model,
+				messages: body.messages,
+				stream: true,
+				...(typeof body.max_tokens === 'number' ? { max_tokens: body.max_tokens } : { max_tokens: 4096 }),
+				...(typeof body.temperature === 'number' ? { temperature: body.temperature } : { temperature: 1 }),
+				...(typeof body.top_p === 'number' ? { top_p: body.top_p } : { top_p: 1 }),
+				...(typeof body.presence_penalty === 'number'
+					? { presence_penalty: body.presence_penalty }
+					: { presence_penalty: 0 }),
+				...(typeof body.frequency_penalty === 'number'
+					? { frequency_penalty: body.frequency_penalty }
+					: { frequency_penalty: 0 }),
+				...(typeof body.reasoning_effort === 'string'
+					? { reasoning_effort: body.reasoning_effort }
+					: { reasoning_effort: 'medium' }),
+			});
+
+			// 4. Send via Bun fetch with minimum headers. Re-mint once on token rejection.
+			const sendOnce = (cap: CapturedPredictPost) =>
+				replayPredictStreaming(cap, {
+					body: upstreamBody,
+					headerAllowlist: ['nv-captcha-token', 'nv-function-id', 'content-type'],
+					headerOverrides: { 'content-type': 'application/json' },
+				});
+
+			let upstream: Response;
+			try {
+				upstream = await sendOnce(captured);
+				if (upstream.status === 400) {
+					const errText = await upstream.text();
+					if (errText.includes('Token is invalid') || errText.includes('Captcha required')) {
+						DEBUG('build-nvidia', `v1: token rejected, re-minting once`);
+						const fresh = await captureUnburned(browser, {
+							model: body.model,
+							message: '_',
+						});
+						upstream = await sendOnce(fresh);
+					} else {
+						return c.json(
+							{ error: { message: errText, type: 'upstream_error' } },
+							400,
+						);
+					}
+				}
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json(
+					{ error: { message: `Upstream fetch failed: ${msg}`, type: 'upstream_error' } },
+					502,
+				);
+			}
+
+			// 5a. Streaming path — pipe SSE through unmodified.
+			if (wantsStream) {
+				return new Response(upstream.body, {
+					status: upstream.status,
+					headers: {
+						'Content-Type': upstream.headers.get('content-type') ?? 'text/event-stream',
+						'Cache-Control': 'no-cache',
+						'X-Accel-Buffering': 'no',
+					},
+				});
+			}
+
+			// 5b. Non-streaming path — collect deltas, synthesize a single
+			//     OpenAI-shaped chat.completion response.
+			if (!upstream.body) {
+				return c.json(
+					{ error: { message: 'Upstream returned no body', type: 'upstream_error' } },
+					502,
+				);
+			}
+			const reader = upstream.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = '';
+			let id = '';
+			let model = body.model;
+			let created = Math.floor(Date.now() / 1000);
+			let finishReason: string | null = null;
+			const contentParts: string[] = [];
+			const reasoningParts: string[] = [];
+			let promptTokens: number | undefined;
+			let completionTokens: number | undefined;
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() ?? '';
+				for (const line of lines) {
+					if (!line.startsWith('data: ')) continue;
+					const payload = line.slice(6).trim();
+					if (payload === '[DONE]' || !payload) continue;
+					try {
+						const chunk = JSON.parse(payload) as {
+							id?: string;
+							model?: string;
+							created?: number;
+							choices?: Array<{
+								delta?: { content?: string; reasoning?: string; reasoning_content?: string };
+								finish_reason?: string | null;
+							}>;
+							usage?: { prompt_tokens?: number; completion_tokens?: number };
+						};
+						if (chunk.id) id = chunk.id;
+						if (chunk.model) model = chunk.model;
+						if (chunk.created) created = chunk.created;
+						const ch = chunk.choices?.[0];
+						if (ch?.delta?.content) contentParts.push(ch.delta.content);
+						if (ch?.delta?.reasoning_content) reasoningParts.push(ch.delta.reasoning_content);
+						if (ch?.finish_reason) finishReason = ch.finish_reason;
+						if (chunk.usage) {
+							promptTokens = chunk.usage.prompt_tokens;
+							completionTokens = chunk.usage.completion_tokens;
+						}
+					} catch {
+						/* ignore malformed chunks */
+					}
+				}
+			}
+			return c.json({
+				id: id || `chatcmpl-${Date.now()}`,
+				object: 'chat.completion',
+				created,
+				model,
+				choices: [
+					{
+						index: 0,
+						message: {
+							role: 'assistant',
+							content: contentParts.join(''),
+							...(reasoningParts.length ? { reasoning_content: reasoningParts.join('') } : {}),
+						},
+						finish_reason: finishReason ?? 'stop',
+					},
+				],
+				usage: {
+					prompt_tokens: promptTokens ?? 0,
+					completion_tokens: completionTokens ?? 0,
+					total_tokens: (promptTokens ?? 0) + (completionTokens ?? 0),
 				},
 			});
 		},
@@ -1384,6 +1758,85 @@ export const routes: DomainRoute[] = [
 			const page = browser.getPage();
 			if (!page) return c.json({ ok: false, error: 'No page' }, 503);
 			return c.json({ ok: true, ...(await drainWasmImportTap(page)) });
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/wasm-import-tap/iframe-encrypt',
+		description:
+			'E7: encrypt a pre-msgpacked payload via Chrome iframe\'s hsw(1, X). Returns encrypted bytes (base64). Lets caller test if Node-side encrypt is the gating factor by submitting Chrome-encrypted bytes from Node.',
+		handler: async (c, browser) => {
+			const body = (await c.req.json().catch(() => ({}))) as {
+				packedPayloadBase64?: string;
+				timeoutMs?: number;
+			};
+			if (!body.packedPayloadBase64) return c.json({ ok: false, error: 'Missing packedPayloadBase64' }, 400);
+			const r = await iframeEncrypt(
+				browser,
+				Buffer.from(body.packedPayloadBase64, 'base64'),
+				body.timeoutMs ?? 30_000,
+			);
+			return c.json(r);
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/wasm-import-tap/iframe-post',
+		description:
+			'E7: send pre-msgpacked payload to /getcaptcha THROUGH the iframe (so encryption happens in Chrome, not Node). Body: { sitekey, specStr, packedPayloadBase64 }. Used to isolate whether Node\'s hsw(1, X) encryption is the gating factor.',
+		handler: async (c, browser) => {
+			const body = (await c.req.json().catch(() => ({}))) as {
+				sitekey?: string;
+				host?: string;
+				version?: string;
+				href?: string;
+				specStr?: string;
+				packedPayloadBase64?: string;
+				timeoutMs?: number;
+			};
+			if (!body.sitekey || !body.specStr || !body.packedPayloadBase64) {
+				return c.json({ ok: false, error: 'Missing sitekey/specStr/packedPayloadBase64' }, 400);
+			}
+			const r = await iframeFullMint(
+				browser,
+				{
+					sitekey: body.sitekey,
+					host: body.host ?? 'build.nvidia.com',
+					version: body.version ?? 'c6e277da86802178b920b24f7bd79dd5d0c81e0d',
+					href: body.href ?? 'https://build.nvidia.com/openai/gpt-oss-20b',
+					packedPayload: Buffer.from(body.packedPayloadBase64, 'base64'),
+					specStr: body.specStr,
+				},
+				body.timeoutMs ?? 60_000,
+			);
+			return c.json(r);
+		},
+	},
+	{
+		method: 'POST',
+		path: '/debug/wasm-import-tap/hsw-call',
+		description:
+			'E7: call window.hsw(jwt, opts) directly inside the challenge iframe. Combined with /debug/wasm-import-tap/attach + reload, captures a full WASM trace for any chosen JWT. Body: { jwt, opts?, timeoutMs? }',
+		handler: async (c, browser) => {
+			const body = (await c.req.json().catch(() => ({}))) as {
+				jwt?: string;
+				opts?: Record<string, unknown>;
+				timeoutMs?: number;
+			};
+			if (!body.jwt) return c.json({ ok: false, error: 'Missing jwt' }, 400);
+			const r = await hswCallInFrame(
+				browser,
+				body.jwt,
+				body.opts ?? {
+					href: 'https://build.nvidia.com/openai/gpt-oss-20b',
+					ardata: null,
+					vm_data: null,
+					uj_data: null,
+					errors: [],
+				},
+				body.timeoutMs ?? 30_000,
+			);
+			return c.json(r);
 		},
 	},
 	{
