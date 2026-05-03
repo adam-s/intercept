@@ -1034,6 +1034,35 @@ Three concrete paths that would close the gap:
 
 For a shipping product, **E6 remains correct.** This investigation has fully characterised the wall: it's not crypto, not protocol, not network, not vmdata generation, not TLS — it's specifically that hsw.js produces less proof bytes when running in a Node vm than in Chrome's V8, for reasons hidden inside obfuscated runtime branches that we'd need to trace into to identify.
 
+### E7 deepest — execution-trace instrumentation (built; key relationship found)
+
+Pivoted to JavaScript-level instrumentation: intercept hsw.js as it evaluates, log execution behaviour. Three harnesses built:
+
+- [`e7-trace.mjs`](../domains/build-nvidia/scripts/e7-trace.mjs) — Proxy on `navigator`, `document`, `screen`, `crypto`, `performance` logs every property read with the value type/preview. Run with/without inline.js, diff `/tmp/trace-baseline.log` vs `/tmp/trace-with-inline.log`. **Outcome:** same 67 keys accessed in both runs, same proof size (12580). The Proxy itself shadows whatever inline.js's monkey-patches do. So this approach can detect that the divergence happens, but not where.
+
+- [`e7-coverage.mjs`](../domains/build-nvidia/scripts/e7-coverage.mjs) — V8 `Profiler.startPreciseCoverage` captures per-function call counts during proof. **Outcome:** 210/261 hsw functions executed; same count whether or not inline.js loaded; both produce proof 12580 with inspector enabled. Inspector itself adds observation overhead that obscures the +1500 wedge.
+
+- [`e7-crypto-count.mjs`](../domains/build-nvidia/scripts/e7-crypto-count.mjs) — wrap `crypto.getRandomValues` and count calls during proof. **Key finding:** proof-call gets 176 random reads in pure baseline (proof 11296), 208 random reads when wrapped (proof 12204). **The proof size scales with the number of getRandomValues calls** at ~58–64 bytes per call. That implies the live Chrome proof of 19924 chars corresponds to ~310 getRandomValues calls — about 1.7× our baseline.
+
+#### What pulls the call count up?
+
+Anything that introduces "observation overhead" pushes the count up:
+- Wrapping `getRandomValues` with a counter: 176 → 208 (+32)
+- Loading inline.js first: 11296 → 12800 (+1500 proof, ~+24 calls)
+- Enabling V8 inspector: 11296 → 12580 (+1284 proof, ~+22 calls)
+- Wrapping navigator/document/screen via Proxy: 11296 → 12580
+
+Hsw appears to have a loop bounded by some "burst budget" — the slower individual operations are, the more iterations fit within the budget before some inner check triggers loop exit. In real Chrome, native fingerprinting reads (e.g. `crypto.getRandomValues` from the BoringSSL-backed Web Crypto, `performance.now` from the high-resolution timer) probably take MORE wall-clock time than Node's webcrypto + perf_hooks, leading to higher observed iteration counts and bigger proof.
+
+#### Where to dig if someone keeps pushing
+
+The remaining work to close the last ~5 KB of proof bulk:
+1. **Make our Node `getRandomValues` slower per call** by inserting computation between each call. Naive: spin-loop for N microseconds. Better: do a real "Chrome-like" fingerprint computation each call (canvas pixel reads, audio API stuff). The hsw loop will then accumulate more iterations against the same budget.
+2. **Run hsw.js inside a real Chrome via CDP-driven headless Chromium pinned to the project.** Hybrid posture between E6 and pure-Node — you keep V8-real-Chrome semantics but eliminate the per-server-boot Patchright dependency.
+3. **Source-patch hsw.js with explicit iteration counters.** Inject `__bn_iter++` at every loop header (regex on `for(`, `while(`, etc.). Run side-by-side. The first loop where Chrome iterates more than Node iterates is the gate.
+
+The wall is now fully characterised at the **execution-time-budget** level: it's not what hsw reads, it's how many iterations of an internal CPU loop fit within whatever wall-clock budget hsw self-imposes. Real Chrome has slower-per-op crypto/perf APIs, so it accumulates more iterations and produces more proof bulk. **No amount of polyfilling fixes this without artificially slowing down our Node hsw to match.**
+
 Captured artifacts on disk for posterity:
 - [`/tmp/hsw-mode1-in.bin`](file:///tmp/hsw-mode1-in.bin) — full plaintext msgpack input to the live iframe's `hsw(1, …)` call. Decodes to `{v, sitekey, host, hl, motionData, pdc, pem, n: <19924-char proof>, e: null}`. The `n` field is what we need to reproduce.
 - [`/tmp/hsw-proof-opts.json`](file:///tmp/hsw-proof-opts.json) — captured opts passed to `hsw(jwt, opts)`. Drop-in for the Node mint.
