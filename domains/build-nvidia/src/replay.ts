@@ -52,6 +52,49 @@ function buildCookieHeader(cookies: CapturedPredictPost['cookies'], targetUrl: s
 }
 
 /**
+ * STREAMING variant of replayPredict. Returns the underlying Response so the
+ * caller can pipe `response.body` (a ReadableStream) directly to an HTTP
+ * client. Used by the browserless chat route — keeps SSE streaming end-to-end
+ * with no buffering. Per the E2 finding the minimum surface is just
+ * (nv-captcha-token, nv-function-id, content-type) — no cookies/UA/Origin.
+ */
+export async function replayPredictStreaming(
+	captured: CapturedPredictPost,
+	opts: ReplayOptions = {},
+): Promise<Response> {
+	let headers: Record<string, string> = { ...captured.headers };
+	if (opts.headerAllowlist && opts.headerAllowlist.length > 0) {
+		const allow = new Set(opts.headerAllowlist.map((h) => h.toLowerCase()));
+		headers = Object.fromEntries(
+			Object.entries(headers).filter(([k]) => allow.has(k.toLowerCase())),
+		);
+	}
+	if (opts.headerDenylist && opts.headerDenylist.length > 0) {
+		const deny = new Set(opts.headerDenylist.map((h) => h.toLowerCase()));
+		headers = Object.fromEntries(
+			Object.entries(headers).filter(([k]) => !deny.has(k.toLowerCase())),
+		);
+	}
+	if (opts.headerOverrides) {
+		for (const [k, v] of Object.entries(opts.headerOverrides)) headers[k] = v;
+	}
+	if (opts.skipCookies) {
+		delete headers.cookie;
+		delete headers.Cookie;
+	} else if (!headers.cookie && !headers.Cookie && captured.cookies.length > 0) {
+		const ck = buildCookieHeader(captured.cookies, captured.url);
+		if (ck) headers.cookie = ck;
+	}
+	const body = opts.body ?? captured.postData ?? undefined;
+	return fetch(captured.url, {
+		method: captured.method,
+		headers,
+		body,
+		redirect: 'manual',
+	});
+}
+
+/**
  * Replay a captured predict POST from Bun fetch. Returns status + headers
  * + body text + duration. Never throws — errors land in `error`.
  */

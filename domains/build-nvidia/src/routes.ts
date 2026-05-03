@@ -45,7 +45,7 @@ import {
 } from './captcha-frame';
 import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { BuildNvidiaInstrument } from './instrument';
-import { type ReplayOptions, replayPredict } from './replay';
+import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
 import {
 	attachRuntimeTap,
 	detachRuntimeTap,
@@ -418,6 +418,123 @@ export const routes: DomainRoute[] = [
 				status: result.status || 200,
 				headers: {
 					'Content-Type': result.contentType || 'text/event-stream',
+					'Cache-Control': 'no-cache',
+					'X-Accel-Buffering': 'no',
+				},
+			});
+		},
+	},
+
+	// ─── POST /chat/completions/browserless ──────────────────────────
+	// Hybrid: a one-time browser per server lifetime mints a fresh
+	// hCaptcha token (page.route aborts the browser's outgoing POST
+	// before NVIDIA sees it), then we send the actual chat completion
+	// from Bun fetch with just 3 headers. The browser is reduced to a
+	// token factory; transport is pure Node, true SSE streaming end-to-
+	// end. ~2s/mint at steady state (E3 measurement).
+	//
+	// Per E2 elimination, the minimum required surface for the predict
+	// POST is { nv-captcha-token, nv-function-id, content-type }. No
+	// cookies, Origin, Referer, UA, or sec-ch-ua-* needed.
+	{
+		method: 'POST',
+		path: '/chat/completions/browserless',
+		description:
+			'OpenAI-shaped chat completions via the hybrid mint-then-replay path. Browser mints a fresh hCaptcha token via page.route abort; Bun fetches the chat completion endpoint directly. True streaming. Same body shape as /chat/completions/browser. Browser still required at server boot, but the per-request transport is pure Node.',
+		handler: async (c, browser) => {
+			let body: { model?: unknown; messages?: unknown };
+			try {
+				body = (await c.req.json()) as typeof body;
+			} catch {
+				return c.json({ error: 'Invalid JSON body' }, 400);
+			}
+			if (typeof body.model !== 'string' || !body.model.includes('/')) {
+				return c.json(
+					{ error: "Field 'model' must be a vendor-prefixed slug like 'openai/gpt-oss-20b'." },
+					400,
+				);
+			}
+			if (!Array.isArray(body.messages) || body.messages.length === 0) {
+				return c.json({ error: "Field 'messages' must be a non-empty array." }, 400);
+			}
+
+			DEBUG('build-nvidia', `browserless chat: ${body.model}`);
+
+			// 1. Ensure persona; reload if newly installed (so it takes effect).
+			const personaInstalled = await ensurePersona(browser);
+			if (personaInstalled) {
+				const page = browser.getPage();
+				if (page && page.url().startsWith('https://build.nvidia.com')) {
+					await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+				}
+			}
+
+			// 2. Mint a fresh un-burned token via the browser. The placeholder
+			//    message is throwaway — tokens aren't body-bound (E2.4).
+			let captured: CapturedPredictPost;
+			try {
+				captured = await captureUnburned(browser, {
+					model: body.model,
+					message: '_',
+				});
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ error: `Token mint failed: ${msg}` }, 502);
+			}
+
+			// 3. Build the real chat completion body using the user's messages,
+			//    matching the playground's request shape.
+			const realBody = JSON.stringify({
+				reasoning_effort: 'medium',
+				stream: true,
+				model: body.model,
+				max_tokens: 4096,
+				presence_penalty: 0,
+				frequency_penalty: 0,
+				top_p: 1,
+				temperature: 1,
+				messages: body.messages,
+			});
+
+			// 4. Send from Bun fetch with the minimum required headers. The
+			//    route abort in captureUnburned is racy ~20% of the time (the
+			//    browser's POST occasionally beats the abort and burns the
+			//    token); on "Token is invalid" we transparently re-mint once.
+			const sendOnce = async (cap: CapturedPredictPost): Promise<Response> => {
+				return replayPredictStreaming(cap, {
+					body: realBody,
+					headerAllowlist: ['nv-captcha-token', 'nv-function-id', 'content-type'],
+					headerOverrides: { 'content-type': 'application/json' },
+				});
+			};
+
+			let upstream: Response;
+			try {
+				upstream = await sendOnce(captured);
+				if (upstream.status === 400) {
+					// Read the body to check error code; if it's a token issue, re-mint.
+					const errText = await upstream.text();
+					if (errText.includes('Token is invalid') || errText.includes('Captcha required')) {
+						DEBUG('build-nvidia', `browserless: token rejected, re-minting once`);
+						const fresh = await captureUnburned(browser, {
+							model: body.model,
+							message: '_',
+						});
+						upstream = await sendOnce(fresh);
+					} else {
+						// Non-token 400 — surface as-is.
+						return c.json({ error: errText }, 400);
+					}
+				}
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ error: `Bun replay failed: ${msg}` }, 502);
+			}
+
+			return new Response(upstream.body, {
+				status: upstream.status,
+				headers: {
+					'Content-Type': upstream.headers.get('content-type') ?? 'text/event-stream',
 					'Cache-Control': 'no-cache',
 					'X-Accel-Buffering': 'no',
 				},

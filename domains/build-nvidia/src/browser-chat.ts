@@ -79,7 +79,38 @@ export interface CapturedPredictPost {
  *
  * Throws if no predict POST was attempted (mint failed or never fired).
  */
+/**
+ * Per-page mutex shared with browserDrivenChat — captureUnburned must
+ * wait its turn so two concurrent mints don't race on the textarea.
+ */
+const captureTails = new WeakMap<object, Promise<unknown>>();
+
 export async function captureUnburned(
+	browser: RemoteBrowserService,
+	opts: BrowserChatOptions,
+): Promise<CapturedPredictPost> {
+	const page = browser.getPage();
+	if (!page) throw new Error('Browser not connected');
+
+	const prev = captureTails.get(page) ?? Promise.resolve();
+	let release!: () => void;
+	const next = new Promise<void>((r) => {
+		release = r;
+	});
+	captureTails.set(
+		page,
+		prev.then(() => next),
+	);
+	await prev;
+
+	try {
+		return await captureUnburnedInner(browser, opts);
+	} finally {
+		release();
+	}
+}
+
+async function captureUnburnedInner(
 	browser: RemoteBrowserService,
 	opts: BrowserChatOptions,
 ): Promise<CapturedPredictPost> {
@@ -90,9 +121,14 @@ export async function captureUnburned(
 		? (opts.model.split('/').pop() ?? opts.model)
 		: opts.model;
 	const targetPath = `${NGC_PREDICT_PREFIX}${bareModel}`;
-	// Patchright route patterns use glob — match the exact URL we'll send to.
 	const routePattern = `**${targetPath}`;
 
+	let resolveCapture!: (cap: CapturedPredictPost) => void;
+	let rejectCapture!: (err: Error) => void;
+	const capturePromise = new Promise<CapturedPredictPost>((resolve, reject) => {
+		resolveCapture = resolve;
+		rejectCapture = reject;
+	});
 	const captureBox: { value: CapturedPredictPost | null } = { value: null };
 
 	const onRequest = (req: import('patchright').Request) => {
@@ -101,7 +137,7 @@ export async function captureUnburned(
 			const url = req.url();
 			if (!url.includes(NGC_HOST) || !url.includes(targetPath)) return;
 			if (req.method() !== 'POST') return;
-			captureBox.value = {
+			const cap: CapturedPredictPost = {
 				url,
 				method: req.method(),
 				headers: req.headers(),
@@ -110,36 +146,81 @@ export async function captureUnburned(
 				pageUrl: page.url(),
 				capturedAt: Date.now(),
 			};
+			captureBox.value = cap;
+			resolveCapture(cap);
 		} catch {
 			/* best-effort */
 		}
 	};
 
-	// Pre-arm the abort route. `page.route` runs BEFORE the request leaves the
-	// network stack — even for OOPIF-originated requests Patchright catches them.
-	await page.route(routePattern, async (route) => {
+	// Pre-arm: route abort + request listener. Both must be in place BEFORE
+	// the React Send handler fires (so the request never reaches NVIDIA).
+	// Use context.route — applies to all subframes/OOPIFs, more reliable
+	// than page.route for cross-origin originated fetches.
+	const ctx = page.context();
+	const routeHandler = async (route: import('patchright').Route) => {
 		try {
 			await route.abort('blockedbyclient');
 		} catch {
-			/* route may have already been handled */
+			/* already handled */
 		}
-	});
+	};
+	await ctx.route(routePattern, routeHandler);
 	page.on('request', onRequest);
 
+	// Navigate if needed — same as runOne in browserDrivenChat.
+	const targetUrl = `${BUILD_BASE}/${opts.model}`;
+	if (!page.url().startsWith(targetUrl)) {
+		await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+	}
+	await dismissModals(page);
+	await page.waitForFunction(VISIBLE_INPUT_FN, { timeout: 30_000 });
+	await page.waitForSelector('button[aria-label="Send"]', { timeout: 30_000 });
+
+	// Drive the UI inline — same coord-based approach as runOne but fire-and-
+	// move-on: we don't wait for any response. The request listener resolves
+	// the capture promise the moment Patchright sees the outgoing POST.
+	const drive = (async () => {
+		const taSelector =
+			'textarea[placeholder]:not([name="g-recaptcha-response"]):not([name="h-captcha-response"])';
+		const taCoords = await page.locator(taSelector).first().boundingBox();
+		if (!taCoords) throw new Error('Textarea not visible');
+		const taX = Math.round(taCoords.x + taCoords.width / 2);
+		const taY = Math.round(taCoords.y + taCoords.height / 2);
+		await page.mouse.click(taX, taY);
+		await page.waitForTimeout(100);
+		// Clear any leftover from a previous capture run. Select-all + Delete.
+		await page.keyboard.press('Control+A');
+		await page.keyboard.press('Delete');
+		await page.keyboard.type(opts.message, { delay: 25 });
+		await page.waitForTimeout(150);
+		const sendCoords = await page.locator('button[aria-label="Send"]').boundingBox();
+		if (!sendCoords) throw new Error('Send button not visible');
+		const sendX = Math.round(sendCoords.x + sendCoords.width / 2);
+		const sendY = Math.round(sendCoords.y + sendCoords.height / 2);
+		await page.mouse.move(sendX, sendY, { steps: 8 });
+		await page.waitForTimeout(50);
+		await page.mouse.click(sendX, sendY);
+	})().catch(() => {
+		// If anything in the drive throws (page state issue, etc.) we'll time out below.
+	});
+
+	const captureTimeoutHandle = setTimeout(() => {
+		rejectCapture(new Error('No predict POST observed within 20s — captcha mint failed'));
+	}, 20_000);
+
+	let cap: CapturedPredictPost;
 	try {
-		// Drive the UI. browserDrivenChat will try to wait for a response that
-		// will never come (we aborted) — it'll throw on timeout. That's expected.
-		// We use a short inner timeout so we don't wait the full 180s.
-		await browserDrivenChat(browser, { ...opts, timeoutMs: 15_000 }).catch(() => {});
+		cap = await capturePromise;
 	} finally {
+		clearTimeout(captureTimeoutHandle);
 		page.off('request', onRequest);
-		await page.unroute(routePattern).catch(() => {});
+		// Wait for the drive promise to settle so the next caller doesn't
+		// race with our half-finished UI manipulation.
+		await drive;
+		await ctx.unroute(routePattern, routeHandler).catch(() => {});
 	}
 
-	const cap = captureBox.value;
-	if (!cap) {
-		throw new Error('No predict POST attempted — captcha mint failed or never fired');
-	}
 	try {
 		const ctx = page.context();
 		const cookies = await ctx.cookies();
@@ -152,6 +233,7 @@ export async function captureUnburned(
 	} catch {
 		/* leave empty */
 	}
+
 	return cap;
 }
 

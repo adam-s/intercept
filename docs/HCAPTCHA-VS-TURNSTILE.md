@@ -737,11 +737,21 @@ The path to truly browserless chat is now clear:
 2. **Per chat completion**: Capture one un-burned token from that session (`captureUnburned`), then send the actual chat from Bun fetch with just 3 headers. No browser per-chat in the data path.
 3. **Throughput is bounded by token-mint rate** in the browser, not by request transport. The next experiment (E3) tests how many tokens we can mint per second from one warmed page — if it's > 1 token/sec, we're shipping.
 
-### Next experiments
+### E3 results (throughput) + production route
 
-- **E3** (token pooling): mint N tokens in a tight loop from one page; measure tokens/sec.
-- **E4** (multi-page parallelism): N pages × token-mint loop; measure scaling.
-- **E5** (bundle in jsdom): only worth pursuing if E3/E4 mint rate is too slow OR if the long-term goal is to eliminate the browser entirely.
+Measured token-mint rate from one warmed page after early-bail fix to `captureUnburned` (resolve the moment the request listener fires; don't wait for the never-coming response):
+
+- 5 sequential mints: 5.8s, 2.2s, 2.3s, 1.9s, 1.9s — **~0.35 mints/sec average, ~0.5/sec at steady state.**
+
+Built [`POST /api/build-nvidia/chat/completions/browserless`](../domains/build-nvidia/src/routes.ts) — production hybrid route. Per chat:
+1. Mint a fresh unburned token via `captureUnburned` (browser, ~2s).
+2. Build the OpenAI-shaped chat completion body using the user's `messages`.
+3. POST to NVIDIA's predict endpoint from Bun fetch with just 3 headers (`nv-captcha-token`, `nv-function-id`, `content-type`).
+4. Stream the response body straight back to the API caller. True end-to-end SSE — no buffering.
+
+The route abort in `captureUnburned` is racy ~30% of the time (the browser's POST occasionally beats the abort and burns the token). The route auto-retries the mint once on `"Token is invalid"` / `"Captcha required"` errors. 8 sequential calls in production mode: **8/8 success** (3 needed a retry). Average ~4.8s including retry overhead; ~2s when the first mint sticks.
+
+Next: **E4** is now lower priority — the single-page rate is already useful. If we need throughput >1 chat/sec, we'd build the multi-page pool. **E5/E6/E7** (jsdom, addBinding, hsw VM) become "remove the browser entirely" optimizations; the mint-then-replay shape works today.
 
 ---
 
