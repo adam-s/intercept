@@ -950,6 +950,43 @@ The crypto, protocol, encryption, decryption, proof execution, and inter-call st
 
 **Recommended posture:** **E6** is the production path. E7 is interesting research but the marginal benefit (no per-server browser at boot) does not justify the multi-day reverse-engineering of the cross-iframe RPC. If the vmdata gate is ever lifted by hCaptcha (or if a sitekey is configured without `enc_get_req:true`), E7 becomes trivially complete with the work already done.
 
+### E7 — pushing for 100% Node (vmdata generated; proof size still gates)
+
+After identifying vmdata as the missing input, pulled inline.js itself into a Node vm to generate vmdata locally — eliminating the dependency on cross-iframe RPC.
+
+**Method:**
+- Patched inline.js bytes to expose internal `Vi` to `window.__bn_Vi` after the destructuring line `Si=Vi.cr,Vi.j,_i=Vi.d`. (The CSP/ECDSA pin only enforces inside the iframe; in our Node vm we mutate freely.)
+- Built a fat sandbox with realistic DOM (`document`, `screen`, `navigator` with full userAgentData + ~30 sub-APIs, a parent stub, plus all standard browser constructors as no-op functions).
+- Set `document.documentElement.getAttribute("data-id")` to the bundle hash and `window.location.hash` to `frame=challenge&id=<widget>&host=…&sitekey=…&size=invisible&…`.
+- Loaded the patched inline.js. Got past the IIFE init (one ignorable error from a deferred Raven timer); `__bn_Vi.collectVmData` is exposed.
+
+`collectVmData()` returns a Promise that resolves to a string in the same `[[0, "<json>"]]` shape as the live iframe. **The signature at the end of the JSON matches the live iframe byte-for-byte** (`V1No+jtQ+Di9fQAqpFd+omUazumcRyLf0Z5H05ZXNdNlDzlGQLauokouqeJw3gl3hyb0BE8ZadtVFjh3y+fE08zTHexYuvpiOebkNj2/SQD1SpUnoay923SP5RpRWMUARhZnLywM4Eq14mfKOeWd4GEmpNOpkKfgEVl2TAK+Lg4=`). Strong signal the function is producing the right kind of output.
+
+**Files:**
+- [`e7-vmdata.mjs`](../domains/build-nvidia/scripts/e7-vmdata.mjs) — vmdata generator probe (loads inline.js as challenge frame, calls collectVmData)
+- [`e7-mint-100pct.mjs`](../domains/build-nvidia/scripts/e7-mint-100pct.mjs) — full 100% Node mint (two sandboxes, generate vmdata, compute proof, encrypt, POST)
+
+**Remaining gap (proof-size discrepancy inside hsw.js):**
+
+A linearity probe on hsw.js (in our Node sandbox, varying vm_data size and observing proof size):
+
+| vm_data | proof |
+|---------|-------|
+| 500 b   | 9000 b |
+| 1700 b  | 10600 b |
+| 5000 b  | 15000 b |
+| 20000 b | 35000 b |
+
+Linear, slope ≈ 1.3. So with a 1700 b vm_data, our Node hsw produces ~10.6 KB of proof. **Identical inputs in the live iframe (same JWT, same opts.vm_data, same href) produce 19.9 KB.** Roughly 1.76× more proof from the same hsw.js source running in Chrome vs Node.
+
+The server rejects our smaller proof with 415 (misleading status — actually a content-validation rejection inside the encrypted blob; padding the body to match captured size doesn't help).
+
+**What's different between Chrome and Node hsw execution?** hsw.js touches a tiny global surface — `navigator.userAgentData`, `navigator.connection`, `navigator[xI]` (one obfuscated dynamic lookup), `document.{createElement, createEvent, querySelector, querySelectorAll, referrer}`, `screen.hasOwnProperty`. We polyfill all of these. The bundle is heavily obfuscated (FI/qQ/bK identifier mangling, `aV(N)` / `o$(N)` string-table lookups, custom bytecode VM constructing analytics surface). The 1.76× proof bulk likely comes from one or two obfuscated runtime checks — finding which would require systematically diffing bundle execution between Chrome and Node, days of work on minified-and-mangled code.
+
+**Final 100%-Node verdict:** Crypto, protocol, encryption, decryption, proof execution, vmdata generation, and the entire HTTP flow run end-to-end in pure Node with no browser dependency. The single remaining gap is a ~9 KB proof-bulk discrepancy inside the obfuscated hsw.js when running outside a real browser — sufficient to make the server reject our payload with 415. The fix is reverse-engineering specific runtime checks in 906 KB of heavily-mangled JavaScript.
+
+For production, **E6 (~330 ms mint via SDK trap, browser only at server boot) remains the recommended path.** All knowledge for closing the last 9 KB is captured here; future work on the hsw.js obfuscation can pick up directly.
+
 Captured artifacts on disk for posterity:
 - [`/tmp/hsw-mode1-in.bin`](file:///tmp/hsw-mode1-in.bin) — full plaintext msgpack input to the live iframe's `hsw(1, …)` call. Decodes to `{v, sitekey, host, hl, motionData, pdc, pem, n: <19924-char proof>, e: null}`. The `n` field is what we need to reproduce.
 - [`/tmp/hsw-proof-opts.json`](file:///tmp/hsw-proof-opts.json) — captured opts passed to `hsw(jwt, opts)`. Drop-in for the Node mint.
