@@ -130,6 +130,14 @@
  * 33. GET /resale/all — Patchright clicks "Load More", intercepts POST responses,
  *     collects all pages. Use when pagination requires browser interaction.
  *
+ * CAPTCHA-GATED — Turnstile-shape (invisible widget mint → replay):
+ * 34. GET /captcha-turnstile — Mint `0.<b64url>` token in browser via window.captchaWidget,
+ *     POST to verify endpoint. Generic Cloudflare-Turnstile-style integration.
+ *
+ * CAPTCHA-GATED — hCaptcha-shape (challenge → proof → JWT-shape token):
+ * 35. GET /captcha-hcaptcha — Capture `P1_<b64url>.<b64url>.<b64url>` token via
+ *     postMessage + /api/check interception, replay in x-captcha-token header.
+ *
  * @module domain-boardshop/routes
  */
 
@@ -140,6 +148,8 @@ const BASE_URL = process.env.BOARDSHOP_URL ?? 'http://localhost:4444/sites/board
 const LIVEBOARD_URL = 'http://localhost:4444/sites/liveboard';
 const STREAMSHOP_URL = 'http://localhost:4444/sites/streamshop';
 const DATABOARD_URL = 'http://localhost:4444/sites/databoard';
+const TURNSTILE_URL = 'http://localhost:4444/sites/turnstile';
+const HCAPTCHA_URL = 'http://localhost:4444/sites/hcaptcha';
 
 /** Helper: extract <script id="X" type="application/json"> from HTML */
 function extractScript(html: string, id: string): unknown | null {
@@ -1581,6 +1591,197 @@ export const routes: DomainRoute[] = [
 					_pattern: 'click-intercept-pagination',
 					_note:
 						'Patchright clicks "Load More" and intercepts POST responses. No manual cookie harvest needed.',
+				});
+			} catch (err) {
+				await ctx.close().catch(() => {});
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ error: msg }, 502);
+			}
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════
+	// CAPTCHA-GATED — Turnstile-shape (invisible widget, mint → submit)
+	// ═══════════════════════════════════════════════════════════════════
+	//
+	// Pattern (real-world analogue: any Cloudflare-Turnstile-protected form):
+	//   1. Open the gated page with Patchright.
+	//   2. Read the widget container's data-sitekey from the DOM.
+	//   3. Trigger the in-page widget to mint a token (window.captchaWidget.execute).
+	//   4. POST the token to the verification endpoint.
+	//   5. Return the verified payload + the captured token + sitekey for replay.
+	//
+	// The token shape is `0.<base64url>` — generic Turnstile-style. Production
+	// targets will use a real Cloudflare-issued token; the integration shape is
+	// identical (mint inside the browser, replay in the next request).
+	{
+		method: 'GET',
+		path: '/captcha-turnstile',
+		description: 'Captcha-gated form: mint Turnstile-shape token in browser, submit, verify.',
+		browserRequired: false,
+		handler: async (c) => {
+			const { chromium } = await import('patchright');
+			DEBUG('boardshop', 'captcha-turnstile: launching Patchright');
+
+			const ctx = await chromium.launchPersistentContext('', {
+				headless: true,
+				channel: 'chromium',
+				args: ['--disable-blink-features=AutomationControlled'],
+			});
+
+			try {
+				const page = await ctx.newPage();
+				await page.goto(`${TURNSTILE_URL}/`);
+				await page.waitForFunction(() =>
+					Boolean((window as unknown as { captchaWidget?: unknown }).captchaWidget),
+				);
+
+				const sitekey = await page.evaluate(
+					() => document.querySelector<HTMLElement>('[data-captcha-widget]')?.dataset.sitekey ?? '',
+				);
+
+				const token = await page.evaluate(async () => {
+					const w = (
+						window as unknown as {
+							captchaWidget: {
+								render: (el: Element, opts: { sitekey: string }) => string;
+								execute: (id: string) => Promise<string>;
+							};
+						}
+					).captchaWidget;
+					const el = document.querySelector('[data-captcha-widget]');
+					if (!el) throw new Error('widget not found');
+					const sk = (el as HTMLElement).dataset.sitekey ?? '';
+					const id = w.render(el, { sitekey: sk });
+					return await w.execute(id);
+				});
+
+				const verifyRes = await page.evaluate(async (t: string) => {
+					const r = await fetch('/api/verify', {
+						method: 'POST',
+						headers: { 'content-type': 'application/json' },
+						body: JSON.stringify({ token: t }),
+					});
+					return { status: r.status, body: await r.json().catch(() => null) };
+				}, token);
+
+				await ctx.close();
+
+				return c.json({
+					sitekey,
+					token,
+					tokenPrefix: token.slice(0, 2),
+					verify: verifyRes,
+					_pattern: 'captcha-mint-and-replay',
+					_note:
+						'Token minted inside the browser via the widget API, then replayed to the verification endpoint. Same shape as a real Turnstile integration.',
+				});
+			} catch (err) {
+				await ctx.close().catch(() => {});
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ error: msg }, 502);
+			}
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════
+	// CAPTCHA-GATED — hCaptcha-shape (challenge → proof → JWT-shape token)
+	// ═══════════════════════════════════════════════════════════════════
+	//
+	// Pattern (real-world analogue: any hCaptcha-protected POST endpoint):
+	//   1. Open the gated page with Patchright.
+	//   2. Listen for the postMessage carrying the minted token.
+	//   3. Click the "Send" button — page does challenge → proof → submit.
+	//   4. Capture the P1_-prefixed JWT-shape token from postMessage AND from
+	//      intercepted /api/check responses (two independent capture paths).
+	//   5. Replay the token in x-captcha-token against the protected endpoint.
+	{
+		method: 'GET',
+		path: '/captcha-hcaptcha',
+		description: 'Captcha-gated send: capture P1_-shape token via postMessage, replay in header.',
+		browserRequired: false,
+		handler: async (c) => {
+			const { chromium } = await import('patchright');
+			DEBUG('boardshop', 'captcha-hcaptcha: launching Patchright');
+
+			const ctx = await chromium.launchPersistentContext('', {
+				headless: true,
+				channel: 'chromium',
+				args: ['--disable-blink-features=AutomationControlled'],
+			});
+
+			try {
+				const page = await ctx.newPage();
+
+				let interceptedToken: string | null = null;
+				page.on('response', async (res) => {
+					if (res.url().includes('/api/check/') && res.status() === 200) {
+						try {
+							const json = (await res.json()) as { token?: string };
+							if (json.token) interceptedToken = json.token;
+						} catch {
+							/* not JSON */
+						}
+					}
+				});
+
+				await page.goto(`${HCAPTCHA_URL}/`);
+				await page.waitForFunction(() =>
+					Boolean((window as unknown as { captchaWidget?: unknown }).captchaWidget),
+				);
+
+				const sitekey = await page.evaluate(
+					() => document.querySelector<HTMLElement>('[data-captcha-widget]')?.dataset.sitekey ?? '',
+				);
+
+				// Race: token from postMessage OR from intercepted /api/check response.
+				const postMessagePromise = page.evaluate(
+					() =>
+						new Promise<string>((resolve) => {
+							window.addEventListener('message', (ev: MessageEvent) => {
+								const data = ev.data as { kind?: string; token?: string };
+								if (data?.kind === 'captcha-token' && data.token) resolve(data.token);
+							});
+						}),
+				);
+
+				await page.locator('#send-btn').click();
+				const token = await Promise.race([
+					postMessagePromise,
+					new Promise<string>((resolve, reject) => {
+						const t0 = Date.now();
+						const iv = setInterval(() => {
+							if (interceptedToken) {
+								clearInterval(iv);
+								resolve(interceptedToken);
+							} else if (Date.now() - t0 > 10_000) {
+								clearInterval(iv);
+								reject(new Error('token capture timed out'));
+							}
+						}, 100);
+					}),
+				]);
+
+				// Replay: hit /api/submit from a clean fetch context using the captured token.
+				const replay = await page.evaluate(async (t: string) => {
+					const r = await fetch('/api/submit', {
+						method: 'POST',
+						headers: { 'content-type': 'application/json', 'x-captcha-token': t },
+						body: JSON.stringify({ message: 'replay' }),
+					});
+					return { status: r.status, body: await r.json().catch(() => null) };
+				}, token);
+
+				await ctx.close();
+
+				return c.json({
+					sitekey,
+					token,
+					tokenPrefix: token.slice(0, 3),
+					replay,
+					_pattern: 'captcha-postmessage-capture-and-replay',
+					_note:
+						'Token captured from the in-page postMessage event, then replayed in the x-captcha-token header. Same shape as a real hCaptcha integration.',
 				});
 			} catch (err) {
 				await ctx.close().catch(() => {});

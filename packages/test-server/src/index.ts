@@ -16,8 +16,10 @@ import { WebSocketServer } from 'ws';
 
 import { createBoardshopSite } from './sites/boardshop';
 import { createDataboardSite } from './sites/databoard';
+import { createHcaptchaSite } from './sites/hcaptcha';
 import { createLiveboardSite } from './sites/liveboard';
 import { createStreamshopSite } from './sites/streamshop';
+import { createTurnstileSite } from './sites/turnstile';
 import { handleWSUpgrade, type WSRoute } from './transports/websocket';
 
 export interface TestServerOptions {
@@ -30,7 +32,14 @@ export interface TestServerInstance {
 	close: () => Promise<void>;
 }
 
-const SITES = ['boardshop', 'liveboard', 'streamshop', 'databoard'] as const;
+const SITES = [
+	'boardshop',
+	'liveboard',
+	'streamshop',
+	'databoard',
+	'turnstile',
+	'hcaptcha',
+] as const;
 
 const WS_ROUTES: WSRoute[] = [
 	{ path: '/sites/liveboard/stream', mode: 'protobuf' },
@@ -64,6 +73,8 @@ export async function createTestServer(
 	app.route('/sites/liveboard', createLiveboardSite());
 	app.route('/sites/streamshop', createStreamshopSite());
 	app.route('/sites/databoard', createDataboardSite());
+	app.route('/sites/turnstile', createTurnstileSite());
+	app.route('/sites/hcaptcha', createHcaptchaSite());
 
 	// Create HTTP server
 	const httpServer = createServer(async (req, res) => {
