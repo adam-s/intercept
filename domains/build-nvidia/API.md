@@ -151,6 +151,67 @@ Returns:
 
 The `curl_example` field is copy-pasteable and runs to completion against NVIDIA's live endpoint.
 
+#### Cross-machine portability — verified end-to-end on AWS Lambda
+
+The whole point of `/v1/mint` is that the bundle is portable. **Mint on a machine with the browser, ship the bundle to a runtime without one, call NVIDIA from there.** This was verified against a real AWS Lambda in `us-east-1`:
+
+```text
+                Mac (home IP 38.25.57.162)               AWS Lambda (us-east-1, IP 54.86.181.52)
+   ┌──────────────────────────────────────┐       ┌──────────────────────────────────────────┐
+   │ Patchright + build-nvidia API server │       │ nodejs20.x runtime, no browser            │
+   │ POST /api/build-nvidia/v1/mint       │       │ event = bundle from /v1/mint             │
+   │  → { url, headers, ttl_seconds:120 } │ ────▶ │ fetch(event.url, {                       │
+   │                                      │       │   method: "POST",                        │
+   │                                      │       │   headers: event.headers,                │
+   │                                      │       │   body: <your OpenAI-shaped body>        │
+   │                                      │       │ })                                       │
+   └──────────────────────────────────────┘       └──────────────────────────────────────────┘
+                                                                      │
+                                                                      ▼
+                                                            api.ngc.nvidia.com  →  HTTP 200
+                                                            real OpenAI-shaped chat completion
+```
+
+Test results (4 iterations, mint locally → invoke Lambda → call NVIDIA from Lambda):
+
+| Aspect | Result |
+| --- | --- |
+| Mint origin IP | `38.25.57.162` (residential ISP) |
+| Lambda egress IP | `54.86.181.52` (AWS us-east-1) |
+| Iterations | 4 / 4 returned **HTTP 200** with real chat completions |
+| Lambda → NVIDIA latency | ~500–600 ms steady-state |
+| Headers Lambda sent | exactly the 3 the bundle returned |
+
+**What this proves:**
+
+- The `nv-captcha-token` is **not IP-bound** — minted on home IP, accepted from AWS IP.
+- Not **cookie-bound** — Lambda sent zero cookies.
+- Not **TLS-fingerprint-bound** — Lambda's Node `fetch()` has a totally different TLS profile than the minting Patchright Chromium.
+- Not bound to the original HTTP client at all. Everything NVIDIA validates is *inside* the token bytes.
+
+**What this enables:**
+
+- Run the browser + mint on one machine (your laptop, a single beefy box, a small EC2). Run the actual chat traffic on horizontally-scalable runtimes (Lambda, edge workers, fan-out queue consumers).
+- Natural per-IP rate-limit defeat without any IP-rotation infrastructure on your side: Lambda recycles containers and rotates egress IPs as load grows.
+- Token bundles are JSON. Ship them via SQS, Step Functions, S3, whatever — they're portable strings.
+
+**Lambda smoke harness** in `domains/build-nvidia/lambda-smoke/`:
+
+```bash
+cd domains/build-nvidia/lambda-smoke
+./deploy.sh                # creates IAM role + Lambda function (us-east-1)
+node driver.mjs --n 5      # mints locally, invokes Lambda 5 times, prints results
+./teardown.sh              # removes IAM role + Lambda when done
+```
+
+The handler in `lambda-smoke/lambda/index.mjs` is ~100 lines — copy-paste into any other Lambda, edge worker, or runtime. It accepts the bundle from `/v1/mint` as its event payload directly.
+
+#### Operational notes for the mint-elsewhere pattern
+
+- **Plan for the 120s TTL.** If your Lambda or queue consumer might queue longer than that, mint on demand — don't pre-mint and stash. The mint call is ~330 ms; just-in-time is cheap.
+- **One token = one chat call.** Each `/v1/mint` produces a single-use bundle. For N parallel calls, mint N times.
+- **Body field `model` must be bare** (`openai/gpt-oss-20b`, not `nvidia/openai/gpt-oss-20b`). The `sample_body` and `curl_example` fields use the right form already; if you hand-craft the body, match those.
+
 ### `POST /v1/raw/:provider/:vendor/:slug`
 
 Modality-agnostic passthrough. Mints a captcha token, ships the caller's body verbatim to the predict URL, returns the upstream response unchanged. Use this when the model's request body doesn't fit OpenAI's chat shape.
