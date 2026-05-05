@@ -205,6 +205,24 @@ async function ensurePageReadyForMint(
 	if (!page.url().startsWith(targetUrl)) {
 		await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 	}
+	await waitForSdkReady(browser, timeoutMs);
+}
+
+/**
+ * Wait for the SDK trap to have captured `window.hcaptcha` and a widget
+ * to be rendered on whatever page is currently loaded. Bounded poll —
+ * throws on timeout. Use anywhere mint is about to run when you know
+ * the page URL is fine but the trap state may lag (e.g. the page just
+ * navigated 50ms ago).
+ *
+ * URL-on-origin doesn't imply trap-captured. Always call this before
+ * mint, regardless of URL. See toolkit's
+ * docs/INVESTIGATION-vision-mint-race.md for the bug it fixes.
+ */
+async function waitForSdkReady(
+	browser: RemoteBrowserService,
+	timeoutMs = 15_000,
+): Promise<void> {
 	const control = browser.getScriptControl();
 	if (!control) throw new Error('No CdpScriptControl');
 	const deadline = Date.now() + timeoutMs;
@@ -295,11 +313,18 @@ async function uploadAsset(
 		}
 	}
 	const page = browser.getPage();
+	// Asset upload doesn't care about a specific model page — any
+	// build.nvidia.com page that mints captcha tokens works. Two cases:
+	//   1. Off-origin: navigate to a stable chat-model page AND wait for
+	//      trap readiness (ensurePageReadyForMint covers both).
+	//   2. On-origin: URL is fine but the SDK trap may not have captured
+	//      yet (cold pool, or another caller just navigated 50ms ago —
+	//      URL-on-origin doesn't imply trap-captured). Wait for readiness
+	//      explicitly. See toolkit/docs/INVESTIGATION-vision-mint-race.md.
 	if (!page || !page.url().startsWith(BUILD_NV_ORIGIN)) {
-		// Asset upload doesn't care about a specific model page, just any
-		// build.nvidia.com page that mints captcha tokens. Default to a
-		// stable chat model page.
 		await ensurePageReadyForMint(browser, 'openai/gpt-oss-20b');
+	} else {
+		await waitForSdkReady(browser);
 	}
 	const captchaToken = await withMintLock(browser, () =>
 		mintViaBinding(browser, NVIDIA_SITEKEY, 30_000),
