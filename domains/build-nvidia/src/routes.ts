@@ -46,11 +46,6 @@ import {
 	pollHCaptchaPostMessages,
 	probeHCaptchaFrame,
 } from './captcha-frame';
-import {
-	type CatalogSummary,
-	enrichModel,
-	parseModelId,
-} from './model-metadata';
 import { buildBuildNvidiaFingerprintScript } from './fingerprint-script';
 import { attachHcapXhrTap, detachHcapXhrTap, drainHcapXhrTap } from './hcap-xhr-tap';
 import {
@@ -61,6 +56,7 @@ import {
 } from './hsw-instrument';
 import { attachHswTap, detachHswTap, drainHswTap } from './hsw-tap';
 import { BuildNvidiaInstrument } from './instrument';
+import { type CatalogSummary, enrichModel, parseModelId } from './model-metadata';
 import { attachRandomTap, detachRandomTap, drainRandomTap } from './random-tap';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
 import {
@@ -263,6 +259,149 @@ async function mintViaBinding(
 		throw new Error('mintViaBinding: token missing or empty');
 	}
 	return result.token;
+}
+
+/**
+ * Upload a binary asset (image / audio) to NVIDIA's NVCF asset store.
+ * Two legs: POST /v2/nvcf/assets with `{contentType, description}` to get
+ * a presigned S3 URL, then PUT the bytes there. Returns the asset UUID
+ * which is referenced in chat bodies via `<img src="data:.../;asset_id,UUID" />`
+ * and in the `nvcf-function-asset-ids` / `nvcf-input-asset-references` headers.
+ *
+ * Each upload mints its own captcha token — they're single-use per request.
+ */
+async function uploadAsset(
+	browser: RemoteBrowserService,
+	bytes: ArrayBuffer | Uint8Array,
+	contentType: string,
+	description: string,
+): Promise<{ assetId: string; uploadUrl: string }> {
+	await ensurePersona(browser);
+	await ensureSdkTrap(browser);
+	const personaInstalled = false;
+	const trapInstalled = false;
+	if (personaInstalled || trapInstalled) {
+		const page = browser.getPage();
+		if (page && page.url().startsWith(BUILD_NV_ORIGIN)) {
+			await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+		}
+	}
+	const page = browser.getPage();
+	if (!page || !page.url().startsWith(BUILD_NV_ORIGIN)) {
+		// Asset upload doesn't care about a specific model page, just any
+		// build.nvidia.com page that mints captcha tokens. Default to a
+		// stable chat model page.
+		await ensurePageReadyForMint(browser, 'openai/gpt-oss-20b');
+	}
+	const captchaToken = await withMintLock(browser, () =>
+		mintViaBinding(browser, NVIDIA_SITEKEY, 30_000),
+	);
+	const registerRes = await fetch(`${NGC_API}/nvcf/assets`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			accept: 'application/json, application/zip',
+			'nv-captcha-token': captchaToken,
+		},
+		body: JSON.stringify({ contentType, description }),
+	});
+	if (!registerRes.ok) {
+		throw new Error(`Asset register failed: ${registerRes.status} ${await registerRes.text()}`);
+	}
+	const reg = (await registerRes.json()) as { assetId: string; uploadUrl: string };
+	if (!reg.assetId || !reg.uploadUrl) {
+		throw new Error('Asset register response missing assetId/uploadUrl');
+	}
+	const putRes = await fetch(reg.uploadUrl, {
+		method: 'PUT',
+		headers: {
+			'content-type': contentType,
+			'x-amz-meta-nvcf-asset-description': description,
+		},
+		body: bytes as BodyInit,
+	});
+	if (!putRes.ok) {
+		throw new Error(`Asset PUT failed: ${putRes.status} ${await putRes.text()}`);
+	}
+	return { assetId: reg.assetId, uploadUrl: reg.uploadUrl };
+}
+
+/**
+ * Detect OpenAI multipart `content` arrays with image_url parts and
+ * translate them into NVIDIA's asset-id form. Returns the rewritten
+ * messages plus the collected asset UUIDs (caller passes those as
+ * `nvcf-function-asset-ids` + `nvcf-input-asset-references`).
+ *
+ * Plain string content passes through unchanged. Non-image multipart
+ * parts (text) are concatenated into the resulting string.
+ */
+async function translateVisionMessages(
+	browser: RemoteBrowserService,
+	messages: unknown[],
+): Promise<{ messages: unknown[]; assetIds: string[] }> {
+	const allAssetIds: string[] = [];
+	const out: unknown[] = [];
+	for (const m of messages) {
+		const msg = m as { role?: unknown; content?: unknown };
+		if (!msg || typeof msg !== 'object' || !Array.isArray(msg.content)) {
+			out.push(m);
+			continue;
+		}
+		const textBits: string[] = [];
+		const imageTags: string[] = [];
+		for (const part of msg.content as unknown[]) {
+			const p = part as { type?: unknown; text?: unknown; image_url?: unknown };
+			if (p?.type === 'text' && typeof p.text === 'string') {
+				textBits.push(p.text);
+				continue;
+			}
+			if (p?.type === 'image_url') {
+				const ref = p.image_url as { url?: unknown };
+				if (typeof ref?.url !== 'string') {
+					throw new Error('image_url.url must be a string');
+				}
+				const { bytes, contentType } = await fetchImageBytes(ref.url);
+				const { assetId } = await uploadAsset(browser, bytes, contentType, 'inline-image');
+				allAssetIds.push(assetId);
+				imageTags.push(`<img src="data:${contentType};asset_id,${assetId}" />`);
+				continue;
+			}
+			// Unknown part type — pass through as JSON text so models with
+			// custom multipart shapes still see something.
+			textBits.push(JSON.stringify(p));
+		}
+		out.push({ ...msg, content: `${imageTags.join('')}${textBits.join('')}` });
+	}
+	return { messages: out, assetIds: allAssetIds };
+}
+
+/**
+ * Resolve an OpenAI image_url.url (data: URL or http(s)) to raw bytes
+ * + content-type. Bytes are returned as Uint8Array so they fit the
+ * fetch BodyInit type without copying.
+ */
+async function fetchImageBytes(url: string): Promise<{ bytes: Uint8Array; contentType: string }> {
+	if (url.startsWith('data:')) {
+		// data:image/png;base64,XXXX
+		const comma = url.indexOf(',');
+		if (comma < 0) throw new Error('Malformed data URL');
+		const meta = url.slice(5, comma); // e.g. "image/png;base64"
+		const payload = url.slice(comma + 1);
+		const isBase64 = /;\s*base64/i.test(meta);
+		const contentType = meta.split(';')[0] || 'application/octet-stream';
+		const bytes = isBase64
+			? Uint8Array.from(Buffer.from(payload, 'base64'))
+			: new TextEncoder().encode(decodeURIComponent(payload));
+		return { bytes, contentType };
+	}
+	if (url.startsWith('http://') || url.startsWith('https://')) {
+		const res = await rateLimitedFetch(url);
+		if (!res.ok) throw new Error(`image fetch ${url} → ${res.status}`);
+		const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
+		const bytes = new Uint8Array(await res.arrayBuffer());
+		return { bytes, contentType };
+	}
+	throw new Error(`Unsupported image_url scheme: ${url.slice(0, 32)}`);
 }
 
 /** E1 experiment state: the most recent predict POST captured by
@@ -747,11 +886,14 @@ export const routes: DomainRoute[] = [
 			}
 			if (typeof body.model !== 'string') {
 				return c.json(
-					{ error: "Field 'model' must be a string like 'nvidia/openai/gpt-oss-20b' or 'openai/gpt-oss-20b'." },
+					{
+						error:
+							"Field 'model' must be a string like 'nvidia/openai/gpt-oss-20b' or 'openai/gpt-oss-20b'.",
+					},
 					400,
 				);
 			}
-			let parsed;
+			let parsed: ReturnType<typeof parseModelId>;
 			try {
 				parsed = parseModelId(body.model);
 			} catch (e) {
@@ -774,13 +916,21 @@ export const routes: DomainRoute[] = [
 			try {
 				await ensurePageReadyForMint(browser, playgroundModel);
 			} catch (err) {
-				return c.json({ error: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}` }, 502);
+				return c.json(
+					{ error: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}` },
+					502,
+				);
 			}
 			let captchaToken: string;
 			try {
-				captchaToken = await withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
+				captchaToken = await withMintLock(browser, () =>
+					mintViaBinding(browser, NVIDIA_SITEKEY, 30_000),
+				);
 			} catch (err) {
-				return c.json({ error: `Mint failed: ${err instanceof Error ? err.message : String(err)}` }, 502);
+				return c.json(
+					{ error: `Mint failed: ${err instanceof Error ? err.message : String(err)}` },
+					502,
+				);
 			}
 
 			let functionId: string;
@@ -788,7 +938,9 @@ export const routes: DomainRoute[] = [
 				functionId = await getFunctionId(playgroundModel);
 			} catch (err) {
 				return c.json(
-					{ error: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}` },
+					{
+						error: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+					},
 					502,
 				);
 			}
@@ -872,11 +1024,16 @@ export const routes: DomainRoute[] = [
 			});
 			const upstream = `${NGC_API}/search/catalog/resources/ENDPOINT?q=${encodeURIComponent(q)}`;
 			const res = await rateLimitedFetch(upstream, { headers: UA_HEADER });
-			if (!res.ok) return c.json({ error: { message: `Upstream ${res.status}`, type: 'upstream_error' } }, 502);
+			if (!res.ok)
+				return c.json(
+					{ error: { message: `Upstream ${res.status}`, type: 'upstream_error' } },
+					502,
+				);
 			const data = (await res.json()) as CatalogResponse;
 			const group = data.results.find((g) => g.groupValue === 'ENDPOINT') ?? data.results[0];
 			const all = (group?.resources ?? []).map(summarizeResource);
-			if (providerFilter && providerFilter !== 'nvidia') return c.json({ object: 'list', data: [] });
+			if (providerFilter && providerFilter !== 'nvidia')
+				return c.json({ object: 'list', data: [] });
 			const enriched = all
 				.filter((m) => m.guestAccess)
 				.filter((m) => (previewOnly ? m.preview : true))
@@ -897,11 +1054,20 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/v1/models/:provider/:vendor/:slug',
-		description: 'Single model by full ID (nvidia/<vendor>/<slug>). Returns the same shape as a /v1/models entry — useful for capability/parameter introspection.',
+		description:
+			'Single model by full ID (nvidia/<vendor>/<slug>). Returns the same shape as a /v1/models entry — useful for capability/parameter introspection.',
 		browserRequired: false,
 		handler: async (c) => {
-			const { provider, vendor, slug } = c.req.param() as { provider: string; vendor: string; slug: string };
-			if (provider !== 'nvidia') return c.json({ error: { message: 'Unknown provider', type: 'invalid_request_error' } }, 404);
+			const { provider, vendor, slug } = c.req.param() as {
+				provider: string;
+				vendor: string;
+				slug: string;
+			};
+			if (provider !== 'nvidia')
+				return c.json(
+					{ error: { message: 'Unknown provider', type: 'invalid_request_error' } },
+					404,
+				);
 			const q = JSON.stringify({
 				orderBy: [{ field: 'dateCreated', value: 'DESC' }],
 				page: 0,
@@ -913,13 +1079,21 @@ export const routes: DomainRoute[] = [
 				`${NGC_API}/search/catalog/resources/ENDPOINT?q=${encodeURIComponent(q)}`,
 				{ headers: UA_HEADER },
 			);
-			if (!res.ok) return c.json({ error: { message: `Upstream ${res.status}`, type: 'upstream_error' } }, 502);
+			if (!res.ok)
+				return c.json(
+					{ error: { message: `Upstream ${res.status}`, type: 'upstream_error' } },
+					502,
+				);
 			const data = (await res.json()) as CatalogResponse;
 			const group = data.results.find((g) => g.groupValue === 'ENDPOINT') ?? data.results[0];
 			const summary = (group?.resources ?? [])
 				.map(summarizeResource)
 				.find((m) => m.publisher === vendor && m.slug === slug);
-			if (!summary) return c.json({ error: { message: 'Model not found', type: 'invalid_request_error' } }, 404);
+			if (!summary)
+				return c.json(
+					{ error: { message: 'Model not found', type: 'invalid_request_error' } },
+					404,
+				);
 			return c.json(enrichModel(summary));
 		},
 	},
@@ -939,17 +1113,26 @@ export const routes: DomainRoute[] = [
 				presence_penalty?: unknown;
 				frequency_penalty?: unknown;
 				reasoning_effort?: unknown;
+				seed?: unknown;
+				stop?: unknown;
+				tools?: unknown;
+				tool_choice?: unknown;
+				parallel_tool_calls?: unknown;
 			};
 			try {
 				body = (await c.req.json()) as typeof body;
 			} catch {
-				return c.json({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }, 400);
+				return c.json(
+					{ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } },
+					400,
+				);
 			}
 			if (typeof body.model !== 'string') {
 				return c.json(
 					{
 						error: {
-							message: "Field 'model' must be a string like 'nvidia/openai/gpt-oss-20b' or 'openai/gpt-oss-20b'.",
+							message:
+								"Field 'model' must be a string like 'nvidia/openai/gpt-oss-20b' or 'openai/gpt-oss-20b'.",
 							type: 'invalid_request_error',
 							param: 'model',
 						},
@@ -957,12 +1140,18 @@ export const routes: DomainRoute[] = [
 					400,
 				);
 			}
-			let parsed;
+			let parsed: ReturnType<typeof parseModelId>;
 			try {
 				parsed = parseModelId(body.model);
 			} catch (e) {
 				return c.json(
-					{ error: { message: e instanceof Error ? e.message : String(e), type: 'invalid_request_error', param: 'model' } },
+					{
+						error: {
+							message: e instanceof Error ? e.message : String(e),
+							type: 'invalid_request_error',
+							param: 'model',
+						},
+					},
 					400,
 				);
 			}
@@ -984,6 +1173,26 @@ export const routes: DomainRoute[] = [
 			const wantsStream = body.stream === true;
 			DEBUG('build-nvidia', `v1 chat: ${playgroundModel} stream=${wantsStream}`);
 
+			// Vision: translate OpenAI multipart `content` arrays with image_url
+			// parts into NVIDIA's asset-id form. Each image becomes a fresh
+			// asset upload (POST /v2/nvcf/assets + PUT to S3); the message
+			// content is rewritten to a string with inline <img src="...asset_id,UUID" />
+			// tags, and the chat request gains nvcf-function-asset-ids +
+			// nvcf-input-asset-references headers.
+			const collectedAssetIds: string[] = [];
+			let translatedMessages: unknown = body.messages;
+			try {
+				const result = await translateVisionMessages(browser, body.messages as unknown[]);
+				translatedMessages = result.messages;
+				collectedAssetIds.push(...result.assetIds);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json(
+					{ error: { message: `Vision asset upload failed: ${msg}`, type: 'upstream_error' } },
+					502,
+				);
+			}
+
 			// 1. Persona + SDK trap. Reload page if either was newly installed.
 			const personaInstalled = await ensurePersona(browser);
 			const trapInstalled = await ensureSdkTrap(browser);
@@ -999,19 +1208,30 @@ export const routes: DomainRoute[] = [
 				await ensurePageReadyForMint(browser, playgroundModel);
 			} catch (err) {
 				return c.json(
-					{ error: { message: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}`, type: 'captcha_error' } },
+					{
+						error: {
+							message: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
 					502,
 				);
 			}
 
 			// 3. Mint via SDK binding (no UI driving, no abort race).
-			const mintToken = () => withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
+			const mintToken = () =>
+				withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
 			let captchaToken: string;
 			try {
 				captchaToken = await mintToken();
 			} catch (err) {
 				return c.json(
-					{ error: { message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`, type: 'captcha_error' } },
+					{
+						error: {
+							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
 					502,
 				);
 			}
@@ -1022,7 +1242,12 @@ export const routes: DomainRoute[] = [
 				functionId = await getFunctionId(playgroundModel);
 			} catch (err) {
 				return c.json(
-					{ error: { message: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`, type: 'upstream_error' } },
+					{
+						error: {
+							message: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'upstream_error',
+						},
+					},
 					502,
 				);
 			}
@@ -1032,10 +1257,14 @@ export const routes: DomainRoute[] = [
 			//    we collect chunks and synthesize a single response below.
 			const upstreamBody = JSON.stringify({
 				model: upstreamModel,
-				messages: body.messages,
+				messages: translatedMessages,
 				stream: true,
-				...(typeof body.max_tokens === 'number' ? { max_tokens: body.max_tokens } : { max_tokens: 4096 }),
-				...(typeof body.temperature === 'number' ? { temperature: body.temperature } : { temperature: 1 }),
+				...(typeof body.max_tokens === 'number'
+					? { max_tokens: body.max_tokens }
+					: { max_tokens: 4096 }),
+				...(typeof body.temperature === 'number'
+					? { temperature: body.temperature }
+					: { temperature: 1 }),
 				...(typeof body.top_p === 'number' ? { top_p: body.top_p } : { top_p: 1 }),
 				...(typeof body.presence_penalty === 'number'
 					? { presence_penalty: body.presence_penalty }
@@ -1046,10 +1275,18 @@ export const routes: DomainRoute[] = [
 				...(typeof body.reasoning_effort === 'string'
 					? { reasoning_effort: body.reasoning_effort }
 					: { reasoning_effort: 'medium' }),
+				...(typeof body.seed === 'number' ? { seed: body.seed } : {}),
+				...(body.stop !== undefined ? { stop: body.stop } : {}),
+				...(Array.isArray(body.tools) ? { tools: body.tools } : {}),
+				...(body.tool_choice !== undefined ? { tool_choice: body.tool_choice } : {}),
+				...(body.parallel_tool_calls !== undefined
+					? { parallel_tool_calls: body.parallel_tool_calls }
+					: {}),
 			});
 
 			// 6. Send via Bun fetch with minimum headers. Re-mint once on token rejection.
 			const upstreamUrl = `${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`;
+			const assetHeaderValue = collectedAssetIds.join(',');
 			const sendOnce = (token: string) =>
 				fetch(upstreamUrl, {
 					method: 'POST',
@@ -1057,6 +1294,12 @@ export const routes: DomainRoute[] = [
 						'content-type': 'application/json',
 						'nv-captcha-token': token,
 						'nv-function-id': functionId,
+						...(assetHeaderValue
+							? {
+									'nvcf-function-asset-ids': assetHeaderValue,
+									'nvcf-input-asset-references': assetHeaderValue,
+								}
+							: {}),
 					},
 					body: upstreamBody,
 				});
@@ -1071,10 +1314,7 @@ export const routes: DomainRoute[] = [
 						const fresh = await mintToken();
 						upstream = await sendOnce(fresh);
 					} else {
-						return c.json(
-							{ error: { message: errText, type: 'upstream_error' } },
-							400,
-						);
+						return c.json({ error: { message: errText, type: 'upstream_error' } }, 400);
 					}
 				}
 			} catch (err) {
@@ -1114,6 +1354,10 @@ export const routes: DomainRoute[] = [
 			let finishReason: string | null = null;
 			const contentParts: string[] = [];
 			const reasoningParts: string[] = [];
+			const toolCallAccum = new Map<
+				number,
+				{ id?: string; type?: string; function: { name?: string; arguments: string[] } }
+			>();
 			let promptTokens: number | undefined;
 			let completionTokens: number | undefined;
 			while (true) {
@@ -1132,7 +1376,17 @@ export const routes: DomainRoute[] = [
 							model?: string;
 							created?: number;
 							choices?: Array<{
-								delta?: { content?: string; reasoning?: string; reasoning_content?: string };
+								delta?: {
+									content?: string;
+									reasoning?: string;
+									reasoning_content?: string;
+									tool_calls?: Array<{
+										index?: number;
+										id?: string;
+										type?: string;
+										function?: { name?: string; arguments?: string };
+									}>;
+								};
 								finish_reason?: string | null;
 							}>;
 							usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -1143,6 +1397,15 @@ export const routes: DomainRoute[] = [
 						const ch = chunk.choices?.[0];
 						if (ch?.delta?.content) contentParts.push(ch.delta.content);
 						if (ch?.delta?.reasoning_content) reasoningParts.push(ch.delta.reasoning_content);
+						for (const tc of ch?.delta?.tool_calls ?? []) {
+							const idx = tc.index ?? 0;
+							const slot = toolCallAccum.get(idx) ?? { function: { arguments: [] } };
+							if (tc.id) slot.id = tc.id;
+							if (tc.type) slot.type = tc.type;
+							if (tc.function?.name) slot.function.name = tc.function.name;
+							if (tc.function?.arguments) slot.function.arguments.push(tc.function.arguments);
+							toolCallAccum.set(idx, slot);
+						}
 						if (ch?.finish_reason) finishReason = ch.finish_reason;
 						if (chunk.usage) {
 							promptTokens = chunk.usage.prompt_tokens;
@@ -1153,6 +1416,13 @@ export const routes: DomainRoute[] = [
 					}
 				}
 			}
+			const toolCalls = [...toolCallAccum.entries()]
+				.sort(([a], [b]) => a - b)
+				.map(([, v]) => ({
+					id: v.id ?? '',
+					type: v.type ?? 'function',
+					function: { name: v.function.name ?? '', arguments: v.function.arguments.join('') },
+				}));
 			return c.json({
 				id: id || `chatcmpl-${Date.now()}`,
 				object: 'chat.completion',
@@ -1165,8 +1435,9 @@ export const routes: DomainRoute[] = [
 							role: 'assistant',
 							content: contentParts.join(''),
 							...(reasoningParts.length ? { reasoning_content: reasoningParts.join('') } : {}),
+							...(toolCalls.length ? { tool_calls: toolCalls } : {}),
 						},
-						finish_reason: finishReason ?? 'stop',
+						finish_reason: finishReason ?? (toolCalls.length ? 'tool_calls' : 'stop'),
 					},
 				],
 				usage: {
@@ -1174,6 +1445,248 @@ export const routes: DomainRoute[] = [
 					completion_tokens: completionTokens ?? 0,
 					total_tokens: (promptTokens ?? 0) + (completionTokens ?? 0),
 				},
+			});
+		},
+	},
+
+	{
+		method: 'POST',
+		path: '/v1/files',
+		description:
+			'Upload a binary asset (image / audio) for use as inline content in /v1/chat/completions. Two body shapes accepted: (1) JSON `{ data: <base64-string>, content_type: "image/png", description?: "..." }` or (2) raw bytes with the request `Content-Type` header set to the media type. Returns `{ id, object: "file", bytes, content_type, expires_at, description }`. The returned `id` is the NVIDIA asset UUID — embed it in chat content as `<img src="data:<content_type>;asset_id,<id>" />` and forward it via the `nvcf-function-asset-ids` header (the chat route does this automatically when you pass OpenAI multipart `image_url` parts with `data:` URLs).',
+		handler: async (c, browser) => {
+			let bytes: Uint8Array;
+			let contentType: string;
+			let description = 'inline-asset';
+			const ct = c.req.header('content-type') ?? '';
+			if (ct.includes('application/json')) {
+				let body: { data?: unknown; content_type?: unknown; description?: unknown };
+				try {
+					body = (await c.req.json()) as typeof body;
+				} catch {
+					return c.json(
+						{ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } },
+						400,
+					);
+				}
+				if (typeof body.data !== 'string' || typeof body.content_type !== 'string') {
+					return c.json(
+						{
+							error: {
+								message:
+									'JSON body must include `data` (base64 string) and `content_type` (media type).',
+								type: 'invalid_request_error',
+							},
+						},
+						400,
+					);
+				}
+				try {
+					bytes = Uint8Array.from(Buffer.from(body.data, 'base64'));
+				} catch {
+					return c.json(
+						{ error: { message: '`data` is not valid base64', type: 'invalid_request_error' } },
+						400,
+					);
+				}
+				contentType = body.content_type;
+				if (typeof body.description === 'string') description = body.description;
+			} else {
+				try {
+					bytes = new Uint8Array(await c.req.arrayBuffer());
+				} catch {
+					return c.json(
+						{ error: { message: 'Could not read request body', type: 'invalid_request_error' } },
+						400,
+					);
+				}
+				if (!ct) {
+					return c.json(
+						{
+							error: {
+								message: 'Raw upload requires Content-Type header',
+								type: 'invalid_request_error',
+							},
+						},
+						400,
+					);
+				}
+				contentType = ct;
+				const desc = c.req.header('x-asset-description');
+				if (desc) description = desc;
+			}
+			if (bytes.byteLength === 0) {
+				return c.json({ error: { message: 'Empty body', type: 'invalid_request_error' } }, 400);
+			}
+			let assetId: string;
+			let uploadUrl: string;
+			try {
+				const r = await uploadAsset(browser, bytes, contentType, description);
+				assetId = r.assetId;
+				uploadUrl = r.uploadUrl;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				return c.json({ error: { message: msg, type: 'upstream_error' } }, 502);
+			}
+			// S3 presigned URLs from this endpoint expire in ~2100 seconds (35 min).
+			// Surface that as `expires_at` so callers know the file's lifetime.
+			const expiresAt = (() => {
+				try {
+					const u = new URL(uploadUrl);
+					const exp = u.searchParams.get('X-Amz-Expires');
+					return exp ? Math.floor(Date.now() / 1000) + Number(exp) : null;
+				} catch {
+					return null;
+				}
+			})();
+			return c.json({
+				id: assetId,
+				object: 'file',
+				bytes: bytes.byteLength,
+				content_type: contentType,
+				description,
+				expires_at: expiresAt,
+				created_at: Math.floor(Date.now() / 1000),
+			});
+		},
+	},
+
+	{
+		method: 'GET',
+		path: '/v1/models/:provider/:vendor/:slug/queue',
+		description:
+			'Live queue/function status for a model. Proxies api.ngc.nvidia.com/v2/predict/queues/models/<slug>. Returns `{ function_id, queues: [{ function_version_id, function_name, function_status, queue_depth }] }`. Use to distinguish hot (queue_depth=0, status=ACTIVE), queued (queue_depth>0), and dead (404 from /v1/chat/completions) models without burning a captcha token.',
+		handler: async (c) => {
+			const { provider, slug } = c.req.param() as {
+				provider: string;
+				vendor: string;
+				slug: string;
+			};
+			if (provider !== 'nvidia') {
+				return c.json(
+					{ error: { message: `Unknown provider '${provider}'`, type: 'invalid_request_error' } },
+					404,
+				);
+			}
+			const url = `${NGC_API}/predict/queues/models/${NIM_ORG}/${encodeURIComponent(slug)}`;
+			const res = await rateLimitedFetch(url, { headers: UA_HEADER });
+			if (!res.ok) {
+				return c.json(
+					{ error: { message: `Queue lookup failed: ${res.status}`, type: 'upstream_error' } },
+					res.status as 400 | 401 | 403 | 404 | 500 | 502,
+				);
+			}
+			const data = (await res.json()) as {
+				functionId?: string;
+				queues?: Array<{
+					functionVersionId?: string;
+					functionName?: string;
+					functionStatus?: string;
+					queueDepth?: number;
+				}>;
+			};
+			return c.json({
+				function_id: data.functionId ?? null,
+				queues: (data.queues ?? []).map((q) => ({
+					function_version_id: q.functionVersionId ?? null,
+					function_name: q.functionName ?? null,
+					function_status: q.functionStatus ?? null,
+					queue_depth: q.queueDepth ?? 0,
+				})),
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/v1/blueprints',
+		description:
+			'List blueprints (NVIDIA reference apps). Optional `?model=<vendor>/<slug>` filters to blueprints related to a specific model (the playground "Related Blueprints" rail). Optional `?page=N` (default 1) and `?per_page=N` (default 20). Returns `{ data: [...], total, page, per_page }`.',
+		handler: async (c) => {
+			const url = new URL(c.req.url);
+			const model = url.searchParams.get('model');
+			const page = Math.max(1, Number(url.searchParams.get('page') ?? '1') || 1);
+			const perPage = Math.min(
+				100,
+				Math.max(1, Number(url.searchParams.get('per_page') ?? '20') || 20),
+			);
+			const filters: Array<{ field: string; value: string }> = [];
+			if (model) {
+				// build.nvidia.com normalizes model ids to underscores for this filter:
+				// "openai/gpt-oss-20b" → "relatedblueprint_gpt_oss_20b" (slug only, dashes→_).
+				const slug = model.includes('/') ? (model.split('/').pop() ?? model) : model;
+				const normalized = slug.replace(/[-.]/g, '_');
+				filters.push({ field: 'relatedBlueprint', value: `relatedblueprint_${normalized}` });
+			}
+			const q = {
+				filters,
+				orderBy: [{ field: 'dateCreated', value: 'DESC' }],
+				page: page - 1, // upstream is 0-indexed
+				pageSize: perPage,
+				query: `orgName:"${NIM_ORG}"`,
+			};
+			const upstream = `${NGC_API}/search/catalog/resources/BLUEPRINT?q=${encodeURIComponent(JSON.stringify(q))}`;
+			const res = await rateLimitedFetch(upstream, { headers: UA_HEADER });
+			if (!res.ok) {
+				return c.json(
+					{ error: { message: `Blueprint search failed: ${res.status}`, type: 'upstream_error' } },
+					502,
+				);
+			}
+			const raw = (await res.json()) as {
+				resultTotal?: number;
+				results?: Array<{ totalCount?: number; resources?: unknown[] }>;
+			};
+			const group = (raw.results ?? [])[0] ?? {};
+			return c.json({
+				data: group.resources ?? [],
+				total: group.totalCount ?? 0,
+				page,
+				per_page: perPage,
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/v1/tools/blocklist',
+		description:
+			"List of tool names the playground hides from chat models (e.g. demo / internal-only tools). Proxies build.nvidia.com/api/runtime/killswitches/chat/omit-tools.yaml. Returns `{ tools: ['name1', ...] }`. Useful for forwarding-tool clients that want to filter their tool definitions to match the playground's allowlist.",
+		handler: async (c) => {
+			const url = `${BUILD_API}/runtime/killswitches/chat/omit-tools.yaml`;
+			const res = await rateLimitedFetch(url, { headers: UA_HEADER });
+			if (!res.ok) {
+				return c.json(
+					{ error: { message: `Blocklist lookup failed: ${res.status}`, type: 'upstream_error' } },
+					502,
+				);
+			}
+			const data = (await res.json()) as unknown;
+			return c.json({ tools: Array.isArray(data) ? data : [] });
+		},
+	},
+	{
+		method: 'GET',
+		path: '/v1/legal/:id',
+		description:
+			'Fetch a legal terms / model-license markdown block by id. Proxies build.nvidia.com/api/runtime/content/legal/<id>.yaml. Common ids: `model-terms-of-service`, `data-collection`. Returns `{ id, version, terms }` where `terms` is markdown.',
+		handler: async (c) => {
+			const id = c.req.param('id') ?? '';
+			const safe = id.replace(/[^a-zA-Z0-9._-]/g, '');
+			if (!safe) {
+				return c.json({ error: { message: 'Invalid id', type: 'invalid_request_error' } }, 400);
+			}
+			const url = `${BUILD_API}/runtime/content/legal/${safe}.yaml`;
+			const res = await rateLimitedFetch(url, { headers: UA_HEADER });
+			if (!res.ok) {
+				return c.json(
+					{ error: { message: `Legal lookup failed: ${res.status}`, type: 'upstream_error' } },
+					res.status as 400 | 404 | 500 | 502,
+				);
+			}
+			const data = (await res.json()) as { version?: number; terms?: string };
+			return c.json({
+				id: safe,
+				version: data.version ?? null,
+				terms: data.terms ?? '',
 			});
 		},
 	},
@@ -1193,15 +1706,25 @@ export const routes: DomainRoute[] = [
 		description:
 			'Modality-agnostic passthrough. Mint a fresh captcha token + post raw body to the predict URL. Returns upstream response unchanged. Use for image/video/embedding/safety models whose request shape does not fit /v1/chat/completions.',
 		handler: async (c, browser) => {
-			const { provider, vendor, slug } = c.req.param() as { provider: string; vendor: string; slug: string };
+			const { provider, vendor, slug } = c.req.param() as {
+				provider: string;
+				vendor: string;
+				slug: string;
+			};
 			if (provider !== 'nvidia') {
-				return c.json({ error: { message: `Unknown provider '${provider}'`, type: 'invalid_request_error' } }, 404);
+				return c.json(
+					{ error: { message: `Unknown provider '${provider}'`, type: 'invalid_request_error' } },
+					404,
+				);
 			}
 			let userBody: string;
 			try {
 				userBody = await c.req.text();
 			} catch {
-				return c.json({ error: { message: 'Could not read request body', type: 'invalid_request_error' } }, 400);
+				return c.json(
+					{ error: { message: 'Could not read request body', type: 'invalid_request_error' } },
+					400,
+				);
 			}
 			const playgroundModel = `${vendor}/${slug}`;
 			DEBUG('build-nvidia', `v1 raw: ${playgroundModel} body=${userBody.length}b`);
@@ -1217,20 +1740,45 @@ export const routes: DomainRoute[] = [
 			try {
 				await ensurePageReadyForMint(browser, playgroundModel);
 			} catch (err) {
-				return c.json({ error: { message: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}`, type: 'captcha_error' } }, 502);
+				return c.json(
+					{
+						error: {
+							message: `Page not ready for mint: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
+					502,
+				);
 			}
-			const mintToken = () => withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
+			const mintToken = () =>
+				withMintLock(browser, () => mintViaBinding(browser, NVIDIA_SITEKEY, 30_000));
 			let captchaToken: string;
 			try {
 				captchaToken = await mintToken();
 			} catch (err) {
-				return c.json({ error: { message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`, type: 'captcha_error' } }, 502);
+				return c.json(
+					{
+						error: {
+							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
+					502,
+				);
 			}
 			let functionId: string;
 			try {
 				functionId = await getFunctionId(playgroundModel);
 			} catch (err) {
-				return c.json({ error: { message: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`, type: 'upstream_error' } }, 502);
+				return c.json(
+					{
+						error: {
+							message: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'upstream_error',
+						},
+					},
+					502,
+				);
 			}
 
 			const upstreamUrl = `${NGC_API}/predict/models/${NIM_ORG}/${slug}`;
@@ -1259,7 +1807,10 @@ export const routes: DomainRoute[] = [
 				}
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				return c.json({ error: { message: `Upstream fetch failed: ${msg}`, type: 'upstream_error' } }, 502);
+				return c.json(
+					{ error: { message: `Upstream fetch failed: ${msg}`, type: 'upstream_error' } },
+					502,
+				);
 			}
 
 			// Stream the response through verbatim, preserving content-type.
@@ -1951,13 +2502,14 @@ export const routes: DomainRoute[] = [
 		method: 'POST',
 		path: '/debug/wasm-import-tap/iframe-encrypt',
 		description:
-			'E7: encrypt a pre-msgpacked payload via Chrome iframe\'s hsw(1, X). Returns encrypted bytes (base64). Lets caller test if Node-side encrypt is the gating factor by submitting Chrome-encrypted bytes from Node.',
+			"E7: encrypt a pre-msgpacked payload via Chrome iframe's hsw(1, X). Returns encrypted bytes (base64). Lets caller test if Node-side encrypt is the gating factor by submitting Chrome-encrypted bytes from Node.",
 		handler: async (c, browser) => {
 			const body = (await c.req.json().catch(() => ({}))) as {
 				packedPayloadBase64?: string;
 				timeoutMs?: number;
 			};
-			if (!body.packedPayloadBase64) return c.json({ ok: false, error: 'Missing packedPayloadBase64' }, 400);
+			if (!body.packedPayloadBase64)
+				return c.json({ ok: false, error: 'Missing packedPayloadBase64' }, 400);
 			const r = await iframeEncrypt(
 				browser,
 				Buffer.from(body.packedPayloadBase64, 'base64'),
@@ -1970,7 +2522,7 @@ export const routes: DomainRoute[] = [
 		method: 'POST',
 		path: '/debug/wasm-import-tap/iframe-post',
 		description:
-			'E7: send pre-msgpacked payload to /getcaptcha THROUGH the iframe (so encryption happens in Chrome, not Node). Body: { sitekey, specStr, packedPayloadBase64 }. Used to isolate whether Node\'s hsw(1, X) encryption is the gating factor.',
+			"E7: send pre-msgpacked payload to /getcaptcha THROUGH the iframe (so encryption happens in Chrome, not Node). Body: { sitekey, specStr, packedPayloadBase64 }. Used to isolate whether Node's hsw(1, X) encryption is the gating factor.",
 		handler: async (c, browser) => {
 			const body = (await c.req.json().catch(() => ({}))) as {
 				sitekey?: string;
