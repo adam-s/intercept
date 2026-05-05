@@ -57,6 +57,13 @@ import {
 import { attachHswTap, detachHswTap, drainHswTap } from './hsw-tap';
 import { BuildNvidiaInstrument } from './instrument';
 import { getLifecycle, probeAllQueues, recordPredictResult } from './lifecycle';
+import {
+	decorateMintError,
+	fetchWithTimeout,
+	getMintHealth,
+	recordMintFailure,
+	recordMintSuccess,
+} from './mint-health';
 import { type CatalogSummary, enrichModel, parseModelId } from './model-metadata';
 import { attachRandomTap, detachRandomTap, drainRandomTap } from './random-tap';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
@@ -297,7 +304,7 @@ async function uploadAsset(
 	const captchaToken = await withMintLock(browser, () =>
 		mintViaBinding(browser, NVIDIA_SITEKEY, 30_000),
 	);
-	const registerRes = await fetch(`${NGC_API}/nvcf/assets`, {
+	const registerRes = await fetchWithTimeout(`${NGC_API}/nvcf/assets`, {
 		method: 'POST',
 		headers: {
 			'content-type': 'application/json',
@@ -514,20 +521,43 @@ async function prepareMintFor(
 	browser: RemoteBrowserService,
 	playgroundModel: string,
 ): Promise<{ captchaToken: string; functionId: string }> {
-	const personaInstalled = await ensurePersona(browser);
-	const trapInstalled = await ensureSdkTrap(browser);
-	if (personaInstalled || trapInstalled) {
-		const page = browser.getPage();
-		if (page && page.url().startsWith(BUILD_NV_ORIGIN)) {
-			await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+	try {
+		const personaInstalled = await ensurePersona(browser);
+		const trapInstalled = await ensureSdkTrap(browser);
+		if (personaInstalled || trapInstalled) {
+			const page = browser.getPage();
+			if (page && page.url().startsWith(BUILD_NV_ORIGIN)) {
+				await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+			}
 		}
+		await ensurePageReadyForMint(browser, playgroundModel);
+		const captchaToken = await withMintLock(browser, () =>
+			mintViaBinding(browser, NVIDIA_SITEKEY, 30_000),
+		);
+		const functionId = await getFunctionId(playgroundModel);
+		recordMintSuccess();
+		return { captchaToken, functionId };
+	} catch (err) {
+		recordMintFailure(err instanceof Error ? err.message : String(err));
+		throw err;
 	}
-	await ensurePageReadyForMint(browser, playgroundModel);
-	const captchaToken = await withMintLock(browser, () =>
-		mintViaBinding(browser, NVIDIA_SITEKEY, 30_000),
-	);
-	const functionId = await getFunctionId(playgroundModel);
-	return { captchaToken, functionId };
+}
+
+/** Translate a captcha-mint error into the structured error payload used by
+ *  every modality route. Adds operator-friendly "suggestion" + severity. */
+function mintErrorBody(err: unknown): {
+	error: { message: string; type: string; suggestion: string; severity: string };
+} {
+	const raw = err instanceof Error ? err.message : String(err);
+	const decorated = decorateMintError(raw);
+	return {
+		error: {
+			message: `Mint failed: ${decorated.message}`,
+			type: 'captcha_error',
+			suggestion: decorated.suggestion,
+			severity: decorated.severity,
+		},
+	};
 }
 
 /** E1 experiment state: the most recent predict POST captured by
@@ -1374,15 +1404,7 @@ export const routes: DomainRoute[] = [
 			try {
 				captchaToken = await mintToken();
 			} catch (err) {
-				return c.json(
-					{
-						error: {
-							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
-							type: 'captcha_error',
-						},
-					},
-					502,
-				);
+				return c.json(mintErrorBody(err), 502);
 			}
 
 			// 4. Resolve nvcfFunctionId (cached after first lookup).
@@ -1730,17 +1752,9 @@ export const routes: DomainRoute[] = [
 				const r = await prepareMintFor(browser, 'openai/gpt-oss-20b');
 				captchaToken = r.captchaToken;
 			} catch (err) {
-				return c.json(
-					{
-						error: {
-							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
-							type: 'captcha_error',
-						},
-					},
-					502,
-				);
+				return c.json(mintErrorBody(err), 502);
 			}
-			const res = await fetch(`${NGC_API}/nvcf/assets/${id}`, {
+			const res = await fetchWithTimeout(`${NGC_API}/nvcf/assets/${id}`, {
 				headers: { 'nv-captcha-token': captchaToken, accept: 'application/json' },
 			});
 			if (!res.ok) {
@@ -1837,18 +1851,10 @@ export const routes: DomainRoute[] = [
 				captchaToken = r.captchaToken;
 				functionId = r.functionId;
 			} catch (err) {
-				return c.json(
-					{
-						error: {
-							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
-							type: 'captcha_error',
-						},
-					},
-					502,
-				);
+				return c.json(mintErrorBody(err), 502);
 			}
 			const inputArr = Array.isArray(body.input) ? body.input : [body.input];
-			const upstream = await fetch(`${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`, {
+			const upstream = await fetchWithTimeout(`${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`, {
 				method: 'POST',
 				headers: {
 					'content-type': 'application/json',
@@ -1961,15 +1967,7 @@ export const routes: DomainRoute[] = [
 				captchaToken = r.captchaToken;
 				functionId = r.functionId;
 			} catch (err) {
-				return c.json(
-					{
-						error: {
-							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
-							type: 'captcha_error',
-						},
-					},
-					502,
-				);
+				return c.json(mintErrorBody(err), 502);
 			}
 			const normalizeText = (v: unknown): { text: string } => {
 				if (typeof v === 'string') return { text: v };
@@ -1980,7 +1978,7 @@ export const routes: DomainRoute[] = [
 			};
 			const queryNorm = normalizeText(body.query);
 			const passagesNorm = (body.passages as unknown[]).map(normalizeText);
-			const upstream = await fetch(`${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`, {
+			const upstream = await fetchWithTimeout(`${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`, {
 				method: 'POST',
 				headers: {
 					'content-type': 'application/json',
@@ -2144,15 +2142,7 @@ export const routes: DomainRoute[] = [
 				const r = await prepareMintFor(browser, 'openai/gpt-oss-20b');
 				captchaToken = r.captchaToken;
 			} catch (err) {
-				return c.json(
-					{
-						error: {
-							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
-							type: 'captcha_error',
-						},
-					},
-					502,
-				);
+				return c.json(mintErrorBody(err), 502);
 			}
 			let functionId: string;
 			try {
@@ -2216,7 +2206,7 @@ export const routes: DomainRoute[] = [
 					...(typeof promptParam === 'string' ? { hot_words: [promptParam] } : {}),
 				}),
 			);
-			const upstream = await fetch(`${NGC_API}/riva/${engineSlug}/recognize`, {
+			const upstream = await fetchWithTimeout(`${NGC_API}/riva/${engineSlug}/recognize`, {
 				method: 'POST',
 				headers: { 'nv-captcha-token': captchaToken, 'nv-function-id': functionId },
 				body: fd,
@@ -2329,15 +2319,7 @@ export const routes: DomainRoute[] = [
 				const r = await prepareMintFor(browser, 'openai/gpt-oss-20b');
 				captchaToken = r.captchaToken;
 			} catch (err) {
-				return c.json(
-					{
-						error: {
-							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
-							type: 'captcha_error',
-						},
-					},
-					502,
-				);
+				return c.json(mintErrorBody(err), 502);
 			}
 			let functionId: string;
 			try {
@@ -2355,7 +2337,7 @@ export const routes: DomainRoute[] = [
 			}
 			const engineSlug = parsed.slug.includes('tts') ? 'tts' : parsed.slug;
 			const sampleRate = typeof body.sample_rate_hz === 'number' ? body.sample_rate_hz : 22050;
-			const upstream = await fetch(`${NGC_API}/riva/${engineSlug}/synthesize`, {
+			const upstream = await fetchWithTimeout(`${NGC_API}/riva/${engineSlug}/synthesize`, {
 				method: 'POST',
 				headers: {
 					'content-type': 'application/json',
@@ -2414,6 +2396,26 @@ export const routes: DomainRoute[] = [
 		},
 	},
 
+	{
+		method: 'GET',
+		path: '/v1/health',
+		description:
+			"Operational health for the build-nvidia plugin. Returns `{ ok, mint: { total_calls, consecutive_failures, last_success_at, last_failure_at, last_failure_message, stuck }, hint? }`. Use to confirm the captcha mint flow is alive before issuing real chat/embed/audio requests. `stuck: true` means ≥ 3 consecutive mint failures — the browser session likely needs reconnecting.",
+		handler: async (c) => {
+			const mint = getMintHealth();
+			let hint: string | null = null;
+			if (mint.stuck) {
+				hint = mint.consecutive_failures >= 8
+					? 'IP block likely. Switch network / disconnect VPN, then reconnect the browser.'
+					: "Browser session may be stuck. Reconnect: pkill -f connect-browser; ./scripts/connect-browser.sh --profile build-nvidia --url 'https://build.nvidia.com/openai/gpt-oss-20b' --port 3001";
+			}
+			return c.json({
+				ok: !mint.stuck,
+				mint,
+				...(hint ? { hint } : {}),
+			});
+		},
+	},
 	{
 		method: 'GET',
 		path: '/v1/models/:provider/:vendor/:slug/queue',
@@ -2619,15 +2621,7 @@ export const routes: DomainRoute[] = [
 			try {
 				captchaToken = await mintToken();
 			} catch (err) {
-				return c.json(
-					{
-						error: {
-							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
-							type: 'captcha_error',
-						},
-					},
-					502,
-				);
+				return c.json(mintErrorBody(err), 502);
 			}
 			let functionId: string;
 			try {

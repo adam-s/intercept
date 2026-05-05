@@ -32,6 +32,7 @@
  */
 
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
+import { getMintHealth } from './mint-health';
 import { sentinelGatedConversation } from './routes';
 
 const DEFAULT_MODEL = 'gpt-4o';
@@ -447,6 +448,30 @@ function* toOpenAIChunks(
 // ─── Routes ───────────────────────────────────────────────────────────────
 
 export const openaiAdapterRoutes: DomainRoute[] = [
+	// ── GET /v1/health ────────────────────────────────────────────────
+
+	{
+		method: 'GET',
+		path: '/v1/health',
+		description:
+			"Operational health for the chatgpt plugin. Returns `{ ok, mint: { total_calls, consecutive_failures, last_success_at, last_failure_at, last_failure_message, stuck }, hint? }`. `stuck: true` means ≥ 3 consecutive Sentinel mint failures — the browser session likely needs reconnecting.",
+		browserRequired: false,
+		handler: async (c) => {
+			const mint = getMintHealth();
+			let hint: string | null = null;
+			if (mint.stuck) {
+				hint = mint.consecutive_failures >= 8
+					? 'IP / account block likely. Switch network or clear chatgpt.com cookies, then reconnect the browser.'
+					: 'Browser session may be stuck. Reconnect: pkill -f connect-browser; ./scripts/connect-browser.sh --profile chatgpt --url https://chatgpt.com; then re-harvest the session via POST /api/chatgpt/session/harvest.';
+			}
+			return c.json({
+				ok: !mint.stuck,
+				mint,
+				...(hint ? { hint } : {}),
+			});
+		},
+	},
+
 	// ── GET /v1/models ────────────────────────────────────────────────
 
 	{

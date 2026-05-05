@@ -34,6 +34,12 @@ import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
 import type { InitScriptHandle, RemoteBrowserService } from '@interceptor/browser/remote';
 import { DEEP_LOGGER_SCRIPT } from './experiments/deep-logger';
 import { ChatGPTScriptInterceptor } from './fingerprint';
+import {
+	decorateMintError,
+	fetchWithTimeout,
+	recordMintFailure,
+	recordMintSuccess,
+} from './mint-health';
 import { openaiAdapterRoutes } from './openai-adapter';
 import { ChatGPTSessionManager } from './session';
 import type { ChatGPTInterceptorMode, FingerprintProfile } from './types';
@@ -325,8 +331,10 @@ async function runSubmit(
 	};
 
 	// 7. POST /conversation with the freshly-minted Sentinel tokens + the
-	//    conduit_token from /prepare.
-	const r = await fetch(`${CHATGPT_BASE}/backend-anon/f/conversation`, {
+	//    conduit_token from /prepare. 90s timeout to prevent indefinite hangs
+	//    on stuck connections (gpt-5 with reasoning can run long but never
+	//    longer than ~60-80s in practice).
+	const r = await fetchWithTimeout(`${CHATGPT_BASE}/backend-anon/f/conversation`, {
 		method: 'POST',
 		headers: {
 			...baseHeaders,
@@ -344,6 +352,12 @@ async function runSubmit(
 	});
 
 	const body = await r.text();
+	// 2xx from /conversation means the Sentinel token was accepted upstream.
+	// Non-2xx with auth/captcha-shape errors signal a stale token; 5xx is
+	// transient. Track success only for 2xx so the consecutive-failure
+	// counter remains an honest signal of mint-flow health.
+	if (r.ok) recordMintSuccess();
+	else recordMintFailure(`upstream ${r.status} from /conversation`);
 	return { status: r.status, contentType: r.headers.get('content-type'), body };
 }
 
@@ -408,7 +422,19 @@ export const routes: DomainRoute[] = [
 				});
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				return c.json({ error: 'sentinel-gated submit failed', detail: msg }, 502);
+				recordMintFailure(msg);
+				const decorated = decorateMintError(msg);
+				return c.json(
+					{
+						error: {
+							message: `Sentinel-gated submit failed: ${decorated.message}`,
+							type: 'captcha_error',
+							suggestion: decorated.suggestion,
+							severity: decorated.severity,
+						},
+					},
+					502,
+				);
 			}
 
 			return new Response(result.body, {
