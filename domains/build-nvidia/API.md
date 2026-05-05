@@ -27,19 +27,40 @@ Bare `<vendor>/<slug>` is also accepted as a back-compat shortcut (provider defa
 ## Endpoints
 
 ```
-GET  /v1/models                              List + filter
+GET  /v1/models                              List + filter (deprecated hidden by default)
 GET  /v1/models/:provider/:vendor/:slug      One model, full metadata
 GET  /v1/models/:provider/:vendor/:slug/queue  Live queue depth + function status
 
 POST /v1/chat/completions                    OpenAI chat (streaming + non-streaming, vision, tools)
+POST /v1/embeddings                          OpenAI-compatible embeddings
+POST /v1/rerank                              Rerank passages by query
+POST /v1/audio/transcriptions                Whisper ASR (JSON+base64 preferred)
+POST /v1/audio/speech                        Magpie/Riva TTS (returns playable WAV)
+
 POST /v1/mint                                Token bundle for remote runtimes
 POST /v1/raw/:provider/:vendor/:slug         Modality-agnostic passthrough
 POST /v1/files                               Upload an image / audio asset
+GET  /v1/files/:id                           Asset metadata
 
 GET  /v1/blueprints                          NVIDIA blueprints (filter by ?model=)
 GET  /v1/tools/blocklist                     Tool names hidden by the playground
 GET  /v1/legal/:id                           TOS / model-license markdown
 ```
+
+## Lifecycle / deprecated models
+
+NVIDIA's catalog lists models whose predict endpoint has been silently removed (e.g. `qwen3.5-122b-a10b`, `kimi-k2.6`, `gemma-4-31b-it`, `gemma-3-27b-it`). Calling them returns `{statusCode: "INTERNAL_ERROR", statusDescription: "Empty body"}` — there's no signal in the catalog itself. This plugin detects deprecation via three sources:
+
+1. **Static known-bad list** — empirically verified slugs in `src/lifecycle.ts` `KNOWN_DEPRECATED`.
+2. **Queue endpoint probe** — `/v2/predict/queues/models/<slug>` returns `404 NOT_FOUND` (`"NVCF function ... not found"`) for retired models. Cheap, no captcha, runs once per process per slug with a 6h cache. The first `/v1/models` call after server start fires a parallel background probe of all ~160 catalog models; subsequent calls return cached lifecycle data instantly.
+3. **Reactive failure cache** — every predict call's outcome is recorded. After ≥ 2 gateway-side failures (INTERNAL_ERROR, function_not_found) within 24h with no success in between, the model is marked deprecated. Captcha and network errors are ignored as transient.
+
+**Filter behavior on `/v1/models`:**
+- Default: `?lifecycle=active` — deprecated models hidden, `unknown` (not yet probed) included.
+- `?lifecycle=deprecated` — only deprecated, with `deprecation_reason` populated.
+- `?lifecycle=all` — every model + `lifecycle` field.
+
+Each model entry now carries `lifecycle: "active" | "deprecated" | "unknown"` and `deprecation_reason: string | null`.
 
 ### `GET /v1/models`
 
@@ -147,6 +168,80 @@ print(r.choices[0].message.tool_calls)
 Some models on NVIDIA's gateway accept `tools` even when their published OpenAPI spec doesn't declare it (the gateway is more permissive). If your client wants to stay on the safe side, hit `GET /v1/tools/blocklist` first to filter your tool definitions to the playground's allowlist.
 
 > **Deprecated:** `nvidia/qwen/qwen3.5-122b-a10b` no longer accepts tool calls reliably (NVIDIA queue / model retired). Use `nvidia/qwen/qwen3.5-397b-a17b` instead. Other tool-flagged models include `nvidia/z-ai/glm-4.7` and `nvidia/openai/gpt-oss-120b` (the gateway accepts `tools` here even though its spec is the Responses-API shape).
+
+### `POST /v1/embeddings`
+
+OpenAI-compatible embeddings. Body: `{ model, input: string|string[], encoding_format?, input_type?: "query"|"passage", truncate?, user? }`. NVIDIA's `input_type` defaults to `"query"`.
+
+```bash
+curl -s -X POST http://localhost:3001/api/build-nvidia/v1/embeddings \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "nvidia/nvidia/llama-nemotron-embed-vl-1b-v2",
+    "input": ["hello world"],
+    "input_type": "query"
+  }' | jq '.data[0].embedding | length'
+# 2048
+```
+
+Response is OpenAI-shape `{ object: "list", data: [{ index, embedding: [...], object: "embedding" }], model, usage }`.
+
+> **Note:** `nvidia/baai/bge-m3` is currently returning `INTERNAL_ERROR` from NVIDIA's gateway (verified 2026-05-05). Use `llama-nemotron-embed-vl-1b-v2` until upstream is fixed; the body shape is identical.
+
+### `POST /v1/rerank`
+
+Rerank passages by relevance to a query. NVIDIA-native shape (no OpenAI equivalent). Body: `{ model, query: string | {text}, passages: Array<string | {text}>, top_n?, return_passages? }`. Both query and passages accept the string shorthand or `{text: ...}`.
+
+```bash
+curl -s -X POST http://localhost:3001/api/build-nvidia/v1/rerank \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "nvidia/nvidia/llama-nemotron-rerank-vl-1b-v2",
+    "query": "how does photosynthesis work?",
+    "passages": [
+      "Photosynthesis converts sunlight to chemical energy.",
+      "Paris is the capital of France.",
+      "Chlorophyll absorbs light energy."
+    ]
+  }'
+# {"rankings":[{"index":0,"logit":-0.5},{"index":2,"logit":-4.2},{"index":1,"logit":-7.0}],"usage":{...}}
+```
+
+Rankings are best-first by `logit`. Higher = more relevant.
+
+### `POST /v1/audio/transcriptions`
+
+Whisper ASR. **Two body shapes accepted:**
+
+1. **JSON + base64 (preferred — binary-safe).** Bun's HTTP runtime corrupts non-ASCII bytes in multipart bodies (~50% of any real audio file), so JSON encoding is recommended:
+
+   ```bash
+   AUDIO_B64=$(base64 -i clip.wav | tr -d '\n')
+   curl -s -X POST http://localhost:3001/api/build-nvidia/v1/audio/transcriptions \
+     -H 'content-type: application/json' \
+     -d "{\"audio_base64\":\"$AUDIO_B64\",\"model\":\"nvidia/openai/whisper-large-v3\",\"language\":\"en\",\"content_type\":\"audio/wav\"}"
+   ```
+
+2. **Multipart (best-effort).** Same shape as OpenAI's `audio.transcriptions.create()` — `file=@clip.wav, model=..., language=...`. Works for clean WAV/FLAC/OGG containers, but the underlying Bun bug means non-ASCII PCM samples may transcribe to nothing. Track upstream fix; switch to JSON if unsure.
+
+Returns OpenAI-shape `{text, language, duration, _raw}`. The `_raw` field carries NVIDIA's full `{results, id}` for callers that need word-level timestamps or alternatives.
+
+Internally posts to `api.ngc.nvidia.com/v2/riva/whisper/recognize` (NOT the predict URL). Engine slug is auto-derived (`whisper`, `canary`, `conformer`).
+
+### `POST /v1/audio/speech`
+
+OpenAI-compatible TTS. Body: `{ model, input, voice?, response_format?, speed?, language_code?, sample_rate_hz? }`.
+
+```bash
+curl -s -X POST http://localhost:3001/api/build-nvidia/v1/audio/speech \
+  -H 'content-type: application/json' \
+  -d '{"model":"nvidia/nvidia/magpie-tts-multilingual","input":"Hello world"}' \
+  -o speech.wav
+file speech.wav
+# RIFF (little-endian) data, WAVE audio, Microsoft PCM, 16 bit, mono 22050 Hz
+```
+
+NVIDIA returns `{audio: <base64 LINEAR_PCM>}`; the route decodes and wraps in a WAV header so the response is drop-in playable. Default voice: `Magpie-Multilingual.EN-US.Sofia`. Default sample_rate: 22050.
 
 ### `POST /v1/files`
 
