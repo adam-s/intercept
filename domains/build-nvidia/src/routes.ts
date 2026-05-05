@@ -56,6 +56,7 @@ import {
 } from './hsw-instrument';
 import { attachHswTap, detachHswTap, drainHswTap } from './hsw-tap';
 import { BuildNvidiaInstrument } from './instrument';
+import { getLifecycle, probeAllQueues, recordPredictResult } from './lifecycle';
 import { type CatalogSummary, enrichModel, parseModelId } from './model-metadata';
 import { attachRandomTap, detachRandomTap, drainRandomTap } from './random-tap';
 import { type ReplayOptions, replayPredict, replayPredictStreaming } from './replay';
@@ -404,6 +405,131 @@ async function fetchImageBytes(url: string): Promise<{ bytes: Uint8Array; conten
 	throw new Error(`Unsupported image_url scheme: ${url.slice(0, 32)}`);
 }
 
+/**
+ * Parse a multipart/form-data body manually, preserving raw binary bytes.
+ * Both Hono's parseBody and Bun's c.req.raw.formData() decode file parts as
+ * UTF-8, replacing non-ASCII bytes (anything >= 0x80) with U+FFFD — which
+ * destroys binary audio. This parser scans the byte buffer for boundary
+ * markers and slices out each part's body verbatim.
+ */
+type MultipartPart =
+	| { kind: 'text'; name: string; value: string }
+	| {
+			kind: 'file';
+			name: string;
+			filename: string | null;
+			contentType: string | null;
+			bytes: Uint8Array;
+	  };
+
+function parseMultipart(body: Uint8Array, boundary: string): MultipartPart[] {
+	const enc = new TextEncoder();
+	const dashBoundary = enc.encode(`--${boundary}`);
+	const parts: MultipartPart[] = [];
+	const indexOf = (haystack: Uint8Array, needle: Uint8Array, from = 0): number => {
+		outer: for (let i = from; i <= haystack.length - needle.length; i++) {
+			for (let j = 0; j < needle.length; j++) {
+				if (haystack[i + j] !== needle[j]) continue outer;
+			}
+			return i;
+		}
+		return -1;
+	};
+	let pos = indexOf(body, dashBoundary, 0);
+	if (pos < 0) return parts;
+	pos += dashBoundary.length;
+	// Skip CRLF after first boundary
+	if (body[pos] === 0x0d && body[pos + 1] === 0x0a) pos += 2;
+	while (pos < body.length) {
+		// Find end of headers (CRLF CRLF)
+		const hdrEnd = indexOf(body, enc.encode('\r\n\r\n'), pos);
+		if (hdrEnd < 0) break;
+		const headerText = new TextDecoder().decode(body.subarray(pos, hdrEnd));
+		const bodyStart = hdrEnd + 4;
+		// Find next boundary
+		const nextBoundary = indexOf(body, dashBoundary, bodyStart);
+		if (nextBoundary < 0) break;
+		// Strip trailing CRLF before boundary
+		let bodyEnd = nextBoundary;
+		if (body[bodyEnd - 2] === 0x0d && body[bodyEnd - 1] === 0x0a) bodyEnd -= 2;
+		const partBytes = body.subarray(bodyStart, bodyEnd);
+		// Parse Content-Disposition / Content-Type headers
+		const cd = headerText.match(/content-disposition:[^\r\n]*/i)?.[0] ?? '';
+		const name = cd.match(/\bname="([^"]*)"/i)?.[1];
+		const filename = cd.match(/\bfilename="([^"]*)"/i)?.[1] ?? null;
+		const contentType = headerText.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim() ?? null;
+		if (!name) {
+			// Skip parts with no name attribute
+		} else if (filename !== null || contentType !== null) {
+			parts.push({ kind: 'file', name, filename, contentType, bytes: new Uint8Array(partBytes) });
+		} else {
+			parts.push({ kind: 'text', name, value: new TextDecoder().decode(partBytes) });
+		}
+		pos = nextBoundary + dashBoundary.length;
+		// Closing boundary?
+		if (body[pos] === 0x2d && body[pos + 1] === 0x2d) break;
+		if (body[pos] === 0x0d && body[pos + 1] === 0x0a) pos += 2;
+	}
+	return parts;
+}
+
+/**
+ * Wrap raw 16-bit signed PCM bytes in a WAV (RIFF) header so the response
+ * is directly playable. Used by /v1/audio/speech to make NVIDIA's
+ * LINEAR_PCM output drop-in compatible with OpenAI's audio.speech (which
+ * returns ready-to-play bytes, not raw PCM).
+ */
+function wrapPcmAsWav(
+	pcm: Uint8Array,
+	sampleRate: number,
+	channels: number,
+	bitsPerSample: number,
+): Buffer {
+	const byteRate = sampleRate * channels * (bitsPerSample / 8);
+	const blockAlign = channels * (bitsPerSample / 8);
+	const header = Buffer.alloc(44);
+	header.write('RIFF', 0);
+	header.writeUInt32LE(36 + pcm.length, 4);
+	header.write('WAVE', 8);
+	header.write('fmt ', 12);
+	header.writeUInt32LE(16, 16);
+	header.writeUInt16LE(1, 20); // PCM format
+	header.writeUInt16LE(channels, 22);
+	header.writeUInt32LE(sampleRate, 24);
+	header.writeUInt32LE(byteRate, 28);
+	header.writeUInt16LE(blockAlign, 32);
+	header.writeUInt16LE(bitsPerSample, 34);
+	header.write('data', 36);
+	header.writeUInt32LE(pcm.length, 40);
+	return Buffer.concat([header, Buffer.from(pcm)]);
+}
+
+/**
+ * Shared mint preamble used by /v1/embeddings, /v1/rerank, /v1/audio/*, etc.
+ * Mints a fresh captcha + resolves function-id, with the persona/SDK-trap +
+ * page-readiness dance hidden inside. Throws on failure — callers translate
+ * to a 502 captcha_error / upstream_error response.
+ */
+async function prepareMintFor(
+	browser: RemoteBrowserService,
+	playgroundModel: string,
+): Promise<{ captchaToken: string; functionId: string }> {
+	const personaInstalled = await ensurePersona(browser);
+	const trapInstalled = await ensureSdkTrap(browser);
+	if (personaInstalled || trapInstalled) {
+		const page = browser.getPage();
+		if (page && page.url().startsWith(BUILD_NV_ORIGIN)) {
+			await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+		}
+	}
+	await ensurePageReadyForMint(browser, playgroundModel);
+	const captchaToken = await withMintLock(browser, () =>
+		mintViaBinding(browser, NVIDIA_SITEKEY, 30_000),
+	);
+	const functionId = await getFunctionId(playgroundModel);
+	return { captchaToken, functionId };
+}
+
 /** E1 experiment state: the most recent predict POST captured by
  *  /debug/capture-predict, available for replay via /debug/replay-predict. */
 let lastCapturedPredict: CapturedPredictPost | null = null;
@@ -447,9 +573,9 @@ function summarizeResource(r: CatalogResource): CatalogSummary & {
 	dateModified: string;
 } {
 	const labels: Record<string, string[]> = {};
-	for (const l of r.labels) labels[l.key] = l.values;
+	for (const l of r.labels ?? []) labels[l.key] = l.values;
 	const attrs: Record<string, string> = {};
-	for (const a of r.attributes) attrs[a.key] = a.value;
+	for (const a of r.attributes ?? []) attrs[a.key] = a.value;
 	const publisher = labels.publisher?.[0];
 	const slug = r.resourceId.split('/').pop() ?? r.name;
 	return {
@@ -474,12 +600,12 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/catalog',
 		description:
-			'Full NVIDIA NIM endpoint catalog (~164 models). Browserless. ?raw=1 returns upstream shape, ?pageSize=N overrides the default 1000.',
+			'Full NVIDIA NIM endpoint catalog (~164 models). Browserless. ?raw=1 returns upstream shape, ?pageSize=N overrides the default 500. Note: NVIDIA silently strips per-resource attributes (incl. AVAILABLE flag and guestAccess) at pageSize >= ~700, so 500 is the safe ceiling.',
 		browserRequired: false,
 		handler: async (c) => {
 			const url = new URL(c.req.url);
 			const raw = url.searchParams.get('raw') === '1';
-			const pageSize = Number(url.searchParams.get('pageSize') ?? 1000);
+			const pageSize = Number(url.searchParams.get('pageSize') ?? 500);
 			const page = Number(url.searchParams.get('page') ?? 0);
 
 			const q = JSON.stringify({
@@ -1006,7 +1132,7 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/v1/models',
 		description:
-			'OpenAI-compatible models list with rich metadata. Filters: ?modality=chat|image|embedding|audio_speech|audio_transcription|video|vision|safety|biology|retrieval, ?provider=nvidia, ?preview=1, ?capability=tool_calling (repeatable), ?all=1 to disable default chat-only filter. Each entry has modality, capabilities, parameters, and endpoints fields.',
+			'OpenAI-compatible models list with rich metadata + lifecycle. Filters: ?modality=chat|image|embedding|audio_speech|audio_transcription|video|vision|safety|biology|retrieval, ?provider=nvidia, ?preview=1, ?capability=tool_calling (repeatable), ?all=1 to disable default chat-only filter, ?lifecycle=active|deprecated|all (default: active — deprecated models hidden). Each entry has modality, capabilities, parameters, endpoints, and lifecycle fields.',
 		browserRequired: false,
 		handler: async (c) => {
 			const url = new URL(c.req.url);
@@ -1015,12 +1141,18 @@ export const routes: DomainRoute[] = [
 			const modalityFilter = url.searchParams.get('modality');
 			const providerFilter = url.searchParams.get('provider');
 			const requiredCaps = url.searchParams.getAll('capability');
+			const lifecycleFilter = (url.searchParams.get('lifecycle') ?? 'active') as
+				| 'active'
+				| 'deprecated'
+				| 'all';
+			// pageSize capped at 500 — NVIDIA silently strips attributes/guestAccess
+			// at >= ~700. Catalog total is ~162 models so 500 is plenty.
 			const q = JSON.stringify({
 				orderBy: [{ field: 'dateCreated', value: 'DESC' }],
 				page: 0,
-				pageSize: 1000,
+				pageSize: 500,
 				query: `orgName:"${NIM_ORG}"`,
-				scoredSize: 1000,
+				scoredSize: 500,
 			});
 			const upstream = `${NGC_API}/search/catalog/resources/ENDPOINT?q=${encodeURIComponent(q)}`;
 			const res = await rateLimitedFetch(upstream, { headers: UA_HEADER });
@@ -1034,11 +1166,21 @@ export const routes: DomainRoute[] = [
 			const all = (group?.resources ?? []).map(summarizeResource);
 			if (providerFilter && providerFilter !== 'nvidia')
 				return c.json({ object: 'list', data: [] });
+			const slugs = all.map((m) => m.slug);
+			// Fire-and-forget background queue probe of every slug. Idempotent
+			// per process (probeQueue caches with a 6h TTL); the first /v1/models
+			// call after server start populates ~all entries within a few seconds,
+			// subsequent calls return cached lifecycle data instantly.
+			void probeAllQueues(slugs).catch(() => undefined);
 			const enriched = all
 				.filter((m) => m.guestAccess)
 				.filter((m) => (previewOnly ? m.preview : true))
 				.filter((m) => (m.preview ? true : m.available))
-				.map((m) => enrichModel(m))
+				.map((m) => {
+					const e = enrichModel(m);
+					const lc = getLifecycle(m.slug);
+					return { ...e, lifecycle: lc.lifecycle, deprecation_reason: lc.deprecation_reason };
+				})
 				.filter((m) => {
 					if (modalityFilter) return m.modality === modalityFilter;
 					if (includeAll) return true;
@@ -1047,6 +1189,13 @@ export const routes: DomainRoute[] = [
 				.filter((m) => {
 					const caps = m.capabilities as unknown as Record<string, boolean>;
 					return requiredCaps.every((cap) => caps[cap] === true);
+				})
+				.filter((m) => {
+					if (lifecycleFilter === 'all') return true;
+					if (lifecycleFilter === 'deprecated') return m.lifecycle === 'deprecated';
+					// default 'active': hide deprecated only — keep unknown so we
+					// don't accidentally hide models we haven't probed yet.
+					return m.lifecycle !== 'deprecated';
 				});
 			return c.json({ object: 'list', data: enriched });
 		},
@@ -1319,6 +1468,7 @@ export const routes: DomainRoute[] = [
 				}
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
+				recordPredictResult(parsed.slug, { ok: false, status: 0, bodyPreview: msg });
 				return c.json(
 					{ error: { message: `Upstream fetch failed: ${msg}`, type: 'upstream_error' } },
 					502,
@@ -1327,6 +1477,10 @@ export const routes: DomainRoute[] = [
 
 			// 5a. Streaming path — pipe SSE through unmodified.
 			if (wantsStream) {
+				// For SSE we record success on the initial 2xx status; the
+				// stream may still error mid-flight but those are caller-visible
+				// and not a deprecation signal.
+				recordPredictResult(parsed.slug, { ok: upstream.ok, status: upstream.status });
 				return new Response(upstream.body, {
 					status: upstream.status,
 					headers: {
@@ -1340,11 +1494,17 @@ export const routes: DomainRoute[] = [
 			// 5b. Non-streaming path — collect deltas, synthesize a single
 			//     OpenAI-shaped chat.completion response.
 			if (!upstream.body) {
+				recordPredictResult(parsed.slug, {
+					ok: false,
+					status: upstream.status,
+					bodyPreview: 'Upstream returned no body',
+				});
 				return c.json(
 					{ error: { message: 'Upstream returned no body', type: 'upstream_error' } },
 					502,
 				);
 			}
+			recordPredictResult(parsed.slug, { ok: upstream.ok, status: upstream.status });
 			const reader = upstream.body.getReader();
 			const decoder = new TextDecoder();
 			let buffer = '';
@@ -1547,6 +1707,709 @@ export const routes: DomainRoute[] = [
 				description,
 				expires_at: expiresAt,
 				created_at: Math.floor(Date.now() / 1000),
+			});
+		},
+	},
+
+	{
+		method: 'GET',
+		path: '/v1/files/:id',
+		description:
+			'Get metadata for a previously-uploaded asset. Proxies api.ngc.nvidia.com/v2/nvcf/assets/<id>. Returns `{ id, object: "file", content_type, description, created_at }` (no bytes — the file lives in S3 behind a presigned URL that was returned by POST /v1/files). NOTE: NVIDIA does not support DELETE on assets; they expire on their own ~35 min after upload.',
+		handler: async (c, browser) => {
+			const id = c.req.param('id') ?? '';
+			if (!/^[0-9a-f-]{32,40}$/i.test(id)) {
+				return c.json(
+					{ error: { message: 'Invalid asset id', type: 'invalid_request_error' } },
+					400,
+				);
+			}
+			let captchaToken: string;
+			try {
+				// Any chat-model page mints valid captcha for asset metadata calls.
+				const r = await prepareMintFor(browser, 'openai/gpt-oss-20b');
+				captchaToken = r.captchaToken;
+			} catch (err) {
+				return c.json(
+					{
+						error: {
+							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
+					502,
+				);
+			}
+			const res = await fetch(`${NGC_API}/nvcf/assets/${id}`, {
+				headers: { 'nv-captcha-token': captchaToken, accept: 'application/json' },
+			});
+			if (!res.ok) {
+				return c.json(
+					{ error: { message: `Asset lookup failed: ${res.status}`, type: 'upstream_error' } },
+					502,
+				);
+			}
+			const data = (await res.json()) as {
+				asset?: { assetId: string; description: string; contentType: string; createdAt: string };
+			};
+			const a = data.asset;
+			if (!a)
+				return c.json(
+					{ error: { message: 'Asset response missing asset field', type: 'upstream_error' } },
+					502,
+				);
+			return c.json({
+				id: a.assetId,
+				object: 'file',
+				content_type: a.contentType,
+				description: a.description,
+				created_at: Math.floor(new Date(a.createdAt).getTime() / 1000),
+			});
+		},
+	},
+
+	{
+		method: 'POST',
+		path: '/v1/embeddings',
+		description:
+			'OpenAI-compatible embeddings. Body: `{ model, input: string|string[], encoding_format?, input_type?: "query"|"passage", truncate?, user? }`. NVIDIA-specific `input_type` defaults to "query". Returns OpenAI shape: `{ object: "list", data: [{ index, embedding: [...], object: "embedding" }], model, usage: {...} }`.',
+		handler: async (c, browser) => {
+			let body: {
+				model?: unknown;
+				input?: unknown;
+				encoding_format?: unknown;
+				input_type?: unknown;
+				truncate?: unknown;
+				user?: unknown;
+			};
+			try {
+				body = (await c.req.json()) as typeof body;
+			} catch {
+				return c.json(
+					{ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } },
+					400,
+				);
+			}
+			if (typeof body.model !== 'string') {
+				return c.json(
+					{
+						error: {
+							message: "Field 'model' required",
+							type: 'invalid_request_error',
+							param: 'model',
+						},
+					},
+					400,
+				);
+			}
+			if (body.input === undefined) {
+				return c.json(
+					{
+						error: {
+							message: "Field 'input' required",
+							type: 'invalid_request_error',
+							param: 'input',
+						},
+					},
+					400,
+				);
+			}
+			let parsed: ReturnType<typeof parseModelId>;
+			try {
+				parsed = parseModelId(body.model);
+			} catch (e) {
+				return c.json(
+					{
+						error: {
+							message: e instanceof Error ? e.message : String(e),
+							type: 'invalid_request_error',
+							param: 'model',
+						},
+					},
+					400,
+				);
+			}
+			const playgroundModel = `${parsed.vendor}/${parsed.slug}`;
+			let captchaToken: string;
+			let functionId: string;
+			try {
+				const r = await prepareMintFor(browser, playgroundModel);
+				captchaToken = r.captchaToken;
+				functionId = r.functionId;
+			} catch (err) {
+				return c.json(
+					{
+						error: {
+							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
+					502,
+				);
+			}
+			const inputArr = Array.isArray(body.input) ? body.input : [body.input];
+			const upstream = await fetch(`${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					'nv-captcha-token': captchaToken,
+					'nv-function-id': functionId,
+				},
+				body: JSON.stringify({
+					input: inputArr,
+					model: playgroundModel,
+					input_type: typeof body.input_type === 'string' ? body.input_type : 'query',
+					...(typeof body.encoding_format === 'string'
+						? { encoding_format: body.encoding_format }
+						: { encoding_format: 'float' }),
+					...(typeof body.truncate === 'string'
+						? { truncate: body.truncate }
+						: { truncate: 'NONE' }),
+				}),
+			});
+			const text = await upstream.text();
+			recordPredictResult(parsed.slug, {
+				ok: upstream.ok,
+				status: upstream.status,
+				bodyPreview: upstream.ok ? undefined : text,
+			});
+			if (!upstream.ok) {
+				return c.json(
+					{ error: { message: text, type: 'upstream_error', status: upstream.status } },
+					502,
+				);
+			}
+			// Response is already OpenAI-shaped; pass through.
+			try {
+				return c.json(JSON.parse(text));
+			} catch {
+				return c.json(
+					{
+						error: { message: `Non-JSON upstream: ${text.slice(0, 200)}`, type: 'upstream_error' },
+					},
+					502,
+				);
+			}
+		},
+	},
+
+	{
+		method: 'POST',
+		path: '/v1/rerank',
+		description:
+			'Rerank passages by relevance to a query. NVIDIA-native shape (no OpenAI equivalent). Body: `{ model, query: { text } | string, passages: Array<{ text } | string>, top_n?, return_passages? }`. Both query and passages accept either string shorthand or `{text: ...}` objects. Returns `{ rankings: [{ index, logit }], usage }` ordered best-first.',
+		handler: async (c, browser) => {
+			let body: {
+				model?: unknown;
+				query?: unknown;
+				passages?: unknown;
+				top_n?: unknown;
+				return_passages?: unknown;
+			};
+			try {
+				body = (await c.req.json()) as typeof body;
+			} catch {
+				return c.json(
+					{ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } },
+					400,
+				);
+			}
+			if (typeof body.model !== 'string') {
+				return c.json(
+					{
+						error: {
+							message: "Field 'model' required",
+							type: 'invalid_request_error',
+							param: 'model',
+						},
+					},
+					400,
+				);
+			}
+			if (!Array.isArray(body.passages) || body.passages.length === 0) {
+				return c.json(
+					{
+						error: {
+							message: "Field 'passages' must be a non-empty array",
+							type: 'invalid_request_error',
+							param: 'passages',
+						},
+					},
+					400,
+				);
+			}
+			let parsed: ReturnType<typeof parseModelId>;
+			try {
+				parsed = parseModelId(body.model);
+			} catch (e) {
+				return c.json(
+					{
+						error: {
+							message: e instanceof Error ? e.message : String(e),
+							type: 'invalid_request_error',
+							param: 'model',
+						},
+					},
+					400,
+				);
+			}
+			const playgroundModel = `${parsed.vendor}/${parsed.slug}`;
+			let captchaToken: string;
+			let functionId: string;
+			try {
+				const r = await prepareMintFor(browser, playgroundModel);
+				captchaToken = r.captchaToken;
+				functionId = r.functionId;
+			} catch (err) {
+				return c.json(
+					{
+						error: {
+							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
+					502,
+				);
+			}
+			const normalizeText = (v: unknown): { text: string } => {
+				if (typeof v === 'string') return { text: v };
+				if (v && typeof v === 'object' && typeof (v as { text?: unknown }).text === 'string') {
+					return { text: (v as { text: string }).text };
+				}
+				throw new Error('passages and query must be strings or {text}');
+			};
+			const queryNorm = normalizeText(body.query);
+			const passagesNorm = (body.passages as unknown[]).map(normalizeText);
+			const upstream = await fetch(`${NGC_API}/predict/models/${NIM_ORG}/${parsed.slug}`, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					'nv-captcha-token': captchaToken,
+					'nv-function-id': functionId,
+				},
+				body: JSON.stringify({
+					model: playgroundModel,
+					query: queryNorm,
+					passages: passagesNorm,
+					...(typeof body.top_n === 'number' ? { top_n: body.top_n } : {}),
+					...(typeof body.return_passages === 'boolean'
+						? { return_passages: body.return_passages }
+						: {}),
+				}),
+			});
+			const text = await upstream.text();
+			recordPredictResult(parsed.slug, {
+				ok: upstream.ok,
+				status: upstream.status,
+				bodyPreview: upstream.ok ? undefined : text,
+			});
+			if (!upstream.ok) {
+				return c.json(
+					{ error: { message: text, type: 'upstream_error', status: upstream.status } },
+					502,
+				);
+			}
+			try {
+				return c.json(JSON.parse(text));
+			} catch {
+				return c.json(
+					{
+						error: { message: `Non-JSON upstream: ${text.slice(0, 200)}`, type: 'upstream_error' },
+					},
+					502,
+				);
+			}
+		},
+	},
+
+	{
+		method: 'POST',
+		path: '/v1/audio/transcriptions',
+		description:
+			"Whisper ASR. Two body shapes: (1) **JSON `{audio_base64, model?, language?, prompt?, content_type?}`** — preferred; binary-safe. (2) multipart form-data with `file` field — works for ASCII-clean audio but Bun's HTTP layer corrupts non-ASCII bytes (~50% of WAV/MP3 content), so JSON+base64 is recommended. Internally POSTs to `api.ngc.nvidia.com/v2/riva/whisper/recognize`. Returns OpenAI shape `{text, duration?, language?, _raw}`.",
+		handler: async (c, browser) => {
+			// Bun's c.req.raw.formData() / arrayBuffer() decode binary file
+			// parts as UTF-8, replacing non-ASCII bytes with U+FFFD —
+			// destroying the audio. Workaround: accept JSON `{audio_base64,
+			// model?, language?, prompt?}` as the canonical shape; leave
+			// multipart support as a best-effort fallback that warns.
+			const ct = c.req.header('content-type') ?? '';
+			let file: { type: string; name: string; size: number; bytes: Uint8Array };
+			let model: string;
+			let language: string;
+			let promptParam: string | undefined;
+			if (ct.includes('application/json')) {
+				let body: {
+					audio_base64?: unknown;
+					model?: unknown;
+					language?: unknown;
+					prompt?: unknown;
+					content_type?: unknown;
+				};
+				try {
+					body = (await c.req.json()) as typeof body;
+				} catch {
+					return c.json(
+						{ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } },
+						400,
+					);
+				}
+				if (typeof body.audio_base64 !== 'string') {
+					return c.json(
+						{
+							error: {
+								message:
+									'JSON shape: { audio_base64: string, model?: string, language?: string, prompt?: string }',
+								type: 'invalid_request_error',
+								param: 'audio_base64',
+							},
+						},
+						400,
+					);
+				}
+				const bytes = Uint8Array.from(Buffer.from(body.audio_base64, 'base64'));
+				file = {
+					type: typeof body.content_type === 'string' ? body.content_type : 'audio/wav',
+					name: 'audio.wav',
+					size: bytes.byteLength,
+					bytes,
+				};
+				model = typeof body.model === 'string' ? body.model : 'nvidia/openai/whisper-large-v3';
+				language = typeof body.language === 'string' ? body.language : 'en-US';
+				promptParam = typeof body.prompt === 'string' ? body.prompt : undefined;
+			} else {
+				// Multipart fallback (best-effort — see warning above).
+				const boundaryMatch = ct.match(/boundary="?([^";]+)"?/);
+				if (!boundaryMatch) {
+					return c.json(
+						{
+							error: {
+								message:
+									'Use application/json with {audio_base64} OR multipart/form-data (note: multipart may corrupt non-ASCII audio bytes due to a Bun runtime bug)',
+								type: 'invalid_request_error',
+							},
+						},
+						400,
+					);
+				}
+				const rawBody = new Uint8Array(await c.req.arrayBuffer());
+				const parts = parseMultipart(rawBody, boundaryMatch[1] ?? '');
+				const filePart = parts.find((p) => p.name === 'file');
+				if (!filePart || filePart.kind !== 'file') {
+					return c.json(
+						{
+							error: {
+								message: "Multipart field 'file' (audio bytes) required",
+								type: 'invalid_request_error',
+								param: 'file',
+							},
+						},
+						400,
+					);
+				}
+				file = {
+					type: filePart.contentType ?? 'audio/wav',
+					name: filePart.filename ?? 'audio.wav',
+					size: filePart.bytes.byteLength,
+					bytes: filePart.bytes,
+				};
+				const getText = (name: string): string | undefined => {
+					const p = parts.find((x) => x.name === name && x.kind === 'text');
+					return p?.kind === 'text' ? p.value : undefined;
+				};
+				model = getText('model') ?? 'nvidia/openai/whisper-large-v3';
+				language = getText('language') ?? 'en-US';
+				promptParam = getText('prompt');
+			}
+			let parsed: ReturnType<typeof parseModelId>;
+			try {
+				parsed = parseModelId(model);
+			} catch (e) {
+				return c.json(
+					{
+						error: {
+							message: e instanceof Error ? e.message : String(e),
+							type: 'invalid_request_error',
+							param: 'model',
+						},
+					},
+					400,
+				);
+			}
+			const playgroundModel = `${parsed.vendor}/${parsed.slug}`;
+			// ASR playground pages don't reliably render the hCaptcha widget;
+			// mint via a stable chat model and use the ASR model's function-id.
+			let captchaToken: string;
+			try {
+				const r = await prepareMintFor(browser, 'openai/gpt-oss-20b');
+				captchaToken = r.captchaToken;
+			} catch (err) {
+				return c.json(
+					{
+						error: {
+							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
+					502,
+				);
+			}
+			let functionId: string;
+			try {
+				functionId = await getFunctionId(playgroundModel);
+			} catch (err) {
+				return c.json(
+					{
+						error: {
+							message: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'upstream_error',
+						},
+					},
+					502,
+				);
+			}
+			// Determine the Riva engine slug — defaults to "whisper" for whisper models.
+			// Future ASR models (canary, conformer) follow the same pattern.
+			const engineSlug = parsed.slug.includes('whisper')
+				? 'whisper'
+				: parsed.slug.includes('canary')
+					? 'canary'
+					: parsed.slug.includes('conformer')
+						? 'conformer'
+						: parsed.slug;
+			// Re-pack as Riva multipart with `audio` and `config`.
+			const audioBytes = file.bytes;
+			const fd = new FormData();
+			fd.append(
+				'audio',
+				new Blob([new Uint8Array(audioBytes)], { type: file.type || 'audio/wav' }),
+				file.name || 'audio.wav',
+			);
+			// Riva's auto-detect is unreliable when bytes are re-packed across
+			// multipart boundaries (it reads partial header fragments). Parse
+			// WAV headers ourselves and pass encoding + sample_rate explicitly.
+			const ftype = (file.type || '').toLowerCase();
+			const encConfig: { encoding?: string; sample_rate_hz?: number } = {};
+			const isWav =
+				audioBytes.length >= 44 &&
+				audioBytes[0] === 0x52 &&
+				audioBytes[1] === 0x49 &&
+				audioBytes[2] === 0x46 &&
+				audioBytes[3] === 0x46;
+			if (isWav) {
+				// WAV container — Riva auto-detects encoding + rate from the
+				// RIFF header, so don't override. Setting encoding=LINEAR_PCM
+				// here would cause "input format doesn't match" because the
+				// stream still has a 44-byte WAV preamble.
+			} else if (ftype.includes('flac')) {
+				encConfig.encoding = 'FLAC';
+			} else if (ftype.includes('opus') || ftype.includes('ogg')) {
+				encConfig.encoding = 'OGGOPUS';
+			} else if (ftype.includes('mp3') || ftype.includes('mpeg')) {
+				encConfig.encoding = 'MP3';
+			}
+			fd.append(
+				'config',
+				JSON.stringify({
+					language_code: language.includes('-') ? language : `${language}-US`,
+					...encConfig,
+					...(typeof promptParam === 'string' ? { hot_words: [promptParam] } : {}),
+				}),
+			);
+			const upstream = await fetch(`${NGC_API}/riva/${engineSlug}/recognize`, {
+				method: 'POST',
+				headers: { 'nv-captcha-token': captchaToken, 'nv-function-id': functionId },
+				body: fd,
+			});
+			const text = await upstream.text();
+			recordPredictResult(parsed.slug, {
+				ok: upstream.ok,
+				status: upstream.status,
+				bodyPreview: upstream.ok ? undefined : text,
+			});
+			if (!upstream.ok) {
+				return c.json(
+					{ error: { message: text, type: 'upstream_error', status: upstream.status } },
+					502,
+				);
+			}
+			// Parse Riva ndjson response. The first JSON document on the stream
+			// has `results` with transcript pieces. Concatenate alternatives[0].transcript
+			// across results for the OpenAI-shape `text` field.
+			let rivaJson: {
+				results?: Array<{ alternatives?: Array<{ transcript?: string }>; audioProcessed?: number }>;
+				id?: { value?: string };
+			};
+			try {
+				rivaJson = JSON.parse(text);
+			} catch {
+				return c.json(
+					{
+						error: {
+							message: `Non-JSON Riva response: ${text.slice(0, 200)}`,
+							type: 'upstream_error',
+						},
+					},
+					502,
+				);
+			}
+			const segments = (rivaJson.results ?? [])
+				.map((r) => r.alternatives?.[0]?.transcript ?? '')
+				.filter(Boolean);
+			const totalProcessed = (rivaJson.results ?? []).reduce(
+				(acc, r) => acc + (r.audioProcessed ?? 0),
+				0,
+			);
+			return c.json({
+				text: segments.join(' '),
+				language,
+				duration: totalProcessed,
+				_raw: rivaJson,
+			});
+		},
+	},
+
+	{
+		method: 'POST',
+		path: '/v1/audio/speech',
+		description:
+			"OpenAI-compatible TTS. JSON body: `{ model, input, voice?, response_format?, speed?, language_code? }`. Internally posts to `api.ngc.nvidia.com/v2/riva/tts/synthesize`. NVIDIA returns `{audio: <base64-LINEAR_PCM>}`; we decode and return raw audio bytes with the appropriate Content-Type so the response is drop-in compatible with `openai`'s `audio.speech.create()`. Default sample_rate_hz: 22050 (Magpie-Multilingual default).",
+		handler: async (c, browser) => {
+			let body: {
+				model?: unknown;
+				input?: unknown;
+				voice?: unknown;
+				response_format?: unknown;
+				speed?: unknown;
+				language_code?: unknown;
+				sample_rate_hz?: unknown;
+			};
+			try {
+				body = (await c.req.json()) as typeof body;
+			} catch {
+				return c.json(
+					{ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } },
+					400,
+				);
+			}
+			if (typeof body.input !== 'string' || body.input.length === 0) {
+				return c.json(
+					{
+						error: {
+							message: "Field 'input' (text to synthesize) required",
+							type: 'invalid_request_error',
+							param: 'input',
+						},
+					},
+					400,
+				);
+			}
+			const model =
+				typeof body.model === 'string' ? body.model : 'nvidia/nvidia/magpie-tts-multilingual';
+			let parsed: ReturnType<typeof parseModelId>;
+			try {
+				parsed = parseModelId(model);
+			} catch (e) {
+				return c.json(
+					{
+						error: {
+							message: e instanceof Error ? e.message : String(e),
+							type: 'invalid_request_error',
+							param: 'model',
+						},
+					},
+					400,
+				);
+			}
+			const playgroundModel = `${parsed.vendor}/${parsed.slug}`;
+			// TTS playground pages may not render the captcha widget; mint via a
+			// stable chat model and use the TTS model's function-id from spec.
+			let captchaToken: string;
+			try {
+				const r = await prepareMintFor(browser, 'openai/gpt-oss-20b');
+				captchaToken = r.captchaToken;
+			} catch (err) {
+				return c.json(
+					{
+						error: {
+							message: `Mint failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'captcha_error',
+						},
+					},
+					502,
+				);
+			}
+			let functionId: string;
+			try {
+				functionId = await getFunctionId(playgroundModel);
+			} catch (err) {
+				return c.json(
+					{
+						error: {
+							message: `Function-id lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+							type: 'upstream_error',
+						},
+					},
+					502,
+				);
+			}
+			const engineSlug = parsed.slug.includes('tts') ? 'tts' : parsed.slug;
+			const sampleRate = typeof body.sample_rate_hz === 'number' ? body.sample_rate_hz : 22050;
+			const upstream = await fetch(`${NGC_API}/riva/${engineSlug}/synthesize`, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					'nv-captcha-token': captchaToken,
+					'nv-function-id': functionId,
+				},
+				body: JSON.stringify({
+					text: body.input,
+					language_code: typeof body.language_code === 'string' ? body.language_code : 'en-US',
+					encoding: 'LINEAR_PCM',
+					sample_rate_hz: sampleRate,
+					...(typeof body.voice === 'string'
+						? { voice_name: body.voice }
+						: { voice_name: 'Magpie-Multilingual.EN-US.Sofia' }),
+				}),
+			});
+			const text = await upstream.text();
+			recordPredictResult(parsed.slug, {
+				ok: upstream.ok,
+				status: upstream.status,
+				bodyPreview: upstream.ok ? undefined : text,
+			});
+			if (!upstream.ok) {
+				return c.json(
+					{ error: { message: text, type: 'upstream_error', status: upstream.status } },
+					502,
+				);
+			}
+			let rivaJson: { audio?: string };
+			try {
+				rivaJson = JSON.parse(text);
+			} catch {
+				return c.json(
+					{ error: { message: `Non-JSON Riva TTS response`, type: 'upstream_error' } },
+					502,
+				);
+			}
+			if (typeof rivaJson.audio !== 'string') {
+				return c.json(
+					{ error: { message: 'Riva TTS returned no audio field', type: 'upstream_error' } },
+					502,
+				);
+			}
+			// Decode base64 → raw LINEAR_PCM bytes. Wrap in a WAV header so the
+			// response is playable by stock audio tooling without further work.
+			// This is what OpenAI's TTS does: returns ready-to-play bytes.
+			const pcmBytes = Buffer.from(rivaJson.audio, 'base64');
+			const wav = wrapPcmAsWav(pcmBytes, sampleRate, 1, 16);
+			return new Response(new Uint8Array(wav), {
+				status: 200,
+				headers: {
+					'content-type': 'audio/wav',
+					'content-length': String(wav.length),
+				},
 			});
 		},
 	},
@@ -1807,12 +2670,14 @@ export const routes: DomainRoute[] = [
 				}
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
+				recordPredictResult(slug, { ok: false, status: 0, bodyPreview: msg });
 				return c.json(
 					{ error: { message: `Upstream fetch failed: ${msg}`, type: 'upstream_error' } },
 					502,
 				);
 			}
 
+			recordPredictResult(slug, { ok: upstream.ok, status: upstream.status });
 			// Stream the response through verbatim, preserving content-type.
 			return new Response(upstream.body, {
 				status: upstream.status,
