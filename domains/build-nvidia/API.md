@@ -133,7 +133,7 @@ Each image triggers `POST /v2/nvcf/assets` (one captcha mint) + a presigned-S3 P
 
 ```python
 r = client.chat.completions.create(
-    model="nvidia/qwen/qwen3.5-122b-a10b",
+    model="nvidia/qwen/qwen3.5-397b-a17b",
     messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
     tools=[{"type": "function", "function": {
         "name": "get_weather", "description": "...",
@@ -145,6 +145,8 @@ print(r.choices[0].message.tool_calls)
 ```
 
 Some models on NVIDIA's gateway accept `tools` even when their published OpenAPI spec doesn't declare it (the gateway is more permissive). If your client wants to stay on the safe side, hit `GET /v1/tools/blocklist` first to filter your tool definitions to the playground's allowlist.
+
+> **Deprecated:** `nvidia/qwen/qwen3.5-122b-a10b` no longer accepts tool calls reliably (NVIDIA queue / model retired). Use `nvidia/qwen/qwen3.5-397b-a17b` instead. Other tool-flagged models include `nvidia/z-ai/glm-4.7` and `nvidia/openai/gpt-oss-120b` (the gateway accepts `tools` here even though its spec is the Responses-API shape).
 
 ### `POST /v1/files`
 
