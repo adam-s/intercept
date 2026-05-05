@@ -32,6 +32,7 @@
  */
 
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
+import { getLifecycle, recordChatResult } from './lifecycle';
 import { getMintHealth } from './mint-health';
 import { sentinelGatedConversation } from './routes';
 
@@ -51,12 +52,33 @@ interface OAIChatRequest {
 	temperature?: number;
 	max_tokens?: number;
 	/**
+	 * OpenAI standard tools array. ChatGPT's anonymous flow only supports
+	 * one builtin: web_search. Any of these activate it:
+	 *   [{ "type": "web_search" }]
+	 *   [{ "type": "web_search_preview" }]
+	 *   [{ "type": "function", "function": { "name": "web_search" } }]
+	 * Other tool types are silently ignored — anonymous chatgpt.com cannot
+	 * invoke arbitrary user-defined tools (no logged-in tool registry).
+	 */
+	tools?: Array<{ type?: string; function?: { name?: string } }>;
+	tool_choice?: unknown;
+	/**
 	 * Non-standard pass-through (mirrors the OpenAI SDK's `extra_body`).
-	 * `search: true` forces ChatGPT's web-search tool by sending
-	 * `system_hints: ["search"]` upstream. Citations come back appended
-	 * to the assistant text and on the non-streaming `citations` field.
+	 * `search: true` forces ChatGPT's web-search tool. Equivalent to passing
+	 * `tools: [{type: "web_search"}]`. Kept for back-compat.
 	 */
 	extra_body?: { search?: boolean };
+}
+
+/** Detect whether the OpenAI `tools` array requests ChatGPT's web search. */
+function wantsWebSearchTool(tools: OAIChatRequest['tools'] | undefined): boolean {
+	if (!Array.isArray(tools)) return false;
+	for (const t of tools) {
+		if (!t || typeof t !== 'object') continue;
+		if (t.type === 'web_search' || t.type === 'web_search_preview') return true;
+		if (t.type === 'function' && t.function?.name === 'web_search') return true;
+	}
+	return false;
 }
 
 interface Citation {
@@ -454,15 +476,16 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 		method: 'GET',
 		path: '/v1/health',
 		description:
-			"Operational health for the chatgpt plugin. Returns `{ ok, mint: { total_calls, consecutive_failures, last_success_at, last_failure_at, last_failure_message, stuck }, hint? }`. `stuck: true` means ≥ 3 consecutive Sentinel mint failures — the browser session likely needs reconnecting.",
+			'Operational health for the chatgpt plugin. Returns `{ ok, mint: { total_calls, consecutive_failures, last_success_at, last_failure_at, last_failure_message, stuck }, hint? }`. `stuck: true` means ≥ 3 consecutive Sentinel mint failures — the browser session likely needs reconnecting.',
 		browserRequired: false,
 		handler: async (c) => {
 			const mint = getMintHealth();
 			let hint: string | null = null;
 			if (mint.stuck) {
-				hint = mint.consecutive_failures >= 8
-					? 'IP / account block likely. Switch network or clear chatgpt.com cookies, then reconnect the browser.'
-					: 'Browser session may be stuck. Reconnect: pkill -f connect-browser; ./scripts/connect-browser.sh --profile chatgpt --url https://chatgpt.com; then re-harvest the session via POST /api/chatgpt/session/harvest.';
+				hint =
+					mint.consecutive_failures >= 8
+						? 'IP / account block likely. Switch network or clear chatgpt.com cookies, then reconnect the browser.'
+						: 'Browser session may be stuck. Reconnect: pkill -f connect-browser; ./scripts/connect-browser.sh --profile chatgpt --url https://chatgpt.com; then re-harvest the session via POST /api/chatgpt/session/harvest.';
 			}
 			return c.json({
 				ok: !mint.stuck,
@@ -478,21 +501,36 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 		method: 'GET',
 		path: '/v1/models',
 		description:
-			'OpenAI-compatible model list. Set as base URL in AnythingLLM: http://localhost:3001/api/chatgpt/v1',
+			'OpenAI-compatible model list. Set as base URL: http://localhost:3001/api/chatgpt/v1. Each entry carries `lifecycle` and `deprecation_reason`. ?lifecycle=active|deprecated|all (default active — deprecated hidden).',
 		browserRequired: false,
 		handler: async (c) => {
+			const url = new URL(c.req.url);
+			const lifecycleFilter = (url.searchParams.get('lifecycle') ?? 'active') as
+				| 'active'
+				| 'deprecated'
+				| 'all';
 			const created = 1_699_000_000;
-			return c.json({
-				object: 'list',
-				data: [
-					{ id: 'gpt-4o', object: 'model', created, owned_by: 'chatgpt-proxy' },
-					{ id: 'gpt-4o-mini', object: 'model', created, owned_by: 'chatgpt-proxy' },
-					{ id: 'gpt-4.5-preview', object: 'model', created, owned_by: 'chatgpt-proxy' },
-					{ id: 'o1', object: 'model', created, owned_by: 'chatgpt-proxy' },
-					{ id: 'o3', object: 'model', created, owned_by: 'chatgpt-proxy' },
-					{ id: 'o4-mini', object: 'model', created, owned_by: 'chatgpt-proxy' },
-				],
+			const all = [
+				{ id: 'gpt-4o', object: 'model', created, owned_by: 'chatgpt-proxy' },
+				{ id: 'gpt-4o-mini', object: 'model', created, owned_by: 'chatgpt-proxy' },
+				{ id: 'gpt-4.5-preview', object: 'model', created, owned_by: 'chatgpt-proxy' },
+				{ id: 'o1', object: 'model', created, owned_by: 'chatgpt-proxy' },
+				{ id: 'o3', object: 'model', created, owned_by: 'chatgpt-proxy' },
+				{ id: 'o4-mini', object: 'model', created, owned_by: 'chatgpt-proxy' },
+				// Legacy entries — emit so callers see deprecation explicitly
+				{ id: 'gpt-3.5-turbo-0613', object: 'model', created, owned_by: 'chatgpt-proxy' },
+				{ id: 'gpt-4-32k', object: 'model', created, owned_by: 'chatgpt-proxy' },
+			];
+			const enriched = all.map((m) => {
+				const lc = getLifecycle(m.id);
+				return { ...m, lifecycle: lc.lifecycle, deprecation_reason: lc.deprecation_reason };
 			});
+			const filtered = enriched.filter((m) => {
+				if (lifecycleFilter === 'all') return true;
+				if (lifecycleFilter === 'deprecated') return m.lifecycle === 'deprecated';
+				return m.lifecycle !== 'deprecated';
+			});
+			return c.json({ object: 'list', data: filtered });
 		},
 	},
 
@@ -539,7 +577,29 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 			}
 
 			const model = body.model ?? DEFAULT_MODEL;
-			const wantsSearch = body.extra_body?.search === true;
+			// Web search activates via either the OpenAI standard tools array
+			// (web_search builtin) or the back-compat extra_body.search flag.
+			const wantsSearch = body.extra_body?.search === true || wantsWebSearchTool(body.tools);
+
+			// Refuse calls to a known-deprecated model up front rather than
+			// minting a Sentinel token + burning a captcha just to fail. Reactive
+			// failures are also recorded after the call below.
+			const lc = getLifecycle(model);
+			if (lc.lifecycle === 'deprecated') {
+				return c.json(
+					{
+						error: {
+							message: `Model ${model} is deprecated.`,
+							type: 'invalid_request_error',
+							code: 'model_deprecated',
+							deprecation_reason: lc.deprecation_reason,
+							hint: 'Pass ?lifecycle=all on /v1/models or ignore this guard at your own risk via direct /v1/raw...',
+						},
+					},
+					410,
+				);
+			}
+
 			const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, '').slice(0, 28)}`;
 
 			const page = browser.getPage();
@@ -569,6 +629,7 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 				});
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
+				recordChatResult(model, { ok: false, status: 0, bodyPreview: msg });
 				return c.json(
 					{
 						error: { message: 'sentinel-gated submit failed', type: 'upstream_error', detail: msg },
@@ -577,6 +638,11 @@ export const openaiAdapterRoutes: DomainRoute[] = [
 				);
 			}
 
+			recordChatResult(model, {
+				ok: result.status === 200,
+				status: result.status,
+				bodyPreview: result.status === 200 ? undefined : result.body,
+			});
 			if (result.status !== 200) {
 				return c.json(
 					{

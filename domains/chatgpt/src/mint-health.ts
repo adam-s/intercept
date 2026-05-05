@@ -86,7 +86,7 @@ export function decorateMintError(rawMessage: string): {
 			'Persistent Sentinel mint failures across many requests — likely an account or IP block from OpenAI. Switch network / disconnect VPN, or open chatgpt.com manually to clear any captcha challenge, then reconnect the browser.';
 	} else if (severity === 'persistent') {
 		suggestion =
-			"Browser session appears stuck (3+ consecutive Sentinel failures). Reconnect: `pkill -f connect-browser; ./scripts/connect-browser.sh --profile chatgpt --url https://chatgpt.com`. Wait ~25s; then re-harvest: `curl -X POST http://localhost:3001/api/chatgpt/session/harvest`.";
+			'Browser session appears stuck (3+ consecutive Sentinel failures). Reconnect: `pkill -f connect-browser; ./scripts/connect-browser.sh --profile chatgpt --url https://chatgpt.com`. Wait ~25s; then re-harvest: `curl -X POST http://localhost:3001/api/chatgpt/session/harvest`.';
 	} else if (lower.includes('sentinelsdk not available') || lower.includes('not on chatgpt.com')) {
 		suggestion =
 			'Browser page is not on chatgpt.com or the Sentinel SDK has not loaded yet. Navigate to https://chatgpt.com in the connected browser and wait for it to fully render.';
@@ -116,7 +116,11 @@ export function fetchWithTimeout(
 ): Promise<Response> {
 	const { timeoutMs = UPSTREAM_TIMEOUT_MS, ...rest } = init;
 	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(new Error(`Upstream timeout after ${timeoutMs}ms`)), timeoutMs);
-	return fetch(url, { ...rest, signal: rest.signal ?? controller.signal })
-		.finally(() => clearTimeout(timer));
+	const timer = setTimeout(
+		() => controller.abort(new Error(`Upstream timeout after ${timeoutMs}ms`)),
+		timeoutMs,
+	);
+	return fetch(url, { ...rest, signal: rest.signal ?? controller.signal }).finally(() =>
+		clearTimeout(timer),
+	);
 }
