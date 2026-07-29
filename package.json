@@ -5,6 +5,7 @@
 		"build": "turbo build",
 		"dev": "turbo dev",
 		"test": "vitest",
+		"test:repo": "vitest run --project repo",
 		"typecheck": "turbo typecheck",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",

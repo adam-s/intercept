@@ -1,0 +1,195 @@
+/**
+ * Unit pins for route-spec's pure checks. Drives the real logic over fixtures
+ * with no network and no server — which is why route-spec.mjs guards its main
+ * flow to direct invocation.
+ */
+
+import { describe, expect, it } from 'vitest';
+import {
+	checkCompleteness,
+	checkResponse,
+	diffShape,
+	isProbeable,
+	parseArgs,
+	shapeOf,
+} from '../route-spec.mjs';
+
+describe('parseArgs', () => {
+	it('applies the documented defaults', () => {
+		const o = parseArgs([]);
+		expect(o).toMatchObject({
+			record: false,
+			domain: null,
+			label: 'latest',
+			budget: 40,
+			port: 3001,
+		});
+	});
+
+	it('reads the uniform flags', () => {
+		const o = parseArgs([
+			'--record',
+			'--domain=boardshop',
+			'--label=pre-deploy',
+			'--budget=5',
+			'--wall-clock=60',
+		]);
+		expect(o).toMatchObject({ record: true, domain: 'boardshop', label: 'pre-deploy', budget: 5 });
+		expect(o.wallClock).toBe(60_000);
+	});
+});
+
+describe('shapeOf', () => {
+	it('records structure, never values', () => {
+		expect(shapeOf({ b: 1, a: 'x' })).toBe('{a:string,b:number}');
+		// Same shape, different data — a baseline must not go red on this.
+		expect(shapeOf({ a: 'x', b: 1 })).toBe(shapeOf({ a: 'zzz', b: 999 }));
+	});
+
+	it('represents an array by its element, not its length', () => {
+		expect(shapeOf([{ id: 1 }])).toBe('[{id:number}]');
+		expect(shapeOf([{ id: 1 }])).toBe(shapeOf([{ id: 1 }, { id: 2 }, { id: 3 }]));
+		expect(shapeOf([])).toBe('[]');
+	});
+
+	it('distinguishes a changed field type', () => {
+		expect(shapeOf({ price: 10 })).not.toBe(shapeOf({ price: '10' }));
+	});
+
+	it('bounds recursion so a cyclic-looking nest cannot run away', () => {
+		let deep = { v: 1 };
+		for (let i = 0; i < 20; i++) deep = { v: deep };
+		expect(shapeOf(deep)).toContain('…');
+	});
+});
+
+describe('checkCompleteness — the invariant that a route reports what it got', () => {
+	it('flags silent truncation', () => {
+		const r = checkCompleteness({ items: [1, 2, 3], total: 100 });
+		expect(r.verdict).toBe('silent-truncation');
+		expect(r.itemCount).toBe(3);
+		expect(r.indicatedTotal).toBe(100);
+	});
+
+	it.each([
+		'hasMore',
+		'nextCursor',
+		'incomplete',
+		'truncated',
+	])('accepts truncation declared via %s', (key) => {
+		const r = checkCompleteness({ items: [1], total: 50, [key]: true });
+		expect(r.verdict).toBe('incomplete-declared');
+	});
+
+	it('does not accept a falsy declaration as a declaration', () => {
+		// hasMore:false while returning 1 of 50 is a lie, not a disclosure.
+		expect(checkCompleteness({ items: [1], total: 50, hasMore: false }).verdict).toBe(
+			'silent-truncation',
+		);
+	});
+
+	it('passes a complete result', () => {
+		expect(checkCompleteness({ items: [1, 2], total: 2 }).verdict).toBe('complete');
+	});
+
+	it.each([
+		'items',
+		'data',
+		'results',
+		'entries',
+		'records',
+		'rows',
+		'products',
+		'list',
+	])('finds the item collection under "%s"', (key) => {
+		expect(checkCompleteness({ [key]: [1], total: 9 }).verdict).toBe('silent-truncation');
+	});
+
+	it.each([
+		'total',
+		'totalCount',
+		'total_count',
+		'totalItems',
+		'totalResults',
+		'count',
+	])('finds the indicated total under "%s"', (key) => {
+		expect(checkCompleteness({ items: [1], [key]: 9 }).verdict).toBe('silent-truncation');
+	});
+
+	it('is not applicable without both halves', () => {
+		expect(checkCompleteness({ items: [1, 2] }).verdict).toBe('not-applicable');
+		expect(checkCompleteness({ total: 5 }).verdict).toBe('not-applicable');
+		expect(checkCompleteness('a string').verdict).toBe('not-applicable');
+		expect(checkCompleteness(null).verdict).toBe('not-applicable');
+	});
+
+	it('treats a bare array as complete — there is nothing claiming otherwise', () => {
+		expect(checkCompleteness([1, 2, 3]).verdict).toBe('not-applicable');
+	});
+});
+
+describe('diffShape', () => {
+	it('reports a new route rather than failing it', () => {
+		expect(diffShape(undefined, '{a:number}').verdict).toBe('new-route');
+	});
+
+	it('passes an unchanged shape', () => {
+		expect(diffShape('{a:number}', '{a:number}').verdict).toBe('no-signal-flipped');
+	});
+
+	it('flags drift', () => {
+		const r = diffShape('{a:number}', '{a:string}');
+		expect(r.verdict).toBe('unexpected-regression');
+		expect(r.detail).toContain('shape changed');
+	});
+});
+
+describe('checkResponse', () => {
+	const ok = { status: 200, contentType: 'application/json', body: { items: [1], total: 1 } };
+
+	it('passes a well-formed response', () => {
+		expect(checkResponse({ ...ok, baselineShape: shapeOf(ok.body) })).toEqual([]);
+	});
+
+	it('fails a non-2xx status', () => {
+		const f = checkResponse({ ...ok, status: 500, baselineShape: shapeOf(ok.body) });
+		expect(f.map((x) => x.check)).toContain('status');
+	});
+
+	it('fails a route serving markup — the error-page-as-data case', () => {
+		const f = checkResponse({ status: 200, contentType: 'text/html', body: undefined });
+		expect(f.map((x) => x.check)).toContain('content-type');
+	});
+
+	it('fails silent truncation', () => {
+		const body = { items: [1], total: 99 };
+		const f = checkResponse({
+			status: 200,
+			contentType: 'application/json',
+			body,
+			baselineShape: shapeOf(body),
+		});
+		expect(f.map((x) => x.check)).toContain('completeness');
+	});
+
+	it('fails shape drift', () => {
+		const f = checkResponse({ ...ok, baselineShape: '{items:[string],total:number}' });
+		expect(f.map((x) => x.check)).toContain('shape');
+	});
+
+	it('reports content-type once, not once per downstream check', () => {
+		const f = checkResponse({ status: 200, contentType: 'text/html', body: undefined });
+		expect(f).toHaveLength(1);
+	});
+});
+
+describe('isProbeable', () => {
+	it.each([
+		['GET /api/boardshop/products', true],
+		['POST /api/boardshop/search', false],
+		['GET /api/boardshop/product/:sku', false],
+		['GET /api/boardshop/files/*', false],
+	])('%s → %s', (route, expected) => {
+		expect(isProbeable(route)).toBe(expected);
+	});
+});

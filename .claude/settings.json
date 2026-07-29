@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/create-worktree.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.agents/hooks/create-worktree.sh"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/cleanup-on-stop.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.agents/hooks/cleanup-on-stop.sh"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-worktree-writes.sh",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.agents/hooks/guard-worktree-writes.sh",
             "statusMessage": "Checking worktree isolation"
           }
         ]

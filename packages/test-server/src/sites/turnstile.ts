@@ -45,7 +45,7 @@ export function createTurnstileSite(): Hono {
     <button type="submit" id="submit-btn" disabled>Submit</button>
   </form>
   <pre id="status"></pre>
-  <script src="/assets/widget.js"></script>
+  <script src="assets/widget.js"></script>
   <script>
     (function () {
       var widget = document.getElementById('captcha-widget');

@@ -142,7 +142,8 @@
  */
 
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
-import { DEBUG, rateLimitedFetch } from '@interceptor/shared';
+import { evaluateInMainWorld } from '@interceptor/browser/shared/main-world';
+import { DEBUG, rateLimitedFetch, withCompleteness } from '@interceptor/shared';
 
 const BASE_URL = process.env.BOARDSHOP_URL ?? 'http://localhost:4444/sites/boardshop';
 const LIVEBOARD_URL = 'http://localhost:4444/sites/liveboard';
@@ -209,14 +210,16 @@ export const routes: DomainRoute[] = [
 			} | null;
 			if (!data) return c.json({ error: 'Embedded JSON not found' }, 404);
 
-			return c.json({
-				items: data.catalog.items,
-				total: data.catalog.totalCount,
-				page: data.catalog.currentPage,
-				pageSize: data.catalog.pageSize,
-				remaining: data.catalog.itemsRemaining,
-				query: data.searchQuery,
-			});
+			return c.json(
+				withCompleteness({
+					items: data.catalog.items,
+					total: data.catalog.totalCount,
+					page: data.catalog.currentPage,
+					pageSize: data.catalog.pageSize,
+					remaining: data.catalog.itemsRemaining,
+					query: data.searchQuery,
+				}),
+			);
 		},
 	},
 
@@ -309,7 +312,7 @@ export const routes: DomainRoute[] = [
 				headers: { 'X-API-Key': API_KEY },
 			});
 			if (!res.ok) return c.json({ error: `Products API returned ${res.status}` }, 502);
-			return c.json(await res.json());
+			return c.json(withCompleteness(await res.json()));
 		},
 	},
 
@@ -480,9 +483,9 @@ export const routes: DomainRoute[] = [
 			const encoding = res.headers.get('x-encoding');
 			const raw = await res.text();
 			if (encoding === 'base64') {
-				return c.json(JSON.parse(atob(raw)));
+				return c.json(withCompleteness(JSON.parse(atob(raw))));
 			}
-			return c.json(JSON.parse(raw));
+			return c.json(withCompleteness(JSON.parse(raw)));
 		},
 	},
 
@@ -682,7 +685,7 @@ export const routes: DomainRoute[] = [
 			const searchKey = Object.keys(queries).find((k) => k.startsWith('searchResults'));
 			const searchData = searchKey ? queries[searchKey].data : null;
 
-			return c.json(searchData ?? { error: 'No search results query found' });
+			return c.json(withCompleteness(searchData ?? { error: 'No search results query found' }));
 		},
 	},
 
@@ -746,7 +749,7 @@ export const routes: DomainRoute[] = [
 				},
 			);
 			if (!res.ok) return c.json({ error: `Method API returned ${res.status}` }, 502);
-			return c.json(await res.json());
+			return c.json(withCompleteness(await res.json()));
 		},
 	},
 
@@ -1632,7 +1635,13 @@ export const routes: DomainRoute[] = [
 			try {
 				const page = await ctx.newPage();
 				await page.goto(`${TURNSTILE_URL}/`);
-				await page.waitForFunction(() =>
+
+				// The widget is a page global, so both the readiness check and the
+				// mint have to run in the page's own JavaScript world — page.evaluate
+				// is isolated from it and would see `undefined` forever. See
+				// packages/browser/src/shared/main-world.ts.
+				await page.waitForFunction(() => Boolean(document.querySelector('[data-captcha-widget]')));
+				await evaluateInMainWorld(page, () =>
 					Boolean((window as unknown as { captchaWidget?: unknown }).captchaWidget),
 				);
 
@@ -1640,7 +1649,7 @@ export const routes: DomainRoute[] = [
 					() => document.querySelector<HTMLElement>('[data-captcha-widget]')?.dataset.sitekey ?? '',
 				);
 
-				const token = await page.evaluate(async () => {
+				const token = await evaluateInMainWorld(page, async () => {
 					const w = (
 						window as unknown as {
 							captchaWidget: {
@@ -1657,7 +1666,7 @@ export const routes: DomainRoute[] = [
 				});
 
 				const verifyRes = await page.evaluate(async (t: string) => {
-					const r = await fetch('/api/verify', {
+					const r = await fetch('api/verify', {
 						method: 'POST',
 						headers: { 'content-type': 'application/json' },
 						body: JSON.stringify({ token: t }),
@@ -1734,37 +1743,51 @@ export const routes: DomainRoute[] = [
 					() => document.querySelector<HTMLElement>('[data-captcha-widget]')?.dataset.sitekey ?? '',
 				);
 
-				// Race: token from postMessage OR from intercepted /api/check response.
-				const postMessagePromise = page.evaluate(
-					() =>
-						new Promise<string>((resolve) => {
-							window.addEventListener('message', (ev: MessageEvent) => {
-								const data = ev.data as { kind?: string; token?: string };
-								if (data?.kind === 'captcha-token' && data.token) resolve(data.token);
-							});
-						}),
+				// The page posts its token to its own window, and a listener registered
+				// through page.evaluate sits in an isolated world that never sees it.
+				// Register in the page's world and park the token on the DOM, which
+				// both worlds share. See packages/browser/src/shared/main-world.ts.
+				const TOKEN_ATTR = 'data-captured-captcha-token';
+				await evaluateInMainWorld(
+					page,
+					(attr: string) => {
+						window.addEventListener('message', (ev: MessageEvent) => {
+							const data = ev.data as { kind?: string; token?: string };
+							if (data?.kind === 'captcha-token' && data.token) {
+								document.documentElement.setAttribute(attr, data.token);
+							}
+						});
+						return true;
+					},
+					TOKEN_ATTR,
 				);
 
 				await page.locator('#send-btn').click();
-				const token = await Promise.race([
-					postMessagePromise,
-					new Promise<string>((resolve, reject) => {
-						const t0 = Date.now();
-						const iv = setInterval(() => {
-							if (interceptedToken) {
-								clearInterval(iv);
-								resolve(interceptedToken);
-							} else if (Date.now() - t0 > 10_000) {
-								clearInterval(iv);
-								reject(new Error('token capture timed out'));
-							}
-						}, 100);
-					}),
-				]);
+
+				// Two independent capture paths: the page's postMessage, and the
+				// intercepted /api/check response. Either is sufficient.
+				const token = await new Promise<string>((resolve, reject) => {
+					const t0 = Date.now();
+					const iv = setInterval(async () => {
+						const posted = await page
+							.evaluate((attr: string) => document.documentElement.getAttribute(attr), TOKEN_ATTR)
+							.catch(() => null);
+						if (posted) {
+							clearInterval(iv);
+							resolve(posted);
+						} else if (interceptedToken) {
+							clearInterval(iv);
+							resolve(interceptedToken);
+						} else if (Date.now() - t0 > 10_000) {
+							clearInterval(iv);
+							reject(new Error('token capture timed out'));
+						}
+					}, 100);
+				});
 
 				// Replay: hit /api/submit from a clean fetch context using the captured token.
 				const replay = await page.evaluate(async (t: string) => {
-					const r = await fetch('/api/submit', {
+					const r = await fetch('api/submit', {
 						method: 'POST',
 						headers: { 'content-type': 'application/json', 'x-captcha-token': t },
 						body: JSON.stringify({ message: 'replay' }),

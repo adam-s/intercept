@@ -20,8 +20,26 @@
  */
 
 import { DEBUG } from './debug.js';
+import { assertNotChallenge, assertOpenTransport } from './transport-tier.js';
 
 // ─── Types ───────────────────────────────────────────────────────────
+
+/**
+ * `RequestInit` plus the one transport-tier escape hatch.
+ *
+ * The extra field is stripped before the underlying `fetch`, so it never
+ * reaches the network layer.
+ */
+export interface RateLimitedFetchInit extends RequestInit {
+	/**
+	 * Return bot-wall responses instead of throwing `TransportTierError`.
+	 *
+	 * Set this only on an escalation path that reads the *status* and retries
+	 * through the browser. Anything that parses the body wants the throw —
+	 * that is the failure the guard exists to catch.
+	 */
+	allowChallengeResponse?: boolean;
+}
 
 export interface RateLimitConfig {
 	/** Max requests per 60-second sliding window. */
@@ -165,14 +183,34 @@ export function releaseRateLimitSlot(url: string): void {
  *
  * On 429 responses, automatically retries with exponential backoff
  * (up to `retryOn429` times, default 2).
+ *
+ * This is the bottom rung of the transport ladder, so it also enforces the
+ * ladder: a host registered `session-gated` throws before the request leaves,
+ * and a WAF interstitial throws instead of being handed back as data. See
+ * [transport-tier.ts](./transport-tier.ts). Pass `allowChallengeResponse: true`
+ * on an escalation path that inspects the status and retries via the browser.
  */
-export async function rateLimitedFetch(url: string | URL, init?: RequestInit): Promise<Response> {
+export async function rateLimitedFetch(
+	url: string | URL,
+	init?: RateLimitedFetchInit,
+): Promise<Response> {
 	const urlStr = String(url);
+
+	// Fails at the call site rather than one 403 later. Before the rate-limit
+	// wait so a mis-tiered route doesn't spend budget proving it is mis-tiered.
+	assertOpenTransport(urlStr);
+
+	const { allowChallengeResponse = false, ...fetchInit } = init ?? {};
+	const guard = (res: Response): Response => {
+		if (!allowChallengeResponse) assertNotChallenge(res, urlStr);
+		return res;
+	};
+
 	const state = getHostState(urlStr);
 
 	// No rate limit registered — pass through
 	if (!state) {
-		return fetch(urlStr, init);
+		return guard(await fetch(urlStr, fetchInit));
 	}
 
 	const maxRetries = state.config.retryOn429 ?? 2;
@@ -187,7 +225,7 @@ export async function rateLimitedFetch(url: string | URL, init?: RequestInit): P
 
 		let res: Response;
 		try {
-			res = await fetch(urlStr, init);
+			res = await fetch(urlStr, fetchInit);
 		} finally {
 			state.inflight--;
 		}
@@ -203,9 +241,9 @@ export async function rateLimitedFetch(url: string | URL, init?: RequestInit): P
 			continue;
 		}
 
-		return res;
+		return guard(res);
 	}
 
 	// Should not reach here, but TypeScript needs it
-	return fetch(urlStr, init);
+	return guard(await fetch(urlStr, fetchInit));
 }

@@ -1,7 +1,7 @@
 /**
  * Data Transport Classifier
  *
- * Implements the elimination protocol from .claude/rules/discovery.md
+ * Implements the elimination protocol from .agents/rules/discovery.md
  * as executable code. Given captured traffic entries, returns the classified
  * transport type for each data pattern detected.
  *

@@ -17,7 +17,7 @@ __pycache__/
 .DS_Store
 
 # Runtime data (browser profiles, cache, logs — all generated at runtime)
-/data/
+/data/*
 
 # Sub-agent worktrees (temporary, per-session)
 .claude/worktrees/
@@ -46,3 +46,6 @@ apps/api/data/
 .claude/tuning-handoff.md
 .claude/dashboard-tuning-handoff.md
 .claude/user-consent.md
+
+# Route-spec baselines are shape fingerprints only — no captured data.
+!/data/route-spec-baseline/

@@ -59,7 +59,7 @@ export function createHcaptchaSite(): Hono {
   <div id="captcha-widget" data-captcha-widget data-sitekey="${SITEKEY}"></div>
   <button id="send-btn">Send</button>
   <pre id="status"></pre>
-  <script src="/assets/widget.js"></script>
+  <script src="assets/widget.js"></script>
   <script>
     (function () {
       var widget = document.getElementById('captcha-widget');
@@ -72,10 +72,10 @@ export function createHcaptchaSite(): Hono {
       document.getElementById('send-btn').addEventListener('click', async function () {
         status.textContent = 'requesting challenge...';
         var sitekey = widget.dataset.sitekey;
-        var ch = await fetch('/api/challenge/' + sitekey, { method: 'POST' }).then(function (r) { return r.json(); });
+        var ch = await fetch('api/challenge/' + sitekey, { method: 'POST' }).then(function (r) { return r.json(); });
         var token = await window.captchaWidget.execute(sitekey, ch);
         status.textContent = 'submitting token...';
-        var res = await fetch('/api/submit', {
+        var res = await fetch('api/submit', {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-captcha-token': token },
           body: JSON.stringify({ message: 'hello' }),
@@ -104,7 +104,7 @@ export function createHcaptchaSite(): Hono {
   window.captchaWidget = {
     execute: async function (sitekey, challenge) {
       // Simulate proof-of-work: just echo the passkey back to /api/check.
-      var res = await fetch('/api/check/' + sitekey, {
+      var res = await fetch('api/check/' + sitekey, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ proof: rand(16), passkey: challenge.passkey }),

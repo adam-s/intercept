@@ -20,6 +20,8 @@ export {
 } from './classify-transport';
 export type { InterceptorConfig, VerificationResult } from './config';
 export { GenericInterceptor } from './interceptor';
+export type { MainWorldOptions, MainWorldPage } from './main-world';
+export { evaluateInMainWorld } from './main-world';
 export { GenericSessionManager } from './session-manager';
 export type {
 	InterceptedRequest,
