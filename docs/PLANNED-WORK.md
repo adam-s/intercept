@@ -88,28 +88,27 @@ Also known and accepted for now: the camoufox capture path cannot be benchmarked
 unattended, because that driver refuses true headless by design. Its recall was
 verified headed at 13/13; any future claim about it needs the same attended run.
 
-## Top of the queue: one capture, not two
+## Resolved: capture is one implementation per concern
 
-A live Twitch run reported `HLS/Media` absent while the video was playing. The
-cause is structural rather than a missing signature: the remote service runs its
-own CDP capture bound to the page, and the driver's `traffic-capture.ts` — the
-module written to replace it, and the one improved all session — is not what
-executes. Two implementations of one concern, and the docblock on the unused one
-claimed it had already replaced the other.
+A live Twitch run reported `HLS/Media` absent while the video played. The cause
+was structural: the remote service ran its own CDP capture bound to the page,
+and the driver's `traffic-capture.ts` — written to replace it — was not what
+executed. Two implementations, with the unused one's docblock claiming it had
+already replaced the other.
 
-The evidence is measured, not argued. Against the benchmark's worker fixture,
-the context-level Playwright listener records the worker's own fetch
-(`?from=worker` appears as a wire row); the page-scoped CDP session records
-nothing. Twitch fetches its media segments from a worker, so a page-scoped
-capture shows no media at all on a streaming page.
+Full unification was attempted and does not work, which is worth recording so
+nobody attempts it again. Playwright's listener never sees the top-level
+document response for a CDP-driven navigation — measured by logging every
+response the listener received, where the page's own HTML never appeared. The
+CDP session, conversely, is page-bound and never sees a worker's traffic, which
+is where the media went.
 
-Playwright's `CDPSession.send` takes no session id, so flat auto-attach cannot
-route `Network.enable` to worker targets through it — the CDP path cannot be
-fixed in place that way. The fix is to unify on the driver module and delete the
-duplicate, which also removes the Chromium binding the driver module was written
-to remove.
+So the split is by concern and written down: CDP owns the navigation layer and
+nothing else; Playwright owns everything the page and its workers request
+afterwards. Verified live — the main document and an iframe document both
+captured, worker traffic captured, and the engine's own injection URLs filtered
+out (they are documents, so they survived a filter aimed at data content types).
 
-Care required: the CDP capture also does pre-hydration Document capture, and
-running both at once would double-count entries. This is a refactor with a
-migration, not a patch.
-
+The general form is in AGENTS.md: two tools are duplication only when they do
+the same job, and a seam nobody wrote down gets deleted by the next reader as
+redundant.

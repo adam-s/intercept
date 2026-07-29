@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { BrowserContext, CDPSession, Page, Route } from 'patchright';
 import { chromium } from 'patchright';
 import { BlockerManager } from '../blocker';
+import { isEngineInternal } from '../driver/capture-filter';
 import type { EgressEvent } from '../driver/instrument';
 import { runSweep, type SweepAction, type SweepLimits } from '../driver/interaction-sweep';
 import {
@@ -34,17 +35,10 @@ import {
 	drainEgressEvents,
 	installEgressInstrument,
 	removeEgressInstrument,
+	startTrafficCapture,
 } from '../driver/traffic-capture';
 import { CdpScriptControl } from './cdp-script-control';
-import type {
-	CDPLoadingFailed,
-	CDPLoadingFinished,
-	CDPRequestWillBeSent,
-	CDPResponseReceived,
-	CDPWebSocketClosed,
-	CDPWebSocketCreated,
-	CDPWebSocketFrameReceived,
-} from './cdp-types';
+import type { CDPLoadingFinished, CDPRequestWillBeSent } from './cdp-types';
 import { FingerprintController } from './fingerprint-controller';
 
 // Rate limiter integration for browserFetch — injected at startup to avoid circular deps
@@ -126,6 +120,8 @@ export class RemoteBrowserService {
 	private page: Page | null = null;
 	/** Whether egress instrumentation is currently installed on this session. */
 	private instrumented = false;
+	/** Detaches the traffic listener; kept so a restart cannot leak one. */
+	private stopTrafficCapture: (() => void) | null = null;
 	private cdp: CDPSession | null = null;
 	private frameCallback: FrameCallback | null = null;
 	private urlChangeCallback: ((url: string) => void) | null = null;
@@ -1274,6 +1270,56 @@ export class RemoteBrowserService {
 	 * belongs to the instrumented pass only — see the two-pass rule in
 	 * .agents/rules/discovery.md.
 	 */
+	/**
+	 * Capture the top-level document through CDP.
+	 *
+	 * Everything else runs on Playwright's own events — the traffic capture wired
+	 * at startup, which sees worker traffic a page-bound CDP session cannot. The
+	 * main document is the one thing that path does not see: a navigation driven
+	 * through CDP does not surface its own response to Playwright's listener,
+	 * which was measured rather than assumed. So the split is by concern rather
+	 * than duplicated: CDP owns the navigation layer, Playwright owns everything
+	 * the page and its workers request afterwards.
+	 *
+	 * Pre-hydration HTML is worth that seam. It is where server-rendered data
+	 * lives, and dropping it would trade one blind spot for another.
+	 */
+	private setupDocumentCapture(): void {
+		if (!this.cdp) return;
+		const documentRequests = new Map<string, { url: string }>();
+
+		this.cdp.on('Network.requestWillBeSent', (params: CDPRequestWillBeSent) => {
+			if (params.type === 'Document') {
+				documentRequests.set(params.requestId, { url: params.request.url });
+			}
+		});
+
+		this.cdp.on('Network.loadingFinished', async (params: CDPLoadingFinished) => {
+			const doc = documentRequests.get(params.requestId);
+			if (!doc || !this.networkCaptureCallback) return;
+			documentRequests.delete(params.requestId);
+			// The engine's own injection URLs are documents too, and they describe
+			// the tooling rather than the target.
+			if (isEngineInternal(doc.url)) return;
+			try {
+				const bodyResult = await this.cdp?.send('Network.getResponseBody', {
+					requestId: params.requestId,
+				});
+				this.networkCaptureCallback(
+					{ method: 'DOCUMENT', url: doc.url, body: null, headers: {} },
+					{
+						url: doc.url,
+						status: 200,
+						headers: { 'content-type': 'text/html' },
+						body: bodyResult?.body,
+					},
+				);
+			} catch {
+				/* a document body already discarded is a gap, not a failure */
+			}
+		});
+	}
+
 	async installInstrument(): Promise<boolean> {
 		if (!this.page) throw new Error('Browser not started');
 		this.instrumented = await installEgressInstrument(this.page as never);
@@ -1420,194 +1466,6 @@ export class RemoteBrowserService {
 	}
 
 	/**
-	 * Set up CDP Network event handlers for traffic capture.
-	 */
-	private setupNetworkCapture(): void {
-		if (!this.cdp) return;
-
-		const pendingRequests = new Map<
-			string,
-			{
-				method: string;
-				url: string;
-				body: unknown;
-				headers: Record<string, string>;
-				timestamp: number;
-			}
-		>();
-		const responseInfo = new Map<
-			string,
-			{ url: string; status: number; headers: Record<string, string>; contentType: string }
-		>();
-
-		// Track Document requests for pre-hydration HTML capture
-		const documentRequests = new Map<string, { url: string }>();
-
-		this.cdp.on('Network.requestWillBeSent', (params: CDPRequestWillBeSent) => {
-			// Capture Document requests for the analyzer (pre-hydration HTML)
-			if (params.type === 'Document') {
-				documentRequests.set(params.requestId, { url: params.request.url });
-			}
-			if (!params.type || !['XHR', 'Fetch'].includes(params.type)) return;
-			let body: unknown;
-			try {
-				if (params.request.postData) body = JSON.parse(params.request.postData);
-			} catch {
-				body = params.request.postData || null;
-			}
-			pendingRequests.set(params.requestId, {
-				method: params.request.method,
-				url: params.request.url,
-				body,
-				headers: params.request.headers,
-				timestamp: Date.now(),
-			});
-		});
-
-		this.cdp.on('Network.responseReceived', (params: CDPResponseReceived) => {
-			if (!pendingRequests.has(params.requestId)) return;
-			const ct =
-				params.response.headers['content-type'] || params.response.headers['Content-Type'] || '';
-			responseInfo.set(params.requestId, {
-				url: params.response.url,
-				status: params.response.status,
-				headers: params.response.headers,
-				contentType: ct,
-			});
-		});
-
-		// Unified loadingFinished handler — processes both XHR/Fetch and Document requests
-		this.cdp.on('Network.loadingFinished', async (params: CDPLoadingFinished) => {
-			if (!this.networkCaptureCallback) return;
-
-			// Check if this is a Document request (pre-hydration HTML capture)
-			const doc = documentRequests.get(params.requestId);
-			if (doc) {
-				documentRequests.delete(params.requestId);
-				try {
-					const bodyResult = await this.cdp?.send('Network.getResponseBody', {
-						requestId: params.requestId,
-					});
-					this.networkCaptureCallback(
-						{ method: 'DOCUMENT', url: doc.url, body: null, headers: {} },
-						{
-							url: doc.url,
-							status: 200,
-							headers: { 'content-type': 'text/html' },
-							body: bodyResult?.body,
-						},
-					);
-				} catch {
-					/* Document body unavailable */
-				}
-				return;
-			}
-
-			// XHR/Fetch request handling
-			const req = pendingRequests.get(params.requestId);
-			const res = responseInfo.get(params.requestId);
-			pendingRequests.delete(params.requestId);
-			responseInfo.delete(params.requestId);
-			if (!req || !res) return;
-
-			// Skip responses that are clearly not API data
-			const ct = res.contentType.toLowerCase();
-			if (
-				ct.includes('text/html') ||
-				ct.includes('text/css') ||
-				ct.includes('image/') ||
-				ct.includes('font/')
-			)
-				return;
-
-			// Skip analytics/tracking
-			const skip = [
-				'google-analytics',
-				'googleadservices',
-				'google.com/ccm',
-				'sentry.io',
-				'forter.com',
-				'riskified.com',
-				'doubleclick.net',
-			];
-			if (skip.some((s) => res.url.includes(s))) return;
-
-			try {
-				const bodyResult = await this.cdp?.send('Network.getResponseBody', {
-					requestId: params.requestId,
-				});
-				let resBody: unknown = bodyResult?.body;
-				if (resBody) {
-					try {
-						resBody = JSON.parse(resBody as string);
-					} catch {
-						// keep as string
-					}
-				}
-				this.networkCaptureCallback(req, {
-					url: res.url,
-					status: res.status,
-					headers: res.headers,
-					body: resBody,
-				});
-			} catch {
-				/* body unavailable */
-			}
-		});
-
-		// Clean up on failed requests (prevents memory leak)
-		this.cdp.on('Network.loadingFailed', (params: CDPLoadingFailed) => {
-			pendingRequests.delete(params.requestId);
-			responseInfo.delete(params.requestId);
-			documentRequests.delete(params.requestId);
-		});
-
-		// WebSocket frame capture — CDP does NOT capture WS frames via requestWillBeSent.
-		// These events let us see WebSocket connections and their messages.
-		const wsConnections = new Map<string, string>(); // requestId → url
-
-		this.cdp.on('Network.webSocketCreated', (params: CDPWebSocketCreated) => {
-			wsConnections.set(params.requestId, params.url);
-			if (this.networkCaptureCallback) {
-				this.networkCaptureCallback(
-					{ method: 'WS', url: params.url, body: null, headers: {} },
-					{
-						url: params.url,
-						status: 101,
-						headers: {},
-						body: { type: 'websocket-created', wsUrl: params.url },
-					},
-				);
-			}
-		});
-
-		this.cdp.on('Network.webSocketFrameReceived', (params: CDPWebSocketFrameReceived) => {
-			const url = wsConnections.get(params.requestId) || 'unknown-ws';
-			if (!this.networkCaptureCallback) return;
-			const payload = params.response?.payloadData || '';
-			let body: unknown;
-			try {
-				body = JSON.parse(payload);
-			} catch {
-				body = payload.length > 200 ? `[binary/text ${payload.length} bytes]` : payload;
-			}
-			this.networkCaptureCallback(
-				{ method: 'WS-FRAME', url, body: null, headers: {} },
-				{
-					url,
-					status: 0,
-					headers: {},
-					body: { type: 'websocket-frame', data: body, size: payload.length },
-				},
-			);
-		});
-
-		this.cdp.on('Network.webSocketClosed', (params: CDPWebSocketClosed) => {
-			wsConnections.delete(params.requestId);
-		});
-	}
-
-	/**
 	 * Check if browser is running.
 	 */
 	isActive(): boolean {
@@ -1638,9 +1496,31 @@ export class RemoteBrowserService {
 		try {
 			this.cdp = await this.context.newCDPSession(this.page);
 
-			// Enable network capture via CDP — catches ALL XHR/Fetch including cross-domain
+			// Network capture runs on Playwright's own events, not on CDP.
+			//
+			// The CDP session is bound to the page, so it never saw a worker's
+			// traffic — and that is where real sites do work worth finding. A live
+			// run reported adaptive media absent on a page that was visibly
+			// streaming, because the player fetches its segments from a worker.
+			// Playwright's context-level listener sees those; measured against the
+			// benchmark's worker fixture it records the worker's own fetch and the
+			// page-scoped CDP session records nothing.
+			//
+			// It also removes the second implementation. Capture is a cross-cutting
+			// concern and there were two of them, with the unused one's docblock
+			// claiming it had already replaced the other.
+			//
+			// CDP stays enabled for the screencast and for script control.
 			await this.cdp.send('Network.enable');
-			this.setupNetworkCapture();
+			// CDP keeps exactly one job: the top-level document, which Playwright's
+			// listener does not see for a CDP-driven navigation.
+			this.setupDocumentCapture();
+			this.stopTrafficCapture?.();
+			this.stopTrafficCapture = startTrafficCapture(this.page as never, (req, res) => {
+				// Resolved per call rather than captured, because the callback is
+				// registered after the browser starts.
+				this.networkCaptureCallback?.(req as never, res as never);
+			});
 
 			// Reset throttling state
 			this.lastFrameSentAt = 0;

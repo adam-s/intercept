@@ -42,6 +42,20 @@ const TELEMETRY_HOSTS = [
 	'newrelic.com',
 ];
 
+/**
+ * URLs an engine generates for its own plumbing.
+ *
+ * These are not the site's traffic and recording them puts engine artifacts in
+ * a manifest that is supposed to describe a target — worse, they are documents,
+ * so they survive a filter aimed at data content types.
+ */
+const ENGINE_INTERNAL = ['patchright-init-script-inject', 'playwright-init-script', 'about:blank'];
+
+/** True when a URL belongs to the browser engine rather than to the site. */
+export function isEngineInternal(url: string): boolean {
+	return ENGINE_INTERNAL.some((marker) => url.includes(marker));
+}
+
 /** Case-insensitive header lookup — protocols disagree about casing. */
 export function header(headers: Record<string, string> | undefined, name: string): string {
 	if (!headers) return '';

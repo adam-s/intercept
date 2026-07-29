@@ -23,7 +23,12 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { drainEgressEvents, installEgressInstrument } from '../traffic-capture.js';
+import { isEngineInternal } from '../capture-filter.js';
+import {
+	drainEgressEvents,
+	installEgressInstrument,
+	startTrafficCapture,
+} from '../traffic-capture.js';
 import type { DriverPage } from '../types.js';
 
 /**
@@ -159,5 +164,113 @@ describe('drainEgressEvents', () => {
 
 	it('returns nothing rather than throwing when a frame answers with a non-array', async () => {
 		expect(await drainEgressEvents(frame({ not: 'an array' }))).toEqual([]);
+	});
+});
+
+describe('document capture', () => {
+	/** A response double shaped like Playwright's, for the listener under test. */
+	function pageWithResponse(resourceType, contentType, body = '<html>ok</html>') {
+		const captured = [];
+		let handler = null;
+		const page = {
+			on: (event, fn) => {
+				if (event === 'response') handler = fn;
+			},
+			context: () => null,
+		};
+		const response = {
+			url: () => 'https://x.test/page',
+			status: () => 200,
+			headers: () => ({ 'content-type': contentType }),
+			allHeaders: async () => ({ 'content-type': contentType }),
+			body: async () => Buffer.from(body),
+			request: () => ({
+				url: () => 'https://x.test/page',
+				method: () => 'GET',
+				resourceType: () => resourceType,
+				postData: () => null,
+				headers: () => ({}),
+				allHeaders: async () => ({}),
+			}),
+		};
+		return { page, captured, fire: async () => handler && (await handler(response)) };
+	}
+
+	// Pre-hydration HTML is where server-rendered data lives, and the data filter
+	// deliberately drops markup on the XHR path. Both are correct, so a document
+	// needs its own route rather than a hole in the filter.
+	it('captures a document under its own marker, past the data filter', async () => {
+		const h = pageWithResponse('document', 'text/html; charset=utf-8');
+		startTrafficCapture(h.page, (req, res) => h.captured.push({ req, res }));
+		await h.fire();
+		expect(h.captured).toHaveLength(1);
+		expect(h.captured[0].req.method).toBe('DOCUMENT');
+		expect(h.captured[0].res.body).toContain('ok');
+	});
+
+	// An HTML body on the XHR path is an error page or a challenge, not a result.
+	it('still drops markup that arrives on the XHR path', async () => {
+		const h = pageWithResponse('xhr', 'text/html');
+		startTrafficCapture(h.page, (req, res) => h.captured.push({ req, res }));
+		await h.fire();
+		expect(h.captured).toHaveLength(0);
+	});
+
+	it('captures JSON on the XHR path as before', async () => {
+		const h = pageWithResponse('xhr', 'application/json', '{"a":1}');
+		startTrafficCapture(h.page, (req, res) => h.captured.push({ req, res }));
+		await h.fire();
+		expect(h.captured).toHaveLength(1);
+		expect(h.captured[0].req.method).toBe('GET');
+	});
+
+	it('skips a document whose body cannot be read rather than recording an empty one', async () => {
+		const h = pageWithResponse('document', 'text/html');
+		startTrafficCapture(h.page, (req, res) => h.captured.push({ req, res }));
+		h.page.on = (event, fn) => {
+			if (event === 'response')
+				h.fire = async () =>
+					fn({
+						...(await Promise.resolve({})),
+						url: () => 'https://x.test/p',
+						status: () => 200,
+						headers: () => ({}),
+						allHeaders: async () => ({}),
+						body: async () => {
+							throw new Error('cache hit');
+						},
+						request: () => ({
+							url: () => 'https://x.test/p',
+							method: () => 'GET',
+							resourceType: () => 'document',
+							postData: () => null,
+							headers: () => ({}),
+							allHeaders: async () => ({}),
+						}),
+					});
+		};
+		startTrafficCapture(h.page, (req, res) => h.captured.push({ req, res }));
+		await h.fire();
+		expect(h.captured).toHaveLength(0);
+	});
+});
+
+describe('engine plumbing is not site traffic', () => {
+	// The document path deliberately bypasses the data-content-type filter, so
+	// anything excluded only by that filter comes back. The engine's own
+	// injection URL is a document, so it arrived as a captured page of the site.
+	it.each([
+		'http://patchright-init-script-inject.internal/',
+		'about:blank',
+		'http://playwright-init-script.internal/x',
+	])('drops %s', (url) => {
+		expect(isEngineInternal(url)).toBe(true);
+	});
+
+	it.each([
+		'https://x.test/page',
+		'http://localhost:4444/sites/newsboard/',
+	])('keeps the real page %s', (url) => {
+		expect(isEngineInternal(url)).toBe(false);
 	});
 });

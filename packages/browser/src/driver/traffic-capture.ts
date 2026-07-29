@@ -35,7 +35,7 @@
 
 import { DEBUG } from '@interceptor/shared';
 import { evaluateInMainWorld, type MainWorldPage } from '../shared/main-world.js';
-import { captureDecision, header, parseBody } from './capture-filter.js';
+import { captureDecision, header, isEngineInternal, parseBody } from './capture-filter.js';
 import {
 	DRAIN_SOURCE,
 	type EgressEvent,
@@ -102,9 +102,47 @@ export function startTrafficCapture(
 			const responseHeaders = await headersOf(response);
 			const contentType = header(responseHeaders, 'content-type');
 
+			const resourceType = request.resourceType().toLowerCase();
+
+			// Checked before the document path, which deliberately bypasses the data
+			// filter — without this, the engine's own injection URLs arrive as site
+			// documents and land in a manifest describing the target.
+			if (isEngineInternal(url)) {
+				DEBUG('traffic-capture', `skip ${url.slice(0, 60)} — engine internal`);
+				return;
+			}
+
+			// A document is captured on its own path, with its own marker, because
+			// pre-hydration HTML is a distinct kind of evidence: it is where
+			// server-rendered data lives, and the data filter deliberately drops
+			// markup on the XHR path (an HTML body arriving there is an error page
+			// or a challenge, not a result). Both facts are true, so documents need
+			// a route around the filter rather than a hole in it.
+			if (resourceType === 'document') {
+				let html: string;
+				try {
+					html = (await response.body()).toString('utf8');
+				} catch (err) {
+					// A navigation response body is not always readable after the fact —
+					// a redirect, a cache hit, or a document already discarded. Say so,
+					// because a document that vanishes without a word looks exactly like
+					// a page that was never fetched.
+					DEBUG(
+						'traffic-capture',
+						`document body unavailable for ${url.slice(0, 60)}: ${String(err).slice(0, 60)}`,
+					);
+					return;
+				}
+				onCapture(
+					{ method: 'DOCUMENT', url, headers: {}, body: null },
+					{ url, status: response.status(), headers: { 'content-type': 'text/html' }, body: html },
+				);
+				return;
+			}
+
 			const decision = captureDecision({
 				url,
-				resourceType: request.resourceType().toLowerCase(),
+				resourceType,
 				contentType,
 			});
 			if (!decision.capture) {

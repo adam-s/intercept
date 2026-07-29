@@ -141,6 +141,17 @@ work order. The maintainer directs what gets built.
   points stay thin — they wire libraries together, they don't hold logic. A
   cross-cutting concern (logging, rate limiting, session storage, an assertion)
   belongs in one place with one API, never re-implemented per caller.
+- **Two tools are duplication only when they do the same job.** A
+  cross-cutting concern belongs in one place, and that rule is about
+  *overlapping* implementations — two things answering the same question, where
+  neither can contradict the other and a wrong answer survives in both. Two
+  tools that each cover what the other structurally cannot are a seam, not a
+  duplicate: name the boundary, say why it exists, and keep both. The same holds
+  for process — two passes with different instruments beat one pass with a
+  compromised instrument whenever the total cost is lower, and forcing unity has
+  a cost too. What is never acceptable is an unexplained overlap, or a seam
+  nobody wrote down: the next reader deletes one side as redundant and loses
+  whatever only it could see.
 - **The first consumer is an instance, never the definition.** A reference
   implementation demonstrates the framework; it does not become the framework by
   being first.
