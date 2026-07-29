@@ -338,8 +338,28 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/inventory/:sku',
-		examples: ['/inventory/DECK-001'],
+		examples: ['/inventory/DECK-001', '/inventory/NO-SUCH-SKU'],
 		upstream: ['localhost:4444/sites/boardshop/api/inventory/{sku}'],
+		/**
+		 * REFERENCE: declaring a non-2xx that is an ANSWER rather than a fault.
+		 *
+		 * An unknown SKU has no inventory, and saying so with a 404 is a complete
+		 * answer to the question asked. Without this declaration the assertion tier
+		 * treats every non-2xx as a failure, so a route whose resource is
+		 * legitimately sometimes absent goes red for behaving correctly — and a
+		 * permanently red route teaches a reader to skip the whole domain.
+		 *
+		 * The obligation travels with the declaration, and this is the part to copy:
+		 * the transport must still be proved somewhere that cannot answer absent.
+		 * Here the first example does it — a SKU that exists returns 200 with real
+		 * inventory — so the 404 example covers the missing case without becoming
+		 * the only thing ever checked. A declaration with no such sibling is a check
+		 * that cannot fail, which is worse than no check at all.
+		 *
+		 * Do not reach for this to quiet a route that is simply broken. If the
+		 * upstream is erroring, the red is correct.
+		 */
+		contractualStatuses: [404],
 		transport: 'JSON API (XHR)',
 		description: 'Warehouse inventory with custom headers discovered from traffic.',
 		browserRequired: false,
@@ -351,6 +371,17 @@ export const routes: DomainRoute[] = [
 					'X-App-Region': 'us-east',
 				},
 			});
+			// REFERENCE: pass an upstream "not found" through as not-found.
+			//
+			// This mapped every upstream failure to 502, including a 404, which
+			// claimed a gateway fault for an answer the upstream gave correctly. The
+			// distinction to copy: 404 means the upstream understood the question and
+			// there is no such thing, which the caller needs to be able to tell from
+			// the upstream being broken. Collapsing both into 502 makes an ordinary
+			// missing record indistinguishable from an outage.
+			if (res.status === 404) {
+				return c.json({ sku, found: false, error: 'No inventory for that SKU' }, 404);
+			}
 			if (!res.ok) return c.json({ error: `Inventory API returned ${res.status}` }, 502);
 			return c.json(await res.json());
 		},

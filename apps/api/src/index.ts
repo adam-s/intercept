@@ -251,6 +251,7 @@ app.get('/api', (c) => {
 					upstream: r.upstream ?? [],
 					transport: r.transport ?? null,
 					hasTargetUrl: Boolean(r.targetUrl),
+					contractualStatuses: r.contractualStatuses ?? [],
 				})) ?? [],
 		};
 	});

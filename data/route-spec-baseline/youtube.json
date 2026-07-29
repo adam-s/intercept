@@ -11,7 +11,8 @@
 	],
 	"GET /api/youtube/search?q=lofi": [
 		"{_transport:string,query:string,total:number,videos:[{_renderer:string,channel:string,duration:string,published:string,title:string,videoId:string,views:string}]}",
-		"{_transport:string,query:string,total:number,videos:[{_renderer:string,channel?:string,duration?:string,published:string,title:string,videoId:string,views:string}]}"
+		"{_transport:string,query:string,total:number,videos:[{_renderer:string,channel?:string,duration?:string,published:string,title:string,videoId:string,views:string}]}",
+		"{_transport:string,query:string,total:number,videos:[{_renderer:string,channel?:string,duration?:string,published:null|string,title:string,videoId:string,views:null|string}]}"
 	],
 	"GET /api/youtube/channel/UCBJycsmduvYEL83R_U4JriQ/videos": [
 		"{channelId:string,total:number,videos:[{_renderer:string,published:string,title:string,videoId:string,views:string}]}"

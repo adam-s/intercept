@@ -517,3 +517,170 @@ describe('a declared example is probed whatever its verb', () => {
 		expect(skipped).toContain('GET /api/x/player/:id');
 	});
 });
+
+describe('a route may declare a non-2xx as one of its answers', () => {
+	/**
+	 * Some resources are genuinely not always present — a live broadcast when
+	 * nobody is on air — and for those, "there is none right now" is a complete
+	 * answer rather than a fault. A permanently red route is worse than useless:
+	 * it teaches a reader to skip the domain.
+	 *
+	 * Narrow on purpose. This is not "accept any status", and the obligation
+	 * travels with it: the transport must be proved somewhere deterministic.
+	 */
+	it('accepts a declared status', () => {
+		const findings = checkResponse({
+			status: 404,
+			contentType: 'application/json',
+			body: { live: false },
+			contractualStatuses: [404],
+		});
+		expect(findings.filter((f) => f.check === 'status')).toEqual([]);
+	});
+
+	it('still fails an undeclared status', () => {
+		const findings = checkResponse({
+			status: 500,
+			contentType: 'application/json',
+			body: { error: 'boom' },
+			contractualStatuses: [404],
+		});
+		expect(findings.some((f) => f.check === 'status')).toBe(true);
+	});
+
+	it('declaring nothing keeps the default, so this cannot loosen a route by accident', () => {
+		const findings = checkResponse({
+			status: 404,
+			contentType: 'application/json',
+			body: { live: false },
+		});
+		expect(findings.some((f) => f.check === 'status')).toBe(true);
+	});
+});
+
+describe('a nullable field and an empty list are content too', () => {
+	/**
+	 * Observed on live directory data. `primaryColorHex` reads `string` for a
+	 * streamer who chose a colour and `null` for one who did not, and
+	 * `contentClassificationLabels` reads `[]` for an unlabelled stream and
+	 * `[{…}]` for a labelled one. Recording either from whichever row happened to
+	 * sort first made the pin depend on who was broadcasting.
+	 */
+	const rowsA = {
+		items: [
+			{ c: 'x', labels: [] },
+			{ c: null, labels: [{ t: 'y' }] },
+		],
+	};
+	const rowsB = {
+		items: [
+			{ c: null, labels: [{ t: 'z' }] },
+			{ c: 'q', labels: [] },
+		],
+	};
+
+	it('gives two samples sharing no identical row the same shape', () => {
+		expect(shapeOf(rowsA)).toBe(shapeOf(rowsB));
+	});
+
+	it('records the variation rather than one arm of it', () => {
+		expect(shapeOf(rowsA)).toBe('{items:[{c:null|string,labels:[]|[{t:string}]}]}');
+	});
+
+	it('accepts the other sample against a recorded baseline', () => {
+		expect(diffShape(shapeOf(rowsA), shapeOf(rowsB)).verdict).toBe('no-signal-flipped');
+	});
+
+	// The union must not swallow a real change: a field going from a string to a
+	// number everywhere is a regression, not a nullable field.
+	it('still fails when a type changes outright', () => {
+		const changed = {
+			items: [
+				{ c: 1, labels: [] },
+				{ c: 2, labels: [{ t: 'y' }] },
+			],
+		};
+		expect(diffShape(shapeOf(rowsA), shapeOf(changed)).verdict).toBe('unexpected-regression');
+	});
+});
+
+describe('the record gate and the status declaration agree', () => {
+	/**
+	 * They disagreed when both were new: the status check accepted a declared 404
+	 * while the recorder refused to record what that 404 returns, so the route was
+	 * permanently without a baseline. Two mechanisms writing one outcome have to
+	 * apply the same test, which is the third time that has come up here.
+	 */
+	it('records a declared status, because it is an answer and not a failure', () => {
+		expect(isRecordableStatus(404, [404])).toBe(true);
+	});
+
+	it('still refuses an undeclared failure, which is the hole this gate closes', () => {
+		expect(isRecordableStatus(404, [])).toBe(false);
+		expect(isRecordableStatus(429, [404])).toBe(false);
+		expect(isRecordableStatus(502, [])).toBe(false);
+	});
+
+	it('a success needs no declaration', () => {
+		expect(isRecordableStatus(200)).toBe(true);
+	});
+});
+
+describe('a nested object merges rather than alternating', () => {
+	/**
+	 * The first attempt at the union rendered each distinct row shape as its own
+	 * arm, so `broadcaster:{…}|{…}` grew an arm per combination of nullable fields
+	 * and no two runs against a live listing agreed. Merging field-wise is what
+	 * makes the union stable.
+	 */
+	const mk = (colour, labels) => ({ b: { id: '1', colour }, labels });
+	const A = { items: [mk('x', []), mk(null, [{ t: 'y' }])] };
+	const B = { items: [mk(null, [{ t: 'z' }]), mk('q', [])] };
+
+	it('merges the nested fields instead of listing whole-object arms', () => {
+		expect(shapeOf(A)).toBe('{items:[{b:{colour:null|string,id:string},labels:[]|[{t:string}]}]}');
+	});
+
+	it('agrees across samples that share no identical row', () => {
+		expect(shapeOf(A)).toBe(shapeOf(B));
+		expect(diffShape(shapeOf(A), shapeOf(B)).verdict).toBe('no-signal-flipped');
+	});
+
+	it('still fails when a nested field changes type outright', () => {
+		const changed = { items: [mk(1, []), mk(2, [{ t: 'y' }])] };
+		expect(diffShape(shapeOf(A), shapeOf(changed)).verdict).toBe('unexpected-regression');
+	});
+});
+
+describe('a map whose values differ is still a map', () => {
+	/**
+	 * The first map rule required every value to render identically, so a real
+	 * feature-flag table — each flag carrying its own variations — fell through to
+	 * being enumerated key by key. That pinned a third party's release schedule
+	 * into the contract, which is the thing the rule existed to prevent.
+	 *
+	 * Values that are all objects are a population, exactly like an array's
+	 * elements, so they merge by the same rule.
+	 */
+	const flags = (names) =>
+		Object.fromEntries(
+			names.map((n, i) => [n, { key: n, enabled: true, ...(i % 2 ? { variants: { a: 1 } } : {}) }]),
+		);
+
+	it('collapses the keys and merges the values', () => {
+		expect(shapeOf({ flags: flags(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']) })).toBe(
+			'{flags:{*:{enabled:boolean,key:string,variants?:{a:number}}}}',
+		);
+	});
+
+	it('agrees across entirely different key sets', () => {
+		const a = shapeOf({ flags: flags(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']) });
+		const b = shapeOf({ flags: flags(['q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']) });
+		expect(diffShape(a, b).verdict).toBe('no-signal-flipped');
+	});
+
+	// A struct must not be swept up by this. Its key names are the schema.
+	it('leaves a small struct enumerated', () => {
+		expect(shapeOf({ id: 'x', name: 'y' })).toBe('{id:string,name:string}');
+	});
+});

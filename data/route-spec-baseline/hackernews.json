@@ -1,5 +1,7 @@
 {
-	"GET /api/hackernews/list/top": "{hasMore:boolean,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:string,title:string,url:string}],nextCursor:null,nextPage:number,paginationMode:string,returned:number,type:string}",
+	"GET /api/hackernews/list/top": [
+		"{hasMore:boolean,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:string,title:string,url:string}],nextCursor:null,nextPage:number,paginationMode:string,returned:number,type:string}"
+	],
 	"GET /api/hackernews/list/top?page=2": [
 		"{hasMore:boolean,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:string,title:string,url:string}],nextCursor:null,nextPage:number,paginationMode:string,returned:number,type:string}"
 	],
@@ -7,13 +9,13 @@
 		"{hasMore:boolean,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:null,title:string,url:string}],nextCursor:{n:string,next:string},nextPage:null,paginationMode:string,returned:number,type:string}",
 		"{hasMore:boolean,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:string,title:string,url:string}],nextCursor:{n:string,next:string},nextPage:null,paginationMode:string,returned:number,type:string}"
 	],
-	"GET /api/hackernews/list/best": "{hasMore:boolean,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:string,title:string,url:string}],nextCursor:null,nextPage:number,paginationMode:string,returned:number,type:string}",
-	"GET /api/hackernews/item/49089755": [
-		"{comments:[{ageISO:string,ageText:string,author:string,children:[{ageISO:string,ageText:string,author:string,children:[{ageISO:\u2026,ageText:\u2026,author:\u2026,children:\u2026,deleted:\u2026,id:\u2026,indent:\u2026,onStoryTitle:\u2026,onStoryUrl:\u2026,textHTML:\u2026}],deleted:boolean,id:string,indent:number,onStoryTitle:null,onStoryUrl:null,textHTML:string}],deleted:boolean,id:string,indent:number,onStoryTitle:null,onStoryUrl:null,textHTML:string}],hasMore:boolean,indicatedCommentCount:number,returnedCommentCount:number,story:{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:null,site:string,title:string,url:string}}"
+	"GET /api/hackernews/list/best": [
+		"{hasMore:boolean,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:string,title:string,url:string}],nextCursor:null,nextPage:number,paginationMode:string,returned:number,type:string}"
 	],
-	"GET /api/hackernews/user/pg": "{about:string,created:string,id:string,karma:number}",
-	"GET /api/hackernews/user/dang/submitted": "{hasMore:boolean,id:string,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:string,title:string,url:string}],nextCursor:{n:string,next:string},returned:number}",
-	"GET /api/hackernews/user/dang/comments": "{hasMore:boolean,id:string,items:[{ageISO:string,ageText:string,author:string,deleted:boolean,id:string,indent:number,onStoryTitle:string,onStoryUrl:string,textHTML:string}],nextCursor:{n:null,next:string},returned:number}",
+	"GET /api/hackernews/item/49089755": [
+		"{comments:[{ageISO:string,ageText:string,author:string,children:[{ageISO:string,ageText:string,author:string,children:[{ageISO:…,ageText:…,author:…,children:…,deleted:…,id:…,indent:…,onStoryTitle:…,onStoryUrl:…,textHTML:…}],deleted:boolean,id:string,indent:number,onStoryTitle:null,onStoryUrl:null,textHTML:string}],deleted:boolean,id:string,indent:number,onStoryTitle:null,onStoryUrl:null,textHTML:string}],hasMore:boolean,indicatedCommentCount:number,returnedCommentCount:number,story:{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:null,site:string,title:string,url:string}}",
+		"{comments:[{ageISO:string,ageText:string,author:string,children:[{ageISO:string,ageText:string,author:string,children:[],deleted:boolean,id:string,indent:number,onStoryTitle:null,onStoryUrl:null,textHTML:string}],deleted:boolean,id:string,indent:number,onStoryTitle:null,onStoryUrl:null,textHTML:string}],hasMore:boolean,indicatedCommentCount:number,returnedCommentCount:number,story:{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:null,site:string,title:string,url:string}}"
+	],
 	"GET /api/hackernews/rss": [
 		"{count:number,items:[{commentsUrl:string,link:string,pubDate:string,title:string}],title:string}"
 	],
@@ -24,9 +26,11 @@
 		"{day:string,dayLinks:[string],hasMore:boolean,items:[{ageISO:string,ageText:string,author:string,commentCount:number,commentsUrl:string,id:string,points:number,rank:number,site:string,title:string,url:string}],nextPage:number,page:number,returned:number}"
 	],
 	"GET /api/hackernews/search?q=hacker%20news": [
-		"{hasMore:boolean,items:[{_highlightResult:{author:{matchLevel:string,matchedWords:[],value:string},story_text:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string},title:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string}},_tags:[string],author:string,children:[number],created_at:string,created_at_i:number,num_comments:number,objectID:string,points:number,story_id:number,story_text:string,title:string,updated_at:string}],page:number,query:string,returned:number,total:number,totalPages:number}"
+		"{hasMore:boolean,items:[{_highlightResult:{author:{matchLevel:string,matchedWords:[],value:string},story_text:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string},title:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string}},_tags:[string],author:string,children:[number],created_at:string,created_at_i:number,num_comments:number,objectID:string,points:number,story_id:number,story_text:string,title:string,updated_at:string}],page:number,query:string,returned:number,total:number,totalPages:number}",
+		"{hasMore:boolean,items:[{_highlightResult:{author:{matchLevel:string,matchedWords:[],value:string},story_text:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string},title:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string}},_tags:[string],author:string,children:[number],created_at:string,created_at_i:number,num_comments:number,objectID:string,points:number,story_id:number,story_text?:string,title:string,updated_at:string,url?:string}],page:number,query:string,returned:number,total:number,totalPages:number}"
 	],
 	"GET /api/hackernews/search?q=rust&page=1": [
-		"{hasMore:boolean,items:[{_highlightResult:{author:{matchLevel:string,matchedWords:[],value:string},title:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string},url:{matchLevel:string,matchedWords:[],value:string}},_tags:[string],author:string,children:[number],created_at:string,created_at_i:number,num_comments:number,objectID:string,points:number,story_id:number,title:string,updated_at:string,url:string}],page:number,query:string,returned:number,total:number,totalPages:number}"
+		"{hasMore:boolean,items:[{_highlightResult:{author:{matchLevel:string,matchedWords:[],value:string},title:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string},url:{matchLevel:string,matchedWords:[],value:string}},_tags:[string],author:string,children:[number],created_at:string,created_at_i:number,num_comments:number,objectID:string,points:number,story_id:number,title:string,updated_at:string,url:string}],page:number,query:string,returned:number,total:number,totalPages:number}",
+		"{hasMore:boolean,items:[{_highlightResult:{author:{matchLevel:string,matchedWords:[],value:string},title:{fullyHighlighted:boolean,matchLevel:string,matchedWords:[string],value:string},url:{matchLevel:string,matchedWords:[],value:string}},_tags:[string],author:string,children:[number],created_at:string,created_at_i:number,num_comments:number,objectID:string,points:number,story_id:number,story_text?:string,title:string,updated_at:string,url:string}],page:number,query:string,returned:number,total:number,totalPages:number}"
 	]
 }

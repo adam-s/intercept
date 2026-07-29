@@ -60,6 +60,21 @@ export type DomainRoute =
 			browserRequired?: boolean;
 			/** Concrete invocations that exercise this route. See `examples` on the handler variant. */
 			examples?: string[];
+			/**
+			 * Non-2xx statuses that are contractual answers for this route.
+			 *
+			 * Narrow on purpose, and not the same as widening what counts as
+			 * success. Some resources are genuinely not always present — a live
+			 * broadcast when nobody is on air — and for those, "there is none right
+			 * now" is a complete answer rather than a fault. Without this such a
+			 * route is permanently red, which teaches a reader to skip the domain.
+			 *
+			 * The obligation travels with the declaration: the transport must be
+			 * proved somewhere that IS deterministic, and the comment at the route
+			 * must say where. A declaration without that sibling is a check that
+			 * cannot fail.
+			 */
+			contractualStatuses?: number[];
 			/** Upstream endpoints this route consumes. See `upstream` on the handler variant. */
 			upstream?: string[];
 			/** Transport class this route consumes. See `transport` on the handler variant. */
@@ -85,6 +100,21 @@ export type DomainRoute =
 			 * declaring several covers its interesting cases.
 			 */
 			examples?: string[];
+			/**
+			 * Non-2xx statuses that are contractual answers for this route.
+			 *
+			 * Narrow on purpose, and not the same as widening what counts as
+			 * success. Some resources are genuinely not always present — a live
+			 * broadcast when nobody is on air — and for those, "there is none right
+			 * now" is a complete answer rather than a fault. Without this such a
+			 * route is permanently red, which teaches a reader to skip the domain.
+			 *
+			 * The obligation travels with the declaration: the transport must be
+			 * proved somewhere that IS deterministic, and the comment at the route
+			 * must say where. A declaration without that sibling is a check that
+			 * cannot fail.
+			 */
+			contractualStatuses?: number[];
 			/**
 			 * Upstream endpoints this route consumes — e.g.
 			 * `['www.reddit.com/r/{sub}.json']` or `['gql.twitch.tv/gql']`.

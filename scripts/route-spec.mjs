@@ -114,8 +114,66 @@ const MAP_LIKE_MIN_KEYS = 8;
  * window where this happens is ordinary: a host that rate-limits mid-run answers
  * some routes and refuses others.
  */
-export function isRecordableStatus(status) {
-	return status >= 200 && status < 300;
+export function isRecordableStatus(status, contractualStatuses = []) {
+	if (status >= 200 && status < 300) return true;
+	// A status the route DECLARED is an answer, not a failure, so its shape is a
+	// contract worth pinning. Without this the two mechanisms disagreed: the
+	// status check accepted a declared 404 while the recorder refused to record
+	// what that 404 returns, leaving the route permanently without a baseline.
+	// The pollution this gate exists to prevent is an UNdeclared failure being
+	// frozen as the expectation, and that is untouched — an undeclared status is
+	// still refused.
+	return contractualStatuses.includes(status);
+}
+
+/**
+ * Merge a list of objects into one shape, field by field.
+ *
+ * Two content properties leak in through any single element, and both were seen
+ * failing on live data. A nullable field reads `string` in an element that has it
+ * and `null` in one that does not — a streamer with no chosen colour — so the
+ * recorded type depended on which row sorted first. And a list reads `[]` when
+ * that element's list is empty and `[{…}]` when it is not.
+ *
+ * Merging is field-wise and recursive, not an alternation of whole objects.
+ * Alternating renders each distinct row shape as its own arm, so a page of
+ * results produces an arm per combination and no two runs agree — which is
+ * exactly what a first attempt at this did. Merged, the union is stable where a
+ * single element is not: both variants of each field nearly always appear across
+ * a page, so two runs agree even though no two rows do.
+ *
+ * A field whose values are all objects recurses; anything else contributes the
+ * set of types it took, joined so the result is order-independent.
+ */
+function unionOfObjects(objects, depth, ancestors) {
+	const counts = new Map();
+	const values = new Map();
+	for (const el of objects) {
+		for (const k of Object.keys(el)) {
+			counts.set(k, (counts.get(k) ?? 0) + 1);
+			if (!values.has(k)) values.set(k, []);
+			values.get(k).push(el[k]);
+		}
+	}
+	const keys = [...counts.keys()].sort();
+	// Same self-similar guard as the object branch: a merged node repeating itself
+	// is described once, so a tree's depth stays out of the contract.
+	const signature = keys.join(',');
+	if (keys.length >= 2 && ancestors.includes(signature)) return '↻';
+	const nested = [...ancestors, signature];
+
+	return keys
+		.map((k) => {
+			const optional = counts.get(k) === objects.length ? '' : '?';
+			const vals = values.get(k);
+			const objs = vals.filter((v) => v && typeof v === 'object' && !Array.isArray(v));
+			const shape =
+				objs.length === vals.length && objs.length > 1
+					? `{${unionOfObjects(objs, depth + 1, nested)}}`
+					: [...new Set(vals.map((v) => shapeOf(v, depth + 1, nested)))].sort().join('|');
+			return `${k}${optional}:${shape}`;
+		})
+		.join(',');
 }
 
 export function shapeOf(value, depth = 0, ancestors = []) {
@@ -138,19 +196,7 @@ export function shapeOf(value, depth = 0, ancestors = []) {
 		// element still is.
 		const objects = value.filter((v) => v && typeof v === 'object' && !Array.isArray(v));
 		if (objects.length === value.length && objects.length > 1) {
-			const counts = new Map();
-			const shapes = new Map();
-			for (const el of objects) {
-				for (const k of Object.keys(el)) {
-					counts.set(k, (counts.get(k) ?? 0) + 1);
-					if (!shapes.has(k)) shapes.set(k, shapeOf(el[k], depth + 1, ancestors));
-				}
-			}
-			const keys = [...counts.keys()].sort();
-			const inner = keys
-				.map((k) => `${k}${counts.get(k) === objects.length ? '' : '?'}:${shapes.get(k)}`)
-				.join(',');
-			return `[{${inner}}]`;
+			return `[{${unionOfObjects(objects, depth, ancestors)}}]`;
 		}
 		return `[${shapeOf(value[0], depth + 1, ancestors)}]`;
 	}
@@ -174,9 +220,23 @@ export function shapeOf(value, depth = 0, ancestors = []) {
 		const nested = [...ancestors, signature];
 
 		// A map, described by what its values look like rather than by its keys.
+		//
+		// Two cases, and only handling the first left the defect in place. Values
+		// that render identically collapse to that one shape. Values that are all
+		// objects but differ — a feature-flag table where each flag carries its own
+		// variations — are a population like an array's elements, so they merge
+		// field-wise by the same rule. Requiring them to be identical meant a real
+		// map fell through to being enumerated key by key, which is what pinned a
+		// third party's release schedule into the contract.
 		if (keys.length >= MAP_LIKE_MIN_KEYS) {
 			const valueShapes = new Set(keys.map((k) => shapeOf(value[k], depth + 1, nested)));
 			if (valueShapes.size === 1) return `{*:${[...valueShapes][0]}}`;
+			const objectValues = keys
+				.map((k) => value[k])
+				.filter((v) => v && typeof v === 'object' && !Array.isArray(v));
+			if (objectValues.length === keys.length) {
+				return `{*:{${unionOfObjects(objectValues, depth, nested)}}}`;
+			}
 		}
 		return `{${keys.map((k) => `${k}:${shapeOf(value[k], depth + 1, nested)}`).join(',')}}`;
 	}
@@ -313,10 +373,31 @@ function truncate(s, n) {
 }
 
 /** Every check for one route's response, as a list of findings. Pure. */
-export function checkResponse({ status, contentType, body, raw, baselineShape }) {
+export function checkResponse({
+	status,
+	contentType,
+	body,
+	raw,
+	baselineShape,
+	contractualStatuses = [],
+}) {
 	const findings = [];
 
-	if (status < 200 || status >= 300) {
+	// A route may declare a non-2xx status as one of its contractual answers.
+	//
+	// This is narrow on purpose, and it is not the same thing as widening what
+	// counts as success. Some resources genuinely are not always there — a live
+	// broadcast when nobody is on air — and for those, "there is no stream right
+	// now" is a complete, correct answer rather than a fault. Without this the
+	// route is permanently red, which trains a reader to skip the whole domain.
+	//
+	// The danger it would create if used loosely is real: a route that always
+	// answers its declared non-2xx passes forever while proving nothing. So the
+	// obligation travels with the declaration — the transport must be proved
+	// somewhere that IS deterministic, and the route says where. A declaration
+	// with no such sibling is a check that cannot fail.
+	const contractual = new Set(contractualStatuses);
+	if ((status < 200 || status >= 300) && !contractual.has(status)) {
 		findings.push({ check: 'status', detail: `HTTP ${status}` });
 	}
 
@@ -602,6 +683,13 @@ async function main() {
 		// GATE: a route that did not declare what the checker needs is a route the
 		// checker cannot honestly assert. Failing here rather than skipping is the
 		// point — a silently skipped route reads exactly like a passing one.
+		// Declared contractual statuses, keyed by "METHOD /path" so a probe can find
+		// its own route's declaration. Path parameters are kept as declared and
+		// matched by stem below, since a probe carries a concrete example.
+		const contractByRoute = new Map(
+			(domain.routeDetail ?? []).map((r) => [`${r.method} ${r.path}`, r.contractualStatuses ?? []]),
+		);
+
 		const missing = undeclared(domain.routeDetail ?? []);
 		if (missing.length) {
 			console.error(
@@ -648,6 +736,21 @@ async function main() {
 
 			const shape = res.body === undefined ? null : shapeOf(res.body);
 
+			// A probed target is a concrete example, so match it back to the route
+			// that declared it by method plus path stem.
+			let contractualStatuses = [];
+			for (const [declared, statuses] of contractByRoute) {
+				if (!statuses.length) continue;
+				if (!declared.startsWith(`${target.method} `)) continue;
+				const declaredPath = declared.slice(target.method.length + 1);
+				const stem = declaredPath.split('/:')[0].split('/*')[0];
+				const base = path.split('?')[0];
+				if (base === declaredPath || base === stem || base.startsWith(`${stem}/`)) {
+					contractualStatuses = statuses;
+					break;
+				}
+			}
+
 			// GATE: a failing response never becomes the expected shape.
 			//
 			// The guard above stops a domain-wide record from baking in a dead
@@ -663,7 +766,7 @@ async function main() {
 			//
 			// Reported rather than silent, because a route whose shape was refused is
 			// a route with no baseline, and that must not read like a recorded one.
-			if (recorded && shape && !isRecordableStatus(res.status)) {
+			if (recorded && shape && !isRecordableStatus(res.status, contractualStatuses)) {
 				console.error(
 					`    ⚠ not recorded: ${route} answered HTTP ${res.status}. ` +
 						`A failure is not a contract — re-record when the upstream is healthy.`,
@@ -684,6 +787,7 @@ async function main() {
 			}
 
 			const findings = checkResponse({
+				contractualStatuses,
 				status: res.status,
 				contentType: res.contentType,
 				body: res.body,

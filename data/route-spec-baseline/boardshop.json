@@ -23,6 +23,9 @@
 	"GET /api/boardshop/inventory/DECK-001": [
 		"{lastUpdated:string,sku:string,stock:number,warehouses:[{available:number,id:string,name:string}]}"
 	],
+	"GET /api/boardshop/inventory/NO-SUCH-SKU": [
+		"{error:string,found:boolean,sku:string}"
+	],
 	"GET /api/boardshop/catalog/page/1": [
 		"{currentPage:number,hasMore:boolean,items:[{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}],remaining:number,returned:number,totalCount:number}"
 	],

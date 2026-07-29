@@ -24,6 +24,10 @@
  *
  * HLS MEDIA:
  *  3. GET /stream/:login/hls       — PlaybackAccessToken → usher master playlist → variants.
+ *  3b. GET /channel/:login/vod/hls — the same chain over a recording, which persists.
+ *      Route 3 can only be exercised while somebody is broadcasting, so its
+ *      assertion is red whenever nobody is; this one proves the chain all the
+ *      way to segment bytes whether or not the channel is on air.
  *
  * WEBSOCKET:
  *  4. GET /chat/:login/tail        — Anonymous IRC-over-WS, capture N chat frames.
@@ -249,17 +253,20 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/stream/:login/hls',
-		// KNOWN LIMITATION: this example asserts against a live broadcast, so it
-		// answers 404 whenever that channel is not streaming. The route is sound —
-		// resolved against a channel taken live from the directory it returns 200,
-		// six variants, a 200 variant playlist and a real segment URL — but an
-		// assertion that depends on a third party being live right now cannot be
-		// deterministic, and no status code fixes that. Two wrong repairs to avoid:
-		// answering 200 with `live:false` makes the check pass while proving nothing
-		// about the media chain, and widening the accepted statuses does the same.
-		// The fix is a resource that persists — a VOD or a clip — whose chain is
-		// always fetchable, which needs discovery rather than an edit here.
 		examples: ['/stream/t90official/hls'],
+		// A live broadcast is not always there, so 404 is one of this route's
+		// correct answers rather than a fault: it means the channel exists and is
+		// not on air. Verified against a channel taken live from the directory, the
+		// same code answers 200 with six variants, a 200 variant playlist and a real
+		// segment URL.
+		//
+		// This declaration is only honest because route 3b exists. That route proves
+		// the identical chain — token, master, variant, segment bytes — against a
+		// recording, which persists, so the media transport is checked
+		// deterministically somewhere. Without that sibling this would be a check
+		// that cannot fail, and the two repairs to avoid remain: answering 200 with
+		// `live:false`, or accepting any status. Both pass while proving nothing.
+		contractualStatuses: [404],
 		upstream: [
 			'gql.twitch.tv/gql',
 			'usher.ttvnw.net/api/v2/channel/hls/{login}.m3u8',
@@ -343,6 +350,151 @@ export const routes: DomainRoute[] = [
 			}
 
 			return c.json({ login, live: true, variants, masterPlaylist, sampleSegment });
+		},
+	},
+
+	// ─── Route 3b: VOD HLS — the same chain over a resource that persists ──
+	//
+	// Route 3 can only be exercised while somebody is broadcasting, so its
+	// assertion is red whenever nobody is. That is a property of live media and
+	// not something a status code can fix: answering 200 with `live:false` would
+	// make the check pass while proving nothing about the media chain, which is
+	// worse than a red.
+	//
+	// A recording persists, so this route proves the identical chain — token,
+	// master playlist, variant playlist, real segment bytes — against a resource
+	// that is there whether or not the channel is on air. Two differences from the
+	// live path, both discovered rather than assumed: the token comes back under
+	// `videoPlaybackAccessToken` with `isVod: true`, and usher serves it from
+	// `/vod/{id}.m3u8` rather than the channel path. `platform: 'web'` is
+	// required — omitting it answers 200 with a GraphQL error saying the variable
+	// was null, which is the kind of failure that reads as a broken endpoint.
+	//
+	// The VOD id is resolved here rather than declared in the example, because
+	// Twitch deletes recordings on a retention schedule and a pinned id would rot
+	// into a 404 that looks like a route defect. The residual dependency is
+	// weaker and worth stating: the channel must have at least one recording.
+	{
+		method: 'GET',
+		path: '/channel/:login/vod/hls',
+		examples: ['/channel/t90official/vod/hls'],
+		upstream: [
+			'gql.twitch.tv/gql',
+			'usher.ttvnw.net/vod/{vodId}.m3u8',
+			'{cdn}.cloudfront.net/{recording}/{quality}/index-dvr.m3u8',
+		],
+		transport: 'HLS/Media',
+		description:
+			"A recording's playback chain: newest VOD for the channel → PlaybackAccessToken (isVod) → usher VOD master playlist → variants → the first segment fetched to prove the chain resolves to real media bytes.",
+		browserRequired: false,
+		handler: async (c) => {
+			const login = (c.req.param() as Record<string, string>).login;
+
+			const listRes = await gql(
+				'FilterableVideoTower_Videos',
+				{ limit: 1, channelOwnerLogin: login, broadcastType: null, videoSort: 'TIME' },
+				PERSISTED_QUERIES.filterableVideoTower,
+			);
+			if (!listRes.ok) return c.json({ error: `Video list returned ${listRes.status}` }, 502);
+			const listBody = (await listRes.json()) as {
+				data?: { user?: { videos?: { edges?: { node?: { id?: string; title?: string } }[] } } };
+			};
+			const newest = listBody.data?.user?.videos?.edges?.[0]?.node;
+			if (!newest?.id) {
+				// A channel with no recordings is a complete answer, not a fault.
+				return c.json({ login, vod: null, error: 'Channel has no available recordings' }, 404);
+			}
+
+			const tokenRes = await gql(
+				'PlaybackAccessToken',
+				{
+					isLive: false,
+					login: '',
+					isVod: true,
+					vodID: newest.id,
+					playerType: 'site',
+					platform: 'web',
+				},
+				PERSISTED_QUERIES.playbackAccessToken,
+			);
+			if (!tokenRes.ok) return c.json({ error: `Token request returned ${tokenRes.status}` }, 502);
+			const tokenBody = (await tokenRes.json()) as {
+				data?: { videoPlaybackAccessToken?: { value: string; signature: string } | null };
+			};
+			const token = tokenBody.data?.videoPlaybackAccessToken;
+			if (!token) {
+				return c.json({ login, vodId: newest.id, error: 'No playback token for this VOD' }, 404);
+			}
+
+			const qs = new URLSearchParams({
+				token: token.value,
+				sig: token.signature,
+				allow_source: 'true',
+				allow_audio_only: 'true',
+			});
+			const masterRes = await rateLimitedFetch(
+				`https://usher.ttvnw.net/vod/${encodeURIComponent(newest.id)}.m3u8?${qs}`,
+			);
+			if (!masterRes.ok) {
+				return c.json(
+					{
+						login,
+						vodId: newest.id,
+						error: `usher returned ${masterRes.status}`,
+						upstreamStatus: masterRes.status,
+					},
+					502,
+				);
+			}
+			const masterPlaylist = await masterRes.text();
+			const variants = parseMasterPlaylist(masterPlaylist);
+
+			// The bytes, not a description of them. A ranged request proves the
+			// segment is really served without pulling a whole one down — an empty
+			// address list reported as an empty inventory would be a different and
+			// wrong fact.
+			let sampleSegment: {
+				variantPlaylistStatus: number;
+				firstSegmentUrl: string | null;
+				segmentStatus: number | null;
+				segmentBytes: number | null;
+				segmentContentType: string | null;
+			} | null = null;
+			const cheapest = [...variants].sort((a, b) => a.bandwidth - b.bandwidth)[0];
+			if (cheapest) {
+				const variantRes = await rateLimitedFetch(cheapest.url);
+				const variantPlaylist = variantRes.ok ? await variantRes.text() : '';
+				const relative =
+					variantPlaylist.split('\n').find((line) => line.trim() && !line.startsWith('#')) ?? null;
+				// A VOD variant lists segments relative to its own playlist.
+				const firstSegmentUrl = relative ? new URL(relative.trim(), cheapest.url).toString() : null;
+				let segmentStatus: number | null = null;
+				let segmentBytes: number | null = null;
+				let segmentContentType: string | null = null;
+				if (firstSegmentUrl) {
+					const segRes = await rateLimitedFetch(firstSegmentUrl, {
+						headers: { Range: 'bytes=0-65535' },
+					});
+					segmentStatus = segRes.status;
+					segmentContentType = segRes.headers.get('content-type');
+					if (segRes.ok) segmentBytes = (await segRes.arrayBuffer()).byteLength;
+				}
+				sampleSegment = {
+					variantPlaylistStatus: variantRes.status,
+					firstSegmentUrl,
+					segmentStatus,
+					segmentBytes,
+					segmentContentType,
+				};
+			}
+
+			return c.json({
+				login,
+				vodId: newest.id,
+				vodTitle: newest.title ?? null,
+				variants,
+				sampleSegment,
+			});
 		},
 	},
 
