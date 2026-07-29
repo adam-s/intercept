@@ -1,0 +1,20 @@
+{
+	"GET /api/youtube/watch/jNQXAC9IVRw/state": [
+		"{bufferedTo:number,currentTime:number,duration:number,ended:boolean,height:number,muted:boolean,paused:boolean,playbackRate:number,readyState:number,video:boolean,videoId:string,volume:number,width:number}"
+	],
+	"GET /api/youtube/watch/jNQXAC9IVRw/formats": [
+		"{_note:string,directlyFetchable:number,expiresInSeconds:string,formats:[{hasCipher:boolean,hasUrl:boolean,itag:number,mimeType:string,quality:string}],playability:string,videoId:string}"
+	],
+	"GET /api/youtube/search?q=lofi": [
+		"{_transport:string,query:string,total:number,videos:[{_renderer:string,channel:string,duration:string,published:string,title:string,videoId:string,views:string}]}"
+	],
+	"GET /api/youtube/channel/UCBJycsmduvYEL83R_U4JriQ/videos": [
+		"{channelId:string,total:number,videos:[{_renderer:string,published:string,title:string,videoId:string,views:string}]}"
+	],
+	"GET /api/youtube/suggest?q=lofi": [
+		"{_transport:string,query:string,suggestions:[string],total:number}"
+	],
+	"GET /api/youtube/watch/jNQXAC9IVRw/info": [
+		"{_note:string,_transport:string,author:string,category:string,channelId:string,keywords:[string],lengthSeconds:number,publishDate:string,shortDescription:string,title:string,videoId:string,viewCount:number}"
+	]
+}

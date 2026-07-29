@@ -19,7 +19,8 @@
  */
 
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
-import { DEBUG } from '@interceptor/shared';
+import { DEBUG, rateLimitedFetch, withCompleteness } from '@interceptor/shared';
+import { innertubeBody, videoCards } from './innertube';
 
 /** Reads the player response the page was served, from the page itself. */
 const PLAYER_RESPONSE = `(() => {
@@ -171,6 +172,176 @@ export const routes: DomainRoute[] = [
 					withUrl > 0
 						? 'Some formats carry a URL and can be fetched directly.'
 						: 'No format carries a URL or a cipher. Media is negotiated over /videoplayback with UMP framing, so there is nothing to fetch or replay — use the control and state routes, which drive the player that can.',
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/search',
+		examples: ['/search?q=lofi'],
+		upstream: ['www.youtube.com/youtubei/v1/search'],
+		transport: 'JSON API (XHR)',
+		description: 'InnerTube search, called from the page so it carries the session.',
+		handler: async (c, browser) => {
+			const url = new URL(c.req.url);
+			const q = url.searchParams.get('q') ?? '';
+			if (!q) return c.json({ error: 'q is required' }, 400);
+
+			// Called from a YouTube page: the endpoint is same-origin there, the
+			// session is already held, and a request issued inside the browser
+			// carries the browser's own TLS handshake rather than the runtime's.
+			if (!browser.getUrl().includes('youtube.com')) {
+				await browser.navigate('https://www.youtube.com/');
+				await new Promise((r) => setTimeout(r, 3000));
+			}
+
+			const body = JSON.stringify(innertubeBody({ query: q }));
+			const res = (await browser.evaluate(
+				new Function(`return fetch('https://www.youtube.com/youtubei/v1/search?prettyPrint=false', {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: ${JSON.stringify(body)},
+					credentials: 'include',
+				}).then((r) => r.json().then((j) => ({ status: r.status, json: j })))
+				  .catch((e) => ({ status: 0, json: { error: String(e).slice(0, 120) } }))`) as never,
+			)) as { status?: number; json?: unknown };
+
+			if (res?.status !== 200) {
+				return c.json({ error: `Search returned ${res?.status}`, query: q }, 502);
+			}
+			const videos = videoCards(res.json);
+			return c.json(
+				withCompleteness({ query: q, videos, total: videos.length, _transport: 'innertube' }),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/channel/:channelId/videos',
+		examples: ['/channel/UCBJycsmduvYEL83R_U4JriQ/videos'],
+		upstream: ['www.youtube.com/youtubei/v1/browse'],
+		transport: 'JSON API (XHR)',
+		description: 'A channel video list through InnerTube browse.',
+		handler: async (c, browser) => {
+			const { channelId } = c.req.param() as Record<string, string>;
+			if (!browser.getUrl().includes('youtube.com')) {
+				await browser.navigate('https://www.youtube.com/');
+				await new Promise((r) => setTimeout(r, 3000));
+			}
+
+			// `params` selects the tab. This value is the videos tab, and it is a
+			// borrowed constant: YouTube may change it without notice, and a route
+			// that suddenly returns the wrong tab will look like a parsing bug.
+			const body = JSON.stringify(
+				innertubeBody({ browseId: channelId, params: 'EgZ2aWRlb3PyBgQKAjoA' }),
+			);
+			const res = (await browser.evaluate(
+				new Function(`return fetch('https://www.youtube.com/youtubei/v1/browse?prettyPrint=false', {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: ${JSON.stringify(body)},
+					credentials: 'include',
+				}).then((r) => r.json().then((j) => ({ status: r.status, json: j })))
+				  .catch((e) => ({ status: 0, json: { error: String(e).slice(0, 120) } }))`) as never,
+			)) as { status?: number; json?: unknown };
+
+			if (res?.status !== 200) {
+				return c.json({ error: `Browse returned ${res?.status}`, channelId }, 502);
+			}
+			const videos = videoCards(res.json);
+			return c.json(withCompleteness({ channelId, videos, total: videos.length }));
+		},
+	},
+	{
+		method: 'GET',
+		path: '/suggest',
+		examples: ['/suggest?q=lofi'],
+		upstream: ['suggestqueries-clients6.youtube.com/complete/search'],
+		transport: 'JSONP',
+		description: 'Autocomplete over JSONP: the response is a function call, not JSON.',
+		browserRequired: false,
+		handler: async (c) => {
+			const q = new URL(c.req.url).searchParams.get('q') ?? '';
+			if (!q) return c.json({ error: 'q is required' }, 400);
+
+			// JSONP in its strictest form: no callback parameter to name the wrapper,
+			// just a hardcoded global. Nothing in the request marks it — the response
+			// body is the only tell, which is why a scan of requests alone reports
+			// this endpoint as an ordinary script fetch.
+			const res = await rateLimitedFetch(
+				`https://suggestqueries-clients6.youtube.com/complete/search?client=youtube&ds=yt&q=${encodeURIComponent(q)}`,
+			);
+			if (!res.ok) return c.json({ error: `Suggest returned ${res.status}` }, 502);
+
+			const text = await res.text();
+			const inner = text.match(/^[^(]*\((.*)\)[;\s]*$/s)?.[1];
+			if (!inner) {
+				// The wrapper is the transport. If it is missing, the response is not
+				// what this route understands, and guessing at it would invent data.
+				return c.json(
+					{ error: 'Response was not a JSONP wrapper', preview: text.slice(0, 120) },
+					502,
+				);
+			}
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(inner);
+			} catch {
+				return c.json(
+					{ error: 'Wrapper contents were not JSON', preview: inner.slice(0, 120) },
+					502,
+				);
+			}
+
+			const rows = Array.isArray(parsed) ? ((parsed[1] as unknown[]) ?? []) : [];
+			const suggestions = rows
+				.map((r) => (Array.isArray(r) ? String(r[0] ?? '') : ''))
+				.filter(Boolean);
+			return c.json(
+				withCompleteness({ query: q, suggestions, total: suggestions.length, _transport: 'jsonp' }),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/watch/:videoId/info',
+		examples: ['/watch/jNQXAC9IVRw/info'],
+		upstream: ['www.youtube.com/watch'],
+		transport: 'Embedded JSON',
+		description: 'Video metadata read out of the page, with no API call at all.',
+		handler: async (c, browser) => {
+			const { videoId } = c.req.param() as Record<string, string>;
+			await ensureWatching(browser as never, videoId);
+
+			// Read from the markup rather than from a page global: `evaluate` runs in
+			// an isolated world that shares the DOM and not the globals, so reaching
+			// for `ytInitialPlayerResponse` directly returns undefined with nothing
+			// thrown. The script tag is common ground.
+			const res = (await browser.evaluate(new Function(`return ${PLAYER_RESPONSE}`) as never)) as {
+				found?: boolean;
+				data?: Record<string, unknown>;
+			};
+			if (!res?.found || !res.data) {
+				return c.json({ error: 'No player response embedded in the page', videoId }, 502);
+			}
+
+			const vd = res.data.videoDetails as Record<string, unknown> | undefined;
+			const micro = (
+				res.data.microformat as { playerMicroformatRenderer?: Record<string, unknown> } | undefined
+			)?.playerMicroformatRenderer;
+			return c.json({
+				videoId,
+				title: vd?.title ?? null,
+				author: vd?.author ?? null,
+				channelId: vd?.channelId ?? null,
+				lengthSeconds: vd?.lengthSeconds ? Number(vd.lengthSeconds) : null,
+				viewCount: vd?.viewCount ? Number(vd.viewCount) : null,
+				keywords: vd?.keywords ?? [],
+				shortDescription: vd?.shortDescription ?? null,
+				publishDate: micro?.publishDate ?? null,
+				category: micro?.category ?? null,
+				_transport: 'embedded-json',
+				_note: 'No API call: the page is served this payload, so the data is already here.',
 			});
 		},
 	},
