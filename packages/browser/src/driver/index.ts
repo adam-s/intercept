@@ -23,8 +23,40 @@ export {
 	isTelemetry,
 	parseBody,
 } from './capture-filter.js';
+export {
+	DRAIN_SOURCE,
+	EGRESS_GLOBAL,
+	type EgressEvent,
+	type EgressKind,
+	INSTRUMENT_LIMITS,
+	INSTRUMENT_SOURCE,
+} from './instrument.js';
+export {
+	isDestructive,
+	runSweep,
+	SWEEP_LIMITS,
+	type SweepAction,
+	type SweepLimits,
+	sweepPlan,
+} from './interaction-sweep.js';
+export {
+	buildManifest,
+	deriveTransports,
+	MANIFEST_LIMITS,
+	type ManifestRow,
+	parseTarget,
+	renderManifest,
+	renderTransports,
+	shapeOfBody,
+	type TransportVerdict,
+	templateSegment,
+} from './manifest.js';
 export { patchrightDriver } from './patchright-driver.js';
-export { startTrafficCapture } from './traffic-capture.js';
+export {
+	drainEgressEvents,
+	installEgressInstrument,
+	startTrafficCapture,
+} from './traffic-capture.js';
 export type {
 	BrowserDriver,
 	CapturedRequest,

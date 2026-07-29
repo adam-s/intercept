@@ -26,6 +26,7 @@
 
 import { DEBUG } from '@interceptor/shared';
 import { captureDecision, header, parseBody } from './capture-filter.js';
+import { DRAIN_SOURCE, type EgressEvent, INSTRUMENT_SOURCE } from './instrument.js';
 import type { DriverPage, NetworkCaptureCallback } from './types.js';
 
 /** Playwright's request surface, structurally — avoids binding to one engine's types. */
@@ -161,4 +162,59 @@ export function startTrafficCapture(
 	return () => {
 		stopped = true;
 	};
+}
+
+/**
+ * Install the egress instrument so it runs before any page script, in every
+ * frame, on every navigation.
+ *
+ * `addInitScript` is what makes this work at all: patching after load loses
+ * every call a bundle made while starting up, and startup is exactly when a
+ * page opens its sockets and fetches its first payloads. Installing per
+ * navigation rather than once per page matters for the same reason — a
+ * client-side route change that remounts the app re-runs that startup.
+ *
+ * Best-effort by design. An engine that rejects init scripts still gets wire
+ * capture, and degraded capture beats a session that refuses to start.
+ */
+export async function installEgressInstrument(page: DriverPage): Promise<boolean> {
+	// biome-ignore lint/suspicious/noExplicitAny: addInitScript is engine-level, not on the structural page type
+	const p = page as any;
+	try {
+		await p.addInitScript?.(INSTRUMENT_SOURCE);
+		// The current document already exists and missed the init hook, so patch it
+		// too; the instrument is idempotent, which is what makes this safe.
+		await p.evaluate?.(INSTRUMENT_SOURCE).catch(() => {});
+		return true;
+	} catch (err) {
+		DEBUG('traffic-capture', `instrument install failed: ${String(err)}`);
+		return false;
+	}
+}
+
+/**
+ * Drain buffered egress events from every frame.
+ *
+ * Frames are drained individually because an iframe has its own global, and a
+ * cross-origin one is where embedded players and checkout widgets do their
+ * work — draining only the main frame reports those transports as absent.
+ */
+export async function drainEgressEvents(page: DriverPage): Promise<EgressEvent[]> {
+	// biome-ignore lint/suspicious/noExplicitAny: frames() is engine-level
+	const p = page as any;
+	const out: EgressEvent[] = [];
+	const targets: unknown[] = typeof p.frames === 'function' ? p.frames() : [page];
+
+	for (const frame of targets.length ? targets : [page]) {
+		try {
+			// biome-ignore lint/suspicious/noExplicitAny: structural frame
+			const events = (await (frame as any).evaluate(DRAIN_SOURCE)) as EgressEvent[];
+			if (Array.isArray(events)) out.push(...events);
+		} catch (err) {
+			// A detached or cross-origin frame that refuses evaluation is a gap, not
+			// a failure; the frames that did answer are still worth reporting.
+			DEBUG('traffic-capture', `frame drain skipped: ${String(err).slice(0, 80)}`);
+		}
+	}
+	return out;
 }
