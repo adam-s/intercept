@@ -3,9 +3,12 @@
  *
  * Four sites simulate different real-world transport patterns:
  * - /sites/boardshop/  — E-commerce: embedded JSON, pagination, CSRF, DOM elements
- * - /sites/liveboard/  — Real-time: WebSocket protobuf, SSE, crumb auth
+ * - /sites/liveboard/  — Real-time: WebSocket protobuf and JSON, crumb auth
  * - /sites/streamshop/ — Media: GraphQL, HLS streams, IRC chat
  * - /sites/databoard/  — API-heavy: gRPC-Web, encoded APIs, Bearer auth
+ * - /sites/newsboard/  — Modern front end: SSE, long-poll, data in HTML
+ *                        attributes, HTML fragments, worker and service-worker
+ *                        scope, cross-frame RPC, beacons
  * - /sites/benchmark/  — Calibration: one call per egress primitive, on load
  */
 
@@ -20,6 +23,7 @@ import { createBoardshopSite } from './sites/boardshop';
 import { createDataboardSite } from './sites/databoard';
 import { createHcaptchaSite } from './sites/hcaptcha';
 import { createLiveboardSite } from './sites/liveboard';
+import { createNewsboardSite } from './sites/newsboard';
 import { createStreamshopSite } from './sites/streamshop';
 import { createTurnstileSite } from './sites/turnstile';
 import { handleWSUpgrade, type WSRoute } from './transports/websocket';
@@ -38,6 +42,7 @@ const SITES = [
 	'benchmark',
 	'boardshop',
 	'liveboard',
+	'newsboard',
 	'streamshop',
 	'databoard',
 	'turnstile',
@@ -76,6 +81,7 @@ export async function createTestServer(
 	app.route('/sites/benchmark', createBenchmarkSite());
 	app.route('/sites/boardshop', createBoardshopSite());
 	app.route('/sites/liveboard', createLiveboardSite());
+	app.route('/sites/newsboard', createNewsboardSite());
 	app.route('/sites/streamshop', createStreamshopSite());
 	app.route('/sites/databoard', createDataboardSite());
 	app.route('/sites/turnstile', createTurnstileSite());
@@ -83,9 +89,18 @@ export async function createTestServer(
 
 	// Create HTTP server
 	const httpServer = createServer(async (req, res) => {
-		// Normalize: strip trailing slash (except root) so Hono routing matches consistently
-		let url = req.url ?? '/';
-		if (url.length > 1 && url.endsWith('/')) url = url.slice(0, -1);
+		// Normalize: strip a trailing slash (except root) so Hono routing matches
+		// consistently. Split the query off first — testing `endsWith('/')` on the
+		// whole URL never fires once there is a query string, so `/catalog/?q=x`
+		// stayed unnormalized and 404'd while `/catalog?q=x` worked. A caller
+		// reads that as "this endpoint has no search" rather than as a routing
+		// quirk, which is the kind of wrong conclusion a fixture must not teach.
+		const raw = req.url ?? '/';
+		const q = raw.indexOf('?');
+		let path = q === -1 ? raw : raw.slice(0, q);
+		const search = q === -1 ? '' : raw.slice(q);
+		if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
+		const url = path + search;
 
 		const response = await app.fetch(
 			new Request(`http://localhost${url}`, {

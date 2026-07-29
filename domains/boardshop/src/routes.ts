@@ -151,6 +151,7 @@ const STREAMSHOP_URL = 'http://localhost:4444/sites/streamshop';
 const DATABOARD_URL = 'http://localhost:4444/sites/databoard';
 const TURNSTILE_URL = 'http://localhost:4444/sites/turnstile';
 const HCAPTCHA_URL = 'http://localhost:4444/sites/hcaptcha';
+const NEWSBOARD_URL = 'http://localhost:4444/sites/newsboard';
 
 /** Helper: extract <script id="X" type="application/json"> from HTML */
 function extractScript(html: string, id: string): unknown | null {
@@ -188,6 +189,7 @@ export const routes: DomainRoute[] = [
 		path: '/catalog',
 		examples: ['/catalog', '/catalog?q=deck'],
 		upstream: ['localhost:4444/sites/boardshop/'],
+		transport: 'Embedded JSON',
 		description: 'Product catalog via embedded JSON extraction.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -231,6 +233,7 @@ export const routes: DomainRoute[] = [
 		path: '/product/:sku',
 		examples: ['/product/DECK-001'],
 		upstream: ['localhost:4444/sites/boardshop/product/{sku}'],
+		transport: 'Embedded JSON',
 		description: 'Product detail via embedded JSON extraction.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -256,6 +259,7 @@ export const routes: DomainRoute[] = [
 		path: '/availability',
 		examples: ['/availability', '/availability?category=decks'],
 		upstream: ['localhost:4444/sites/boardshop/api/availability'],
+		transport: 'JSON API (XHR)',
 		description: 'Escalation: direct HTTP → browserFetch on 429.',
 		handler: async (c, browser) => {
 			const category = new URL(c.req.url).searchParams.get('category') ?? '';
@@ -282,6 +286,7 @@ export const routes: DomainRoute[] = [
 		path: '/reviews',
 		examples: ['/reviews?limit=5'],
 		upstream: ['localhost:4444/sites/boardshop/reviews'],
+		transport: 'JSON API (XHR)',
 		description: 'Cursor-paginated reviews via direct JSON API.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -305,6 +310,7 @@ export const routes: DomainRoute[] = [
 		path: '/products',
 		examples: ['/products?page=1'],
 		upstream: ['localhost:4444/sites/boardshop/api/products'],
+		transport: 'JSON API (XHR)',
 		description: 'Products via JSON API with X-API-Key header.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -334,6 +340,7 @@ export const routes: DomainRoute[] = [
 		path: '/inventory/:sku',
 		examples: ['/inventory/DECK-001'],
 		upstream: ['localhost:4444/sites/boardshop/api/inventory/{sku}'],
+		transport: 'JSON API (XHR)',
 		description: 'Warehouse inventory with custom headers discovered from traffic.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -358,6 +365,7 @@ export const routes: DomainRoute[] = [
 		path: '/catalog/page/:page',
 		examples: ['/catalog/page/1', '/catalog/page/2'],
 		upstream: ['localhost:4444/sites/boardshop/'],
+		transport: 'Form-encoded POST',
 		description: 'POST pagination with CSRF + session token extraction.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -406,6 +414,7 @@ export const routes: DomainRoute[] = [
 		path: '/graphql-example',
 		examples: ['/graphql-example'],
 		upstream: ['localhost:4444/sites/streamshop/gql'],
+		transport: 'GraphQL',
 		description: 'GraphQL query via streamshop. Client-ID from page source.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -443,6 +452,7 @@ export const routes: DomainRoute[] = [
 			'localhost:4444/sites/streamshop/stream/token',
 			'localhost:4444/sites/streamshop/stream/master.m3u8',
 		],
+		transport: 'HLS/Media',
 		description: 'HLS stream: token → master playlist → quality variants.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -495,6 +505,7 @@ export const routes: DomainRoute[] = [
 			'localhost:4444/sites/databoard/api/products',
 			'localhost:4444/sites/databoard/api/auth/token',
 		],
+		transport: 'gRPC-Web',
 		description: 'Base64-encoded JSON API with Bearer auth.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -522,6 +533,7 @@ export const routes: DomainRoute[] = [
 		path: '/msgpack-example',
 		examples: ['/msgpack-example'],
 		upstream: ['localhost:4444/sites/databoard/api/stats'],
+		transport: 'Encoded/Binary',
 		description: 'MessagePack binary response with Bearer auth.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -550,8 +562,9 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/crumb-example',
-		examples: ['/crumb-example?symbol=DECK'],
+		examples: ['/crumb-example?symbol=DECK-001'],
 		upstream: ['localhost:4444/sites/liveboard/api/quote/{symbol}'],
+		transport: 'JSON API (XHR)',
 		description: 'Crumb-authenticated REST API. Token from embedded JSON.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -587,6 +600,7 @@ export const routes: DomainRoute[] = [
 		path: '/ws-json-example',
 		examples: ['/ws-json-example'],
 		upstream: ['ws://localhost:4444/sites/liveboard/ws/json'],
+		transport: 'WebSocket',
 		description: 'WebSocket JSON: capture N real-time price updates.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -634,6 +648,7 @@ export const routes: DomainRoute[] = [
 		path: '/ws-protobuf-example',
 		examples: ['/ws-protobuf-example'],
 		upstream: ['ws://localhost:4444/sites/liveboard/stream'],
+		transport: 'WebSocket',
 		description: 'WebSocket protobuf: capture base64-wrapped binary frames.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -694,6 +709,7 @@ export const routes: DomainRoute[] = [
 		path: '/nextjs-example',
 		examples: ['/nextjs-example'],
 		upstream: ['localhost:4444/sites/boardshop/nextjs'],
+		transport: 'Embedded JSON',
 		description: '__NEXT_DATA__ extraction: navigate Redux RTK Query state tree.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -733,6 +749,7 @@ export const routes: DomainRoute[] = [
 		path: '/deferred-example',
 		examples: ['/deferred-example'],
 		upstream: ['localhost:4444/sites/boardshop/deferred'],
+		transport: 'Embedded JSON',
 		description: 'Deferred state extraction: deep nested array structure.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -771,6 +788,7 @@ export const routes: DomainRoute[] = [
 		path: '/method-example',
 		examples: ['/method-example'],
 		upstream: ['localhost:4444/sites/boardshop/methods'],
+		transport: 'JSON API (XHR)',
 		description: 'POST ?method= dispatch: same URL, different operations.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -805,6 +823,7 @@ export const routes: DomainRoute[] = [
 		path: '/cursor-example',
 		examples: ['/cursor-example'],
 		upstream: ['localhost:4444/sites/boardshop/catalog/cursor'],
+		transport: 'JSON API (XHR)',
 		description: 'Base64 cursor pagination: decode/re-encode cursor tokens.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -833,6 +852,7 @@ export const routes: DomainRoute[] = [
 			'localhost:4444/sites/boardshop/api/chart/{sku}',
 			'localhost:4444/sites/boardshop/product/{sku}',
 		],
+		transport: 'JSON API (XHR)',
 		description: 'Rate-limited chart: tries API first, falls back to embedded JSON.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -882,6 +902,7 @@ export const routes: DomainRoute[] = [
 		path: '/hydrated-example',
 		examples: ['/hydrated-example'],
 		upstream: ['localhost:4444/sites/boardshop/hydrated'],
+		transport: 'Embedded JSON',
 		description: 'Hydrated page: script tags stripped by JS. Use raw HTTP, not DOM.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -911,6 +932,7 @@ export const routes: DomainRoute[] = [
 		path: '/sveltekit-example',
 		examples: ['/sveltekit-example'],
 		upstream: ['localhost:4444/sites/boardshop/sveltekit'],
+		transport: 'Embedded JSON',
 		description: 'SvelteKit fetched data: JSON-wrapped responses with double parse.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -952,6 +974,7 @@ export const routes: DomainRoute[] = [
 		path: '/jsonp-example',
 		examples: ['/jsonp-example?q=deck'],
 		upstream: ['localhost:4444/sites/boardshop/api/suggest'],
+		transport: 'JSONP',
 		description: 'JSONP: strip callback wrapper to parse JSON.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -986,6 +1009,7 @@ export const routes: DomainRoute[] = [
 		path: '/captions-example/:sku',
 		examples: ['/captions-example/DECK-001?lang=en'],
 		upstream: ['localhost:4444/sites/boardshop/api/captions/{sku}'],
+		transport: 'Encoded/Binary',
 		description: 'Captions: structured timed text from media endpoint.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1010,6 +1034,7 @@ export const routes: DomainRoute[] = [
 		path: '/notifications-example',
 		examples: ['/notifications-example'],
 		upstream: ['ws://localhost:4444/sites/boardshop/ws/notifications'],
+		transport: 'WebSocket',
 		description: 'PubSub WS: capture push notifications.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1058,6 +1083,7 @@ export const routes: DomainRoute[] = [
 		path: '/gql-subscription-example',
 		examples: ['/gql-subscription-example'],
 		upstream: ['ws://localhost:4444/sites/boardshop/ws/subscriptions'],
+		transport: 'WebSocket',
 		description: 'GraphQL subscription over WebSocket (graphql-ws protocol).',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1122,6 +1148,7 @@ export const routes: DomainRoute[] = [
 		path: '/binary-ws-example',
 		examples: ['/binary-ws-example'],
 		upstream: ['ws://localhost:4444/sites/boardshop/ws/binary'],
+		transport: 'WebSocket',
 		description: 'Custom binary WebSocket: decode frame header + payload.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1176,6 +1203,7 @@ export const routes: DomainRoute[] = [
 		path: '/rss-example',
 		examples: ['/rss-example'],
 		upstream: ['localhost:4444/sites/boardshop/rss'],
+		transport: 'HTML-over-the-wire',
 		description: 'RSS feed: parse XML with cheerio.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1217,6 +1245,7 @@ export const routes: DomainRoute[] = [
 		path: '/ssr-example',
 		examples: ['/ssr-example'],
 		upstream: ['localhost:4444/sites/boardshop/ssr'],
+		transport: 'HTML-over-the-wire',
 		description: 'SSR HTML: parse table rows with cheerio.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1260,6 +1289,7 @@ export const routes: DomainRoute[] = [
 		path: '/formdata-search-example',
 		examples: ['/formdata-search-example?q=deck'],
 		upstream: ['localhost:4444/sites/boardshop/search/form'],
+		transport: 'Form-encoded POST',
 		description: 'FormData POST: multipart search request.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1296,6 +1326,7 @@ export const routes: DomainRoute[] = [
 			'localhost:4444/sites/boardshop/drops',
 			'localhost:4444/sites/boardshop/drops/api/inventory',
 		],
+		transport: 'JSON API (XHR)',
 		description: 'SessionHarvester (httpOnly cookie): httpOnly cookie + correlation header.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1374,6 +1405,7 @@ export const routes: DomainRoute[] = [
 		path: '/resale/listings',
 		examples: ['/resale/listings'],
 		upstream: ['localhost:4444/sites/boardshop/resale'],
+		transport: 'JSON API (XHR)',
 		description: 'SessionHarvester (WAF + POST): WAF + session cookies + POST pagination.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1469,6 +1501,7 @@ export const routes: DomainRoute[] = [
 			'localhost:4444/sites/boardshop/collection/{id}',
 			'localhost:4444/sites/boardshop/api/collection/{id}/listings',
 		],
+		transport: 'JSON API (XHR)',
 		description: 'Encoded pricing: session harvest + indirect price refs + JS decode + pagination.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1606,6 +1639,7 @@ export const routes: DomainRoute[] = [
 		path: '/resale/all',
 		examples: ['/resale/all'],
 		upstream: ['localhost:4444/sites/boardshop/resale'],
+		transport: 'JSON API (XHR)',
 		description: 'Click-intercept: Patchright clicks "Load More", intercepts POST responses.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1703,6 +1737,7 @@ export const routes: DomainRoute[] = [
 		path: '/captcha-turnstile',
 		examples: ['/captcha-turnstile'],
 		upstream: ['localhost:4444/sites/turnstile/'],
+		transport: 'JSON API (XHR)',
 		description: 'Captcha-gated form: mint Turnstile-shape token in browser, submit, verify.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1792,6 +1827,7 @@ export const routes: DomainRoute[] = [
 		path: '/captcha-hcaptcha',
 		examples: ['/captcha-hcaptcha'],
 		upstream: ['localhost:4444/sites/hcaptcha/'],
+		transport: 'JSON API (XHR)',
 		description: 'Captcha-gated send: capture P1_-shape token via postMessage, replay in header.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1896,6 +1932,335 @@ export const routes: DomainRoute[] = [
 				const msg = err instanceof Error ? err.message : String(err);
 				return c.json({ error: msg }, 502);
 			}
+		},
+	},
+	// ─── Transports a JSON-first scan reports as absent ──────────────────
+	// Each of the seven routes below consumes a transport the elimination table
+	// asks a verdict on and nothing here used to demonstrate. They exist to be
+	// read: a row is only answerable by someone who knows what it looks like
+	// when present.
+	{
+		method: 'GET',
+		path: '/sse-example',
+		examples: ['/sse-example'],
+		upstream: ['localhost:4444/sites/newsboard/live/points'],
+		transport: 'SSE',
+		description: 'Server-Sent Events. Reads an event stream to completion and returns the events.',
+		browserRequired: false,
+		handler: async (c) => {
+			// SSE is a plain GET at the wire — same method, same status, and a body
+			// that arrives in pieces. Only the content type and the framing tell it
+			// apart, which is why a capture that classifies by method alone files
+			// this under "a slow JSON endpoint" and the row reads absent.
+			const res = await rateLimitedFetch(`${NEWSBOARD_URL}/live/points`, {
+				headers: { accept: 'text/event-stream' },
+			});
+			if (!res.ok) return c.json({ error: `Stream returned ${res.status}` }, 502);
+
+			const contentType = res.headers.get('content-type') ?? '';
+			if (!contentType.includes('text/event-stream')) {
+				// A server that answered with JSON did not give us the transport we
+				// asked for, and reporting its body as stream events would be a lie.
+				return c.json({ error: `Expected text/event-stream, got ${contentType}` }, 502);
+			}
+
+			// Frames are separated by a blank line; each carries optional `event:`
+			// and one or more `data:` lines.
+			const events = (await res.text())
+				.split('\n\n')
+				.filter(Boolean)
+				.map((frame) => {
+					const name = frame.match(/^event: (.+)$/m)?.[1] ?? 'message';
+					const data = [...frame.matchAll(/^data: (.*)$/gm)].map((m) => m[1]).join('\n');
+					let parsed: unknown = data;
+					try {
+						parsed = JSON.parse(data);
+					} catch {
+						/* a non-JSON frame is still an event */
+					}
+					return { event: name, data: parsed };
+				});
+
+			// The helper derives the signal from the body, so the body has to carry the
+			// indicated total for it to have anything to compare against.
+			return c.json(withCompleteness({ events, total: events.length }));
+		},
+	},
+	{
+		method: 'GET',
+		path: '/longpoll-example',
+		examples: ['/longpoll-example'],
+		upstream: ['localhost:4444/sites/newsboard/poll/updates'],
+		transport: 'JSON API (XHR)',
+		description: 'Long-poll. A GET that represents a stream, one round at a time.',
+		browserRequired: false,
+		handler: async (c) => {
+			// The trap this exists to teach: a long-poll is a GET returning JSON, so
+			// every scan classifies it as an ordinary endpoint and "no WebSocket"
+			// gets written down as "no realtime". What marks it is the loop — the
+			// response says to ask again, and the client immediately does.
+			const rounds = Math.min(Number(c.req.query('rounds') ?? '2'), 5);
+			const updates: unknown[] = [];
+			let since: string | null = null;
+
+			for (let i = 0; i < rounds; i++) {
+				const url = `${NEWSBOARD_URL}/poll/updates${since ? `?since=${encodeURIComponent(since)}` : ''}`;
+				const res = await rateLimitedFetch(url);
+				if (!res.ok) return c.json({ error: `Poll returned ${res.status}` }, 502);
+				const body = (await res.json()) as { updates?: unknown[]; reconnect?: boolean };
+				updates.push(...(body.updates ?? []));
+				since = String(Date.now());
+				if (!body.reconnect) break;
+			}
+
+			return c.json({ updates, rounds, _pattern: 'long-poll: response invites the next request' });
+		},
+	},
+	{
+		method: 'GET',
+		path: '/fragment-example',
+		examples: ['/fragment-example?page=2'],
+		upstream: ['localhost:4444/sites/newsboard/fragment/stories'],
+		transport: 'HTML-over-the-wire',
+		description: 'HTML fragment response. The body is markup meant for the DOM, not JSON.',
+		browserRequired: false,
+		handler: async (c) => {
+			const page = Number(c.req.query('page') ?? '2');
+			const res = await rateLimitedFetch(`${NEWSBOARD_URL}/fragment/stories?page=${page}`);
+			if (!res.ok) return c.json({ error: `Fragment returned ${res.status}` }, 502);
+
+			// The response is markup, so the data has to be read out of attributes.
+			// A JSON-shaped scan finds no payload here and files the endpoint as a
+			// page rather than as data — the row's whole failure mode.
+			const html = await res.text();
+			const items = [...html.matchAll(/<news-story\b([^>]*)>/g)].map((m) => {
+				const attrs: Record<string, string> = {};
+				for (const a of m[1].matchAll(/([\w-]+)="([^"]*)"/g)) attrs[a[1]] = a[2];
+				return attrs;
+			});
+
+			return c.json(withCompleteness({ items, total: items.length }));
+		},
+	},
+	{
+		method: 'GET',
+		path: '/attributes-example',
+		examples: ['/attributes-example'],
+		upstream: ['localhost:4444/sites/newsboard/'],
+		transport: 'Embedded JSON',
+		description: 'Server-rendered data held in HTML attributes rather than a JSON blob.',
+		browserRequired: false,
+		handler: async (c) => {
+			// Distinct from every other embedded shape: there is no script tag and no
+			// hydration payload. The record is spread across attributes on a custom
+			// element, so a scan looking for `__NEXT_DATA__` or an application/json
+			// block reports the page as carrying no data while every field is present.
+			const res = await rateLimitedFetch(`${NEWSBOARD_URL}/`);
+			if (!res.ok) return c.json({ error: `Page returned ${res.status}` }, 502);
+			const html = await res.text();
+
+			const stories = [...html.matchAll(/<news-story\b([^>]*)>/g)].map((m) => {
+				const a: Record<string, string> = {};
+				for (const kv of m[1].matchAll(/([\w-]+)="([^"]*)"/g)) a[kv[1]] = kv[2];
+				return {
+					id: Number(a['story-id']),
+					title: a['data-title'],
+					author: a.author,
+					points: Number(a.points),
+					comments: Number(a['comment-count']),
+				};
+			});
+
+			return c.json(
+				withCompleteness({ stories, total: stories.length, _pattern: 'data-in-attributes' }),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/worker-example',
+		examples: ['/worker-example'],
+		upstream: [
+			'localhost:4444/sites/newsboard/worker.js',
+			'localhost:4444/sites/newsboard/api/trending',
+		],
+		transport: 'Worker-scoped',
+		description: 'Traffic a worker makes from its own scope, reached by reading its source.',
+		browserRequired: false,
+		handler: async (c) => {
+			// A worker gets its own global scope, so nothing patched in the page sees
+			// its requests and capture attributes them to no initiator. The way in is
+			// the worker source itself: read the endpoints out of it, then call them.
+			const src = await (await rateLimitedFetch(`${NEWSBOARD_URL}/worker.js`)).text();
+			const endpoints = [...src.matchAll(/fetch\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
+			if (!endpoints.length) {
+				return c.json({ error: 'Worker source declared no endpoints' }, 502);
+			}
+
+			const results = [];
+			for (const path of endpoints) {
+				const res = await rateLimitedFetch(new URL(path, `${NEWSBOARD_URL}/`).toString());
+				results.push({ endpoint: path, status: res.status, data: await res.json() });
+			}
+
+			return c.json({ endpoints, results, _pattern: 'worker-source-to-endpoint' });
+		},
+	},
+	{
+		method: 'GET',
+		path: '/crossframe-example',
+		examples: ['/crossframe-example'],
+		upstream: [
+			'localhost:4444/sites/newsboard/widget',
+			'localhost:4444/sites/newsboard/api/trending',
+		],
+		transport: 'Cross-frame RPC',
+		description: 'An iframe that fetches on the page behalf and replies over postMessage.',
+		browserRequired: false,
+		handler: async (c) => {
+			// The host page never calls the API — the frame does, and answers over
+			// postMessage. Watching the top frame shows a message with no request
+			// behind it, so the endpoint looks like it does not exist. The frame
+			// source is where it becomes visible.
+			const src = await (await rateLimitedFetch(`${NEWSBOARD_URL}/widget`)).text();
+			const endpoint = src.match(/fetch\(\s*['"]([^'"]+)['"]/)?.[1];
+			if (!endpoint) return c.json({ error: 'Frame source declared no endpoint' }, 502);
+
+			const res = await rateLimitedFetch(new URL(endpoint, `${NEWSBOARD_URL}/`).toString());
+			if (!res.ok) return c.json({ error: `Frame endpoint returned ${res.status}` }, 502);
+
+			return c.json({
+				frame: '/widget',
+				endpoint,
+				data: await res.json(),
+				_pattern: 'iframe-fetches-parent-receives',
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/beacon-example',
+		examples: ['/beacon-example'],
+		upstream: ['localhost:4444/sites/newsboard/collect', 'localhost:4444/sites/newsboard/px.gif'],
+		transport: 'Beacon/Telemetry',
+		description: 'Outbound telemetry. Reported so a coverage count can explain it, not consume it.',
+		browserRequired: false,
+		handler: async (c) => {
+			// Beacons carry data out rather than fetching it in, so there is nothing
+			// here to wrap in a route. They earn a row anyway: every one shows up in
+			// a capture, and an endpoint left unexplained reads as a coverage gap.
+			// Naming them is what keeps the recall number honest.
+			const probes = [
+				{ endpoint: '/collect', method: 'POST', kind: 'sendBeacon' },
+				{ endpoint: '/px.gif', method: 'GET', kind: 'image-pixel' },
+			];
+			const observed = [];
+			for (const p of probes) {
+				const res = await rateLimitedFetch(`${NEWSBOARD_URL}${p.endpoint}`, {
+					method: p.method,
+					...(p.method === 'POST' ? { body: 'probe=1' } : {}),
+				});
+				observed.push({ ...p, status: res.status, carriesData: false });
+			}
+			return c.json({
+				telemetry: observed,
+				_pattern: 'egress-not-ingress',
+				_note:
+					'Telemetry endpoints are explained in the coverage diff, never wrapped as data routes.',
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/peer-example',
+		examples: ['/peer-example'],
+		upstream: ['localhost:4444/sites/newsboard/'],
+		transport: 'WebRTC',
+		description:
+			'Peer transports the page constructs. Reports the attempt, never fakes a connection.',
+		browserRequired: false,
+		handler: async (c) => {
+			// WebRTC and WebTransport need a signalling peer and an HTTP/3 endpoint,
+			// neither of which exists here — and neither can be reached from a server
+			// anyway. The elimination row asks what the page reached for, and that is
+			// answerable from the source. Reporting the construction is the honest
+			// result; returning invented channel data would not be.
+			const html = await (await rateLimitedFetch(`${NEWSBOARD_URL}/`)).text();
+			const constructed = [
+				{
+					api: 'RTCPeerConnection',
+					transport: 'WebRTC',
+					present: /new RTCPeerConnection/.test(html),
+				},
+				{ api: 'WebTransport', transport: 'WebTransport', present: /new WebTransport/.test(html) },
+			];
+			return c.json({
+				constructed,
+				connected: false,
+				_pattern: 'construction-observed-not-connection',
+				_note:
+					'A peer transport is verdicted from what the page constructs; the session itself is out of reach from a route.',
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/webtransport-example',
+		examples: ['/webtransport-example'],
+		upstream: ['localhost:4444/sites/newsboard/'],
+		transport: 'WebTransport',
+		description: 'WebTransport the page constructs. Reports the attempt, never fakes a session.',
+		browserRequired: false,
+		handler: async (c) => {
+			// WebTransport needs HTTP/3, which no route can speak and this fixture
+			// does not serve. That makes the row answerable only from what the page
+			// reached for — and answering it that way is the correct outcome, not a
+			// degraded one. Give-up is a reported result; invented stream data is not.
+			const html = await (await rateLimitedFetch(`${NEWSBOARD_URL}/`)).text();
+			const constructed = /new WebTransport/.test(html);
+			return c.json({
+				api: 'WebTransport',
+				constructed,
+				connected: false,
+				reason: constructed
+					? 'Page constructs a WebTransport; the session needs HTTP/3 and is out of reach from a route.'
+					: 'Page never constructs a WebTransport.',
+				_pattern: 'construction-observed-not-connection',
+			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/serviceworker-example',
+		examples: ['/serviceworker-example'],
+		upstream: ['localhost:4444/sites/newsboard/sw.js'],
+		transport: 'Service Worker',
+		description: 'Which requests a service worker shadows, read from its source.',
+		browserRequired: false,
+		handler: async (c) => {
+			// A registered service worker can answer a fetch from cache, so a request
+			// the page makes may never reach the network at all. Capture then shows a
+			// gap that looks like the endpoint does not exist. Reading the worker
+			// source says which URLs it intercepts, which is what turns that gap into
+			// an explanation.
+			const res = await rateLimitedFetch(`${NEWSBOARD_URL}/sw.js`);
+			if (!res.ok) return c.json({ error: `Worker source returned ${res.status}` }, 502);
+			const src = await res.text();
+
+			const handlesFetch = /addEventListener\(\s*['"]fetch['"]/.test(src);
+			const cached = [...src.matchAll(/cache\.(?:add|put|match)\(\s*['"]([^'"]+)['"]/g)].map(
+				(m) => m[1],
+			);
+
+			return c.json({
+				source: '/sw.js',
+				handlesFetch,
+				cachedRoutes: cached,
+				_pattern: 'service-worker-shadows-the-network',
+				_note: handlesFetch
+					? 'This worker intercepts fetch, so a captured gap may be a cache hit rather than a missing endpoint.'
+					: 'This worker does not intercept fetch; captured traffic is complete.',
+			});
 		},
 	},
 ];

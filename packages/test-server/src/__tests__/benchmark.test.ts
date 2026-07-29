@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { OBSERVABLE_TRANSPORTS } from '../../../browser/src/driver/manifest.js';
+import { createTestServer } from '../index';
 import {
 	BENCHMARK_PRIMITIVES,
 	BENCHMARK_TRANSPORTS,
@@ -100,5 +101,26 @@ describe('the endpoints answer', () => {
 	// case the Worker-scoped row exists to flag, so the script must really call.
 	it('serves a worker that makes its own request', async () => {
 		expect(await (await app.request('/worker.js')).text()).toContain('fetch(');
+	});
+});
+
+// Not about the benchmark, but about the server that serves it: a fixture whose
+// routing drops a legitimate request teaches a wrong conclusion. `/x/?q=1`
+// 404'd while `/x?q=1` worked, because the trailing-slash normalization tested
+// the whole URL and a query string means it never ends with a slash.
+describe('the server normalizes a trailing slash even with a query string', () => {
+	it.each([
+		['/sites/boardshop/?q=deck', 200],
+		['/sites/boardshop?q=deck', 200],
+		['/sites/boardshop/', 200],
+		['/sites/newsboard/?page=2', 200],
+	])('%s responds %i', async (path, status) => {
+		const server = await createTestServer();
+		try {
+			const res = await fetch(`${server.url}${path}`);
+			expect(res.status).toBe(status);
+		} finally {
+			await server.close();
+		}
 	});
 });

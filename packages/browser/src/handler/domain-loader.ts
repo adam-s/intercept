@@ -28,6 +28,19 @@ import type { InterceptorConfig, VerificationResult } from '../shared/config.js'
 import type { GenericInterceptor } from '../shared/interceptor.js';
 
 /**
+ * A transport class, named exactly as the elimination table names it.
+ *
+ * Deliberately a bare string rather than a union of the seventeen current row
+ * names. The canonical list lives with the scanner that detects them, in plain
+ * JavaScript that this TypeScript cannot import at build time, and duplicating
+ * it here would create the two-lists drift this project keeps paying for. A
+ * repo-level test reconciles what routes declare against that canonical list,
+ * so a typo fails CI rather than the compiler — a worse error message, but one
+ * list instead of two.
+ */
+export type TransportName = string;
+
+/**
  * A single API route that can be proxied through the browser.
  *
  * Two dispatch modes:
@@ -49,6 +62,8 @@ export type DomainRoute =
 			examples?: string[];
 			/** Upstream endpoints this route consumes. See `upstream` on the handler variant. */
 			upstream?: string[];
+			/** Transport class this route consumes. See `transport` on the handler variant. */
+			transport?: TransportName;
 	  }
 	| {
 			method: 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -82,6 +97,21 @@ export type DomainRoute =
 			 * the noise. Declaring it makes the recall number mean something.
 			 */
 			upstream?: string[];
+			/**
+			 * Transport class this route consumes — one of the elimination table's
+			 * row names, e.g. `'GraphQL'` or `'SSE'`.
+			 *
+			 * The elimination table records which transports a site has; this records
+			 * which of them a route actually consumes, so the two can be compared. A
+			 * transport marked present with no route naming it is either an
+			 * unfinished discovery or a row that was never really there, and without
+			 * this field those are indistinguishable from a finished domain.
+			 *
+			 * It is also what lets the reference domain prove it demonstrates every
+			 * row rather than claiming to: a repo test reads these back and fails on
+			 * a transport the table asks about and no example shows.
+			 */
+			transport?: TransportName;
 	  };
 
 /**

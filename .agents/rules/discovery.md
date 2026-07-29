@@ -227,6 +227,22 @@ So name the data types first — the things a consumer would actually ask for �
 and carry a row set for each. A transport is only ✗ for a data type once you
 have probed for it there.
 
+**Every row is demonstrated in the reference material — read it before
+verdicting one.** The reference domain carries a working route per transport,
+each declaring which one it consumes, and the test server carries a fixture that
+serves it. A row you have never seen present is a row you cannot honestly mark
+absent, and the two together are the cheapest way to learn what it looks like
+when it is there: what fires, what the payload is, how a route consumes it. A
+repo test holds the correspondence, so a row in this table always has material
+behind it.
+
+Four of them are worth reading before any live run, because each is a verdict a
+JSON-shaped scan gets wrong by default: data held in HTML *attributes* rather
+than a JSON blob, a long-poll that is indistinguishable from a slow GET, an
+`EventSource` that looks like a plain GET at the wire, and work done in a scope
+the page cannot see — a worker, a service worker, an iframe answering over
+postMessage.
+
 **Do not write this table from memory — derive it.** The capture layer patches
 every browser egress primitive and reduces what it saw into the table directly,
 so each ✓ carries the call shape that produced it. Reasoning about traffic

@@ -12,6 +12,7 @@
 		"{currentPage:number,hasMore:boolean,items:[{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}],remaining:number,returned:number,totalCount:number}"
 	],
 	"GET /api/boardshop/chart/DECK-001": [
+		"{name:string,price:number,priceHistory:[{date:string,price:number}],sku:string}",
 		"{_note:string,_source:string,brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}"
 	],
 	"GET /api/boardshop/captions-example/DECK-001?lang=en": [
