@@ -140,6 +140,9 @@ app.get('/api', (c) => {
 				plugin?.routes?.flatMap((r) =>
 					(r.examples ?? []).map((e) => `${r.method} /api/${name}${e}`),
 				) ?? [],
+			// What each route consumes upstream, so the coverage check can correlate
+			// captured traffic with built routes exactly rather than by name similarity.
+			upstream: plugin?.routes?.flatMap((r) => r.upstream ?? []) ?? [],
 		};
 	});
 	return c.json({ domains, browserConnected: getActiveBrowser() !== null });

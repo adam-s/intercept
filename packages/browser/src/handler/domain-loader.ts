@@ -47,6 +47,8 @@ export type DomainRoute =
 			browserRequired?: boolean;
 			/** Concrete invocations that exercise this route. See `examples` on the handler variant. */
 			examples?: string[];
+			/** Upstream endpoints this route consumes. See `upstream` on the handler variant. */
+			upstream?: string[];
 	  }
 	| {
 			method: 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -68,6 +70,18 @@ export type DomainRoute =
 			 * declaring several covers its interesting cases.
 			 */
 			examples?: string[];
+			/**
+			 * Upstream endpoints this route consumes — e.g.
+			 * `['www.reddit.com/r/{sub}.json']` or `['gql.twitch.tv/gql']`.
+			 *
+			 * A route's own path says nothing about what it calls: `/r/:subreddit`
+			 * fetches `/r/all.json`, and `/directory/top` posts to `gql.twitch.tv`.
+			 * The coverage check cannot recover that by string similarity — the names
+			 * genuinely have nothing in common — so without this it reports endpoints
+			 * as unaccounted that are perfectly well covered, and a real gap hides in
+			 * the noise. Declaring it makes the recall number mean something.
+			 */
+			upstream?: string[];
 	  };
 
 /**

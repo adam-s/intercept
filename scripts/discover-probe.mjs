@@ -527,6 +527,38 @@ export function normalizeEndpoint(rawUrl) {
 }
 
 /**
+ * Does a declared upstream pattern cover a captured endpoint?
+ *
+ * Compared segment by segment so a `{placeholder}` matches whatever actually
+ * filled it — `www.reddit.com/r/{sub}.json` covers `www.reddit.com/r/all.json`.
+ * A plain string comparison cannot: the declaration names the shape, the
+ * capture names one instance of it.
+ */
+export function upstreamMatches(pattern, endpoint) {
+	// Two traps here, both found the hard way. URL normalization percent-encodes
+	// braces, so `{sub}` arrives as `%7Bsub%7D`; and a placeholder often carries
+	// the upstream's extension, so `{sub}.json` fails a `}$` anchor. Decode and
+	// strip the extension BEFORE testing whether a segment is a placeholder.
+	const clean = (x) => {
+		let v = x;
+		try {
+			v = decodeURIComponent(v);
+		} catch {
+			/* leave it encoded */
+		}
+		return v.replace(/\.[a-z0-9]{1,5}$/i, '').toLowerCase();
+	};
+	const p = pattern.split('/');
+	const e = endpoint.split('/');
+	if (p.length > e.length) return false;
+	return p.every((seg, i) => {
+		const c = clean(seg);
+		if (/^\{.*\}$/.test(c)) return true;
+		return c === clean(e[i] ?? '');
+	});
+}
+
+/**
  * The recall floor: endpoints the browser demonstrably called, against the
  * routes actually built.
  *
@@ -542,8 +574,16 @@ export function normalizeEndpoint(rawUrl) {
  * the endpoint, and reports everything else as unaccounted rather than
  * guessing. An unaccounted endpoint is a question for the agent, not a verdict.
  */
-export function coverageDiff(entries = [], routes = [], examples = []) {
+export function coverageDiff(entries = [], routes = [], examples = [], upstream = []) {
 	const haystack = [...routes, ...examples].join(' ').toLowerCase();
+	// A declared upstream is an exact claim; the heuristic below is a guess. Where
+	// a route says what it consumes, believe it. Declared values are written
+	// scheme-less (`www.reddit.com/r/{sub}.json`), so give them one before
+	// normalizing — otherwise the whole host parses as a path segment.
+	const declared = upstream.map((u) => {
+		const bare = u.replace(/^[A-Z]+ /, '').trim();
+		return normalizeEndpoint(/^https?:\/\//.test(bare) ? bare : `https://${bare}`);
+	});
 
 	const endpoints = new Map();
 	for (const e of entries) {
@@ -554,15 +594,25 @@ export function coverageDiff(entries = [], routes = [], examples = []) {
 		endpoints.set(key, (endpoints.get(key) ?? 0) + 1);
 	}
 
+	// Match on ANY meaningful path segment, not just the last one. Reddit's
+	// /r/all.json is served by a route at /r/:subreddit — they share the segment
+	// "r", which a tail-only check with a length floor of 3 discards outright,
+	// reporting 0% coverage for a domain with eight working routes. Extensions are
+	// stripped, since a route path never carries the upstream's .json suffix, and
+	// structural segments are ignored so every endpoint does not match on "api".
+	const STOPWORDS = new Set(['api', 'v1', 'v2', 'v3', 'www', 'com', 'net', 'org', 'svc', 'ws']);
 	const accounted = [];
 	const unaccounted = [];
 	for (const [endpoint, hits] of endpoints) {
-		const tail =
-			endpoint
-				.split('/')
-				.filter((x) => x && !x.startsWith('{'))
-				.pop() ?? '';
-		const match = tail.length > 3 && haystack.includes(tail.toLowerCase());
+		const segments = endpoint
+			.split('/')
+			.slice(1)
+			.filter((x) => x && !x.startsWith('{'))
+			.map((x) => x.replace(/\.[a-z0-9]{1,5}$/i, '').toLowerCase())
+			.filter((x) => x.length >= 2 && !STOPWORDS.has(x));
+		const match =
+			declared.some((d) => upstreamMatches(d, endpoint)) ||
+			segments.some((seg) => haystack.includes(seg));
 		(match ? accounted : unaccounted).push({ endpoint, hits });
 	}
 
@@ -880,7 +930,8 @@ async function main() {
 		const routes = doms.flatMap((d) => d.routes ?? []);
 		const examples = doms.flatMap((d) => d.examples ?? []);
 
-		const diff = coverageDiff(entries, routes, examples);
+		const up = doms.flatMap((d) => d.upstream ?? []);
+		const diff = coverageDiff(entries, routes, examples, up);
 		if (diff.total === 0) {
 			console.log(captureVerdict(entries).detail);
 			return 1;

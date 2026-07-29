@@ -301,6 +301,13 @@ an example the checker skips it, and a skipped route reads exactly like a
 passing one. Use real identifiers: an example naming an id the site does not
 have fails the route for a reason that has nothing to do with the route.
 
+**Every route declares `upstream`** — the endpoints it consumes, written
+scheme-less with `{placeholder}` for the parts that vary:
+`['www.reddit.com/r/{sub}.json']`, `['gql.twitch.tv/gql']`. A route's own path
+says nothing about what it calls, and the coverage check cannot recover that by
+name similarity — the names genuinely have nothing in common. Without it, real
+coverage reads as zero and a genuine gap hides in the false alarms.
+
 **Check recall before declaring done** — `--mode=coverage` diffs the endpoints
 the browser actually called against the routes you built, and prints a floor.
 Every unaccounted endpoint fired in a real browser, so every one exists: build a

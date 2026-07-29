@@ -23,6 +23,7 @@ import {
 	TRANSPORT_SIGNATURES,
 	transportEvidence,
 	transportMarkers,
+	upstreamMatches,
 } from '../discover-probe.mjs';
 
 const entry = (over = {}) => ({
@@ -387,5 +388,37 @@ describe('regressions found by discovery agents', () => {
 		expect(captureVerdict([]).verdict).toBe('no-capture');
 		expect(captureVerdict([{ method: 'DOCUMENT' }]).verdict).toBe('document-only');
 		expect(captureVerdict([{ method: 'GET' }]).verdict).toBe('has-data-traffic');
+	});
+});
+
+describe('upstreamMatches — declared coverage', () => {
+	// String similarity cannot solve this: a route at /r/:subreddit fetches
+	// /r/all.json, and the two share almost nothing. Reddit's run reported a 0%
+	// recall floor with eight working routes because of it.
+	it('matches a captured instance against a declared shape', () => {
+		expect(upstreamMatches('www.reddit.com/r/{sub}.json', 'www.reddit.com/r/all.json')).toBe(true);
+		expect(upstreamMatches('gql.twitch.tv/gql', 'gql.twitch.tv/gql')).toBe(true);
+	});
+
+	it('does not match a different endpoint on the same host', () => {
+		expect(
+			upstreamMatches('www.reddit.com/r/{sub}.json', 'www.reddit.com/svc/shreddit/events'),
+		).toBe(false);
+	});
+
+	// Two encoding traps, both found the hard way.
+	it('survives percent-encoded braces and extensions on the placeholder', () => {
+		expect(upstreamMatches('a.test/x/%7Bid%7D.json', 'a.test/x/42.json')).toBe(true);
+	});
+
+	it('lets a declared prefix cover deeper paths but not shallower ones', () => {
+		expect(upstreamMatches('a.test/v/x', 'a.test/v/x/y')).toBe(true);
+		expect(upstreamMatches('a.test/v/x/y', 'a.test/v/x')).toBe(false);
+	});
+
+	it('prefers a declared upstream over the name heuristic', () => {
+		const entries = [{ method: 'GET', url: 'https://gql.twitch.tv/gql' }];
+		const d = coverageDiff(entries, ['GET /api/twitch/directory/top'], [], ['gql.twitch.tv/gql']);
+		expect(d.recallFloor).toBe(100);
 	});
 });
