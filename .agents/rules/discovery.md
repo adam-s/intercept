@@ -124,6 +124,15 @@ stop signal; a pass that adds something means run another. That delta is the
 only evidence available that the inventory is complete, so write it into the
 elimination table rather than discarding it.
 
+**Saturate on transports, not on endpoints.** These are different targets and
+conflating them either stops you early or never lets you stop. A large site has
+hundreds of minor endpoints and enumerating them all is not the job; the
+elimination table is a claim about *transport classes*, and that set is small
+and genuinely saturable. So: keep passing until a pass reveals no new
+transport. Endpoint discovery rides along, and where it is deliberately partial,
+say so — "transport classification complete; endpoint inventory partial" is an
+honest result. "Complete" without that qualifier is a claim about both.
+
 **Rules that bind the whole step:**
 
 - Browser only. No direct HTTP, no fetching HTML or JS outside the browser —
