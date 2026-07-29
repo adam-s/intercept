@@ -26,7 +26,12 @@
  * @module browser/driver/instrument
  */
 
-/** Where the buffer lands. Stable, because the drain side reads it by name. */
+/**
+ * Namespace for the DOM event channel. Not a global property — the buffer never
+ * becomes one, because an unexplained entry on `window` is the loudest tell an
+ * instrumented page carries. This only names the events and the transient
+ * handshake attribute.
+ */
 export const EGRESS_GLOBAL = '__ic_egress';
 
 /** One observed egress call, as the page's own JS expressed it. */
@@ -79,11 +84,32 @@ export const INSTRUMENT_LIMITS = { maxEvents: 2000, maxBodyChars: 512 } as const
 function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, globalName: string) {
 	// biome-ignore lint/suspicious/noExplicitAny: patching foreign globals
 	const g: any = globalThis;
-	if (g[globalName]) return; // survive a double-install (re-navigation, re-attach)
 
-	const t0 = Date.now();
+	// The buffer stays in this closure and never becomes a property of `window`.
+	// An unexplained global is the single loudest tell an instrumented page has —
+	// `Object.getOwnPropertyNames(window)` finds it whatever the property flags
+	// say — and it is unnecessary, because the DOM event below is already the
+	// only door the reader needs.
 	const events: unknown[] = [];
-	g[globalName] = events;
+	const t0 = Date.now();
+
+	// Idempotence without a global: ping the channel and see whether an earlier
+	// install answers. Dispatcher and listener are both in this world, so they
+	// share the detail object and the flag survives the round trip.
+	try {
+		if (g.document?.dispatchEvent) {
+			const ping: { detail: { seen: boolean } } = new g.CustomEvent(`${globalName}_ping`, {
+				detail: { seen: false },
+			});
+			g.document.dispatchEvent(ping as unknown as Event);
+			if (ping.detail.seen) return;
+			g.document.addEventListener(`${globalName}_ping`, (e: { detail?: { seen: boolean } }) => {
+				if (e.detail) e.detail.seen = true;
+			});
+		}
+	} catch {
+		/* a scope without CustomEvent installs unconditionally */
+	}
 
 	const clip = (v: unknown): string | undefined => {
 		if (v == null) return undefined;
@@ -161,6 +187,10 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 	 * the wrapper, which a per-function override would.
 	 */
 	const originals = new WeakMap<object, unknown>();
+	// Every replacement, recorded so the page can be handed back unmodified. A
+	// session that keeps the patches carries a permanent tell; one that restores
+	// them looks like any other tab from the moment discovery ends.
+	const restores: Array<() => void> = [];
 	try {
 		const fnToString = Function.prototype.toString;
 		const patchedToString = function (this: unknown) {
@@ -169,6 +199,9 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 		};
 		originals.set(patchedToString, fnToString);
 		Function.prototype.toString = patchedToString;
+		restores.push(() => {
+			Function.prototype.toString = fnToString;
+		});
 	} catch {
 		/* a sealed Function.prototype leaves wrappers visible; capture still works */
 	}
@@ -204,6 +237,9 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 			};
 			originals.set(wrapper, orig);
 			obj[key] = wrapper;
+			restores.push(() => {
+				obj[key] = orig;
+			});
 		} catch {
 			/* a frozen or absent global is a gap, not a failure */
 		}
@@ -242,6 +278,32 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 		}
 	} catch {
 		/* worker scope has no document; its buffer is read another way */
+	}
+
+	// Uninstall rides the same channel. Exposing a named restore function would
+	// mean a second unexplained global, which is the residue this is here to
+	// remove, so the command arrives as an event like the drain does.
+	try {
+		if (g.document?.addEventListener) {
+			g.document.addEventListener(`${globalName}_uninstall`, () => {
+				try {
+					// Reverse order: a later patch may wrap an earlier one.
+					for (const undo of restores.reverse()) {
+						try {
+							undo();
+						} catch {
+							/* one failed restore must not strand the others */
+						}
+					}
+					events.length = 0;
+					g.document.documentElement.setAttribute(`${globalName}_gone`, '1');
+				} catch {
+					/* a page that refuses restoration keeps the patches */
+				}
+			});
+		}
+	} catch {
+		/* worker scope has no document */
 	}
 
 	// ─── fetch ──────────────────────────────────────────────────────────
@@ -301,6 +363,9 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 			for (const k of Object.keys(Orig)) Wrapped[k] = Orig[k];
 			originals.set(Wrapped, Orig);
 			g[name] = Wrapped;
+			restores.push(() => {
+				g[name] = Orig;
+			});
 		} catch {
 			/* absent in this scope */
 		}
@@ -519,8 +584,6 @@ export const INSTRUMENT_SOURCE = `(function(){${BUILD_HELPER_PROLOGUE}return (${
  */
 export const DRAIN_SOURCE = `(() => {
 	try {
-		const direct = globalThis[${JSON.stringify(EGRESS_GLOBAL)}];
-		if (direct) return direct.splice(0, direct.length);
 		if (typeof document === 'undefined') return [];
 		document.dispatchEvent(new CustomEvent(${JSON.stringify(`${EGRESS_GLOBAL}_drain`)}));
 		const raw = document.documentElement.getAttribute(${JSON.stringify(`${EGRESS_GLOBAL}_out`)});
@@ -529,5 +592,28 @@ export const DRAIN_SOURCE = `(() => {
 		return JSON.parse(raw);
 	} catch {
 		return [];
+	}
+})()`;
+
+/**
+ * Removes every patch and the buffer, leaving the page as it was found.
+ *
+ * Discovery aids are detectable by construction — a patched global, an
+ * unexplained property on `window`, an attribute that appears and vanishes.
+ * That is an acceptable cost while learning what a site has, and an unacceptable
+ * one afterwards: the session that collects data should carry no evidence that
+ * anything was ever instrumented. Runs as an ordinary evaluate, so no injection
+ * and no CSP dependency.
+ */
+export const UNINSTALL_SOURCE = `(() => {
+	try {
+		if (typeof document === 'undefined') return false;
+		document.dispatchEvent(new CustomEvent(${JSON.stringify(`${EGRESS_GLOBAL}_uninstall`)}));
+		const flag = ${JSON.stringify(`${EGRESS_GLOBAL}_gone`)};
+		const done = document.documentElement.hasAttribute(flag);
+		document.documentElement.removeAttribute(flag);
+		return done;
+	} catch {
+		return false;
 	}
 })()`;

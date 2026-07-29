@@ -30,6 +30,7 @@ export {
 	type EgressKind,
 	INSTRUMENT_LIMITS,
 	INSTRUMENT_SOURCE,
+	UNINSTALL_SOURCE,
 } from './instrument.js';
 export {
 	isDestructive,
@@ -55,6 +56,7 @@ export { patchrightDriver } from './patchright-driver.js';
 export {
 	drainEgressEvents,
 	installEgressInstrument,
+	removeEgressInstrument,
 	startTrafficCapture,
 } from './traffic-capture.js';
 export type {

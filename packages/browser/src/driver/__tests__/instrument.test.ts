@@ -22,6 +22,7 @@ import {
 	EGRESS_GLOBAL,
 	INSTRUMENT_LIMITS,
 	INSTRUMENT_SOURCE,
+	UNINSTALL_SOURCE,
 } from '../instrument.js';
 
 /** A stand-in browser global carrying every primitive the instrument patches. */
@@ -71,7 +72,42 @@ function fakeGlobal(over: Record<string, unknown> = {}) {
 		return { prototype: o };
 	};
 
+	// The drain and uninstall channels are DOM events now, so the fake has to be a
+	// real event target: a stub `document` would make every capture assertion fail
+	// for a reason that has nothing to do with the patches.
+	const listeners: Record<string, ((e: unknown) => void)[]> = {};
+	const attrs: Record<string, string> = {};
+	const document = {
+		addEventListener: (k: string, fn: (e: unknown) => void) => {
+			(listeners[k] ??= []).push(fn);
+		},
+		dispatchEvent: (e: { type: string }) => {
+			for (const fn of listeners[e.type] ?? []) fn(e);
+			return true;
+		},
+		documentElement: {
+			setAttribute: (k: string, v: string) => {
+				attrs[k] = v;
+			},
+			getAttribute: (k: string) => attrs[k] ?? null,
+			removeAttribute: (k: string) => {
+				delete attrs[k];
+			},
+			hasAttribute: (k: string) => k in attrs,
+		},
+	};
+	class FakeCustomEvent {
+		type: string;
+		detail: unknown;
+		constructor(type: string, init?: { detail?: unknown }) {
+			this.type = type;
+			this.detail = init?.detail;
+		}
+	}
+
 	return {
+		document,
+		CustomEvent: FakeCustomEvent,
 		// A vm context ships ECMAScript built-ins only, so the web platform types
 		// the instrument branches on have to be supplied deliberately. Reusing the
 		// host's keeps `instanceof` meaningful across the boundary.
@@ -98,7 +134,6 @@ function fakeGlobal(over: Record<string, unknown> = {}) {
 		postMessage: noop,
 		navigator: { sendBeacon: noop, serviceWorker: { register: noop } },
 		SourceBuffer: { prototype: { appendBuffer: noop } },
-		document: {},
 		HTMLScriptElement: proto(noop),
 		HTMLImageElement: proto(noop),
 		HTMLFormElement: { prototype: { submit: noop } },
@@ -114,6 +149,7 @@ function install(over: Record<string, unknown> = {}) {
 		ctx: ctx as Record<string, unknown>,
 		run: (src: string) => runInNewContext(src, ctx),
 		drain: () => runInNewContext(DRAIN_SOURCE, ctx) as Array<Record<string, unknown>>,
+		uninstall: () => runInNewContext(UNINSTALL_SOURCE, ctx) as boolean,
 	};
 }
 
@@ -295,10 +331,14 @@ describe('it never breaks the page it observes', () => {
 		expect(() => install({ WebTransport: undefined, RTCPeerConnection: undefined })).not.toThrow();
 	});
 
-	it('survives a worker scope with no DOM', () => {
+	// A worker scope has no DOM, so the event channel does not exist there and the
+	// buffer cannot be read back the same way. Installing must still patch and
+	// must still not throw — a worker that broke on install would take the page's
+	// own work down with it.
+	it('installs and patches in a worker scope with no DOM', () => {
 		const h = install({ document: undefined, HTMLScriptElement: undefined });
-		h.run(`importScripts('/lib.js')`);
-		expect(h.drain()[0]?.kind).toBe('importscripts');
+		expect(() => h.run(`importScripts('/lib.js')`)).not.toThrow();
+		expect(h.run(`String(importScripts).includes('hook.call')`)).toBe(false);
 	});
 
 	it('survives a frozen primitive without losing the rest', () => {
@@ -336,9 +376,16 @@ describe('bounds', () => {
 		expect(runInNewContext(DRAIN_SOURCE, ctx)).toEqual([]);
 	});
 
-	it('publishes the buffer under the name the drain side reads', () => {
+	// Superseded on purpose. This used to require the buffer to be a property of
+	// `window`, which is the loudest tell an instrumented page can carry —
+	// `getOwnPropertyNames` finds it whatever the property flags say. The buffer
+	// now lives in a closure reachable only through the DOM event channel, so the
+	// requirement is the opposite one.
+	it('publishes no global, so the page carries no unexplained property', () => {
 		const h = install();
-		expect(h.ctx[EGRESS_GLOBAL]).toBeDefined();
+		h.run(`fetch('/a')`);
+		expect(h.ctx[EGRESS_GLOBAL]).toBeUndefined();
+		expect(h.drain()).toHaveLength(1);
 	});
 });
 
@@ -407,27 +454,22 @@ describe('the drain channel crosses worlds without injecting anything', () => {
 		expect(h.drain).toBeDefined();
 	});
 
-	it('writes the buffer to the shared DOM when the event fires', () => {
-		let handler: (() => void) | null = null;
-		let written: string | null = null;
-		const h = install({
-			document: {
-				addEventListener: (_k: string, fn: () => void) => {
-					handler = fn;
-				},
-				documentElement: {
-					setAttribute: (_k: string, v: string) => {
-						written = v;
-					},
-				},
-			},
-		});
+	it('answers on the shared DOM when the drain event fires', () => {
+		const h = install();
 		h.run(`fetch('/api/x')`);
-		(handler as unknown as () => void)();
-		expect(JSON.parse(written as unknown as string)[0]).toMatchObject({
-			kind: 'fetch',
-			url: '/api/x',
-		});
+		// Drive the channel exactly as the reader does, from outside the closure.
+		const out = h.drain();
+		expect(out[0]).toMatchObject({ kind: 'fetch', url: '/api/x' });
+	});
+
+	it('restores every patch on the uninstall event, leaving no residue', () => {
+		const h = install();
+		expect(h.run(`String(fetch).includes('hook.call')`)).toBe(false);
+		h.run(`fetch('/before')`);
+		expect(h.uninstall()).toBe(true);
+		// After restore the wrapper is gone, so a later call records nothing.
+		h.run(`fetch('/after')`);
+		expect(h.drain()).toHaveLength(0);
 	});
 
 	it('installs without a document, because a worker scope has none', () => {

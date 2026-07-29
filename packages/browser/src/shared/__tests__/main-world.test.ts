@@ -8,7 +8,7 @@
  * (see the module docblock); this suite pins the protocol built on top of it.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { evaluateInMainWorld, type MainWorldPage } from '../main-world.js';
 
 /**

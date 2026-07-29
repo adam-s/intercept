@@ -193,6 +193,14 @@ docs and at the code sites.
 - **Give-up is a first-class, reported outcome** — never hidden behind a
   fabricated success, a placeholder value, or a partial result presented as
   whole.
+- **Observation must not become the cause.** Every aid that makes a system
+  legible — an instrumented runtime, a synthetic interaction, an elevated
+  request rate — is detectable by the system being observed, so the pass that
+  has to succeed carries none of them. Learn with the aids on a disposable
+  session; do the real work with them removed and the environment handed back as
+  it was found. A failure recorded while the aids were running is evidence about
+  the run, not about the target, and must be re-tested without them before it is
+  written down as a property of anything.
 - **Outward-facing actions stay behind a human checkpoint.** Deploying,
   rebuilding production images, wiping a database, and driving traffic at a live
   third-party site are all outward-facing: they run attended, with the

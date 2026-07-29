@@ -27,7 +27,12 @@
 import { DEBUG } from '@interceptor/shared';
 import { evaluateInMainWorld, type MainWorldPage } from '../shared/main-world.js';
 import { captureDecision, header, parseBody } from './capture-filter.js';
-import { DRAIN_SOURCE, type EgressEvent, INSTRUMENT_SOURCE } from './instrument.js';
+import {
+	DRAIN_SOURCE,
+	type EgressEvent,
+	INSTRUMENT_SOURCE,
+	UNINSTALL_SOURCE,
+} from './instrument.js';
 import type { DriverPage, NetworkCaptureCallback } from './types.js';
 
 /** Playwright's request surface, structurally — avoids binding to one engine's types. */
@@ -251,4 +256,43 @@ export async function drainEgressEvents(page: DriverPage): Promise<EgressEvent[]
 		}
 	}
 	return out;
+}
+
+/**
+ * Hand the page back unmodified.
+ *
+ * Every discovery aid is detectable by construction: a patched global, an
+ * unexplained property on `window`, an attribute that appears and vanishes. That
+ * is a fair trade while learning what a site has and a bad one afterwards,
+ * because the session that collects the data should carry no evidence that
+ * anything was instrumented. Removing the aids also removes them as a suspect —
+ * a block after this point is about the site or the traffic pattern, not about
+ * the observation.
+ *
+ * Reports per frame rather than throwing: a frame that refuses restoration is
+ * still carrying patches, and a caller planning a clean pass needs to know that
+ * rather than assume it.
+ */
+export async function removeEgressInstrument(
+	page: DriverPage,
+): Promise<{ clean: boolean; framesRestored: number; framesRefused: number }> {
+	// biome-ignore lint/suspicious/noExplicitAny: frames() is engine-level
+	const p = page as any;
+	const targets: unknown[] = typeof p.frames === 'function' ? p.frames() : [page];
+	let framesRestored = 0;
+	let framesRefused = 0;
+
+	for (const frame of targets.length ? targets : [page]) {
+		try {
+			// biome-ignore lint/suspicious/noExplicitAny: structural frame
+			const gone = await (frame as any).evaluate(UNINSTALL_SOURCE);
+			if (gone) framesRestored += 1;
+			else framesRefused += 1;
+		} catch (err) {
+			framesRefused += 1;
+			DEBUG('traffic-capture', `frame uninstall skipped: ${String(err).slice(0, 80)}`);
+		}
+	}
+
+	return { clean: framesRefused === 0 && framesRestored > 0, framesRestored, framesRefused };
 }

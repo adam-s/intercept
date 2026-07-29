@@ -80,6 +80,50 @@ confirms or corrects every line, and no route is built on pre-flight alone.
 
 ---
 
+## Two passes: instrumented, then clean
+
+**Everything that helps discovery is detectable, so nothing that helps discovery
+runs during the pass that has to succeed.** Patched primitives, a synthetic
+interaction sweep, rapid probing — each is a signal, and a hardened site reads
+signals. Run them and the observation becomes a cause of the outcome.
+
+So the work splits in two, and the split is not optional on any target with bot
+protection:
+
+| | Instrumented pass | Clean pass |
+|---|---|---|
+| Purpose | learn what transports exist | collect the data |
+| Aids | instrument, interaction sweep, probing | none |
+| Profile | disposable | the one you intend to keep |
+| Output | the manifest and the elimination table | route responses |
+| If it is blocked | says nothing about the site | a real finding |
+
+The instrumented pass answers *what is here*. The clean pass uses that answer
+and carries no aids at all — the instrument is removed, the sweep does not run,
+and requests go at a human rate. A session that keeps its patches carries a
+permanent tell; one that restores them is an ordinary tab again.
+
+**A block during an instrumented pass is not evidence about the site.** It is
+evidence about the pass. Recording "this site blocks us" from an instrumented
+run attributes to the target what may have been caused by the observation, and
+that wrong finding then shapes every later attempt. Re-test clean before
+recording any conclusion about bot protection — and if the clean pass succeeds
+where the instrumented one failed, the finding is about our own footprint.
+
+**Suppress aids one at a time when a run starts failing.** Several things are
+detectable at once, so removing all of them tells you only that the set was the
+problem. Drop the sweep first — synthetic interaction has no human trajectory
+and is the loudest — then the instrument, then the probing rate. The first
+suppression that restores success names the cause, and that is a finding worth
+writing down rather than a workaround to leave in place.
+
+**Budget the instrumented pass.** It is the expensive, conspicuous half: it
+navigates more, clicks more, and asks for more than a reader would. Saturation
+applies to transports, not to pages, so stop when a pass adds no new transport
+rather than when the site runs out of pages.
+
+---
+
 ## STEP 1: GATHER
 
 Two jobs: confirm the pre-flight, and intercept pagination.
