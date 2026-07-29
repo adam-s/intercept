@@ -144,6 +144,19 @@ work order. The maintainer directs what gets built.
 - **The first consumer is an instance, never the definition.** A reference
   implementation demonstrates the framework; it does not become the framework by
   being first.
+- **Shipped means reachable.** A capability no workflow can invoke does not
+  exist yet, however finished the code is. Building the library and leaving the
+  entry point for later produces a thing that passes its tests, reads as done,
+  and changes nothing — and the gap is invisible precisely because every part in
+  isolation looks complete. The last step is wiring it to the place someone
+  actually starts from, and until that step lands the work is unfinished rather
+  than merely unpolished.
+- **A claim about several configurations is verified on each.** Support for a
+  set — engines, platforms, modes — that was checked on the convenient member is
+  support for that member and a guess about the rest. Verify each, or narrow the
+  claim to what was tested. The tempting shortcut is a shared abstraction that
+  "should" behave identically; shared code is exactly where a per-configuration
+  difference hides, because nothing in the source shows it.
 - **Simplicity over complexity.** Reach for complexity only when the problem
   genuinely requires it.
 - **Bind to identity, not ordinal.** A positional index into an external,
