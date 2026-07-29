@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+	captureVerdict,
 	contentTypeOf,
 	contradictions,
 	coverageDiff,
@@ -362,5 +363,29 @@ describe('normalizeEndpoint', () => {
 
 	it('leaves stable path segments alone', () => {
 		expect(normalizeEndpoint('https://a.test/v1/finance/search')).toBe('a.test/v1/finance/search');
+	});
+});
+
+describe('regressions found by discovery agents', () => {
+	// --domain was declared in the usage text and filtered on in the coverage
+	// mode, but parseArgs never read it — so opts.domain was always undefined,
+	// every mode silently operated on all domains, and `--record` rewrote every
+	// baseline including the reference domain's. Two agents independently hit
+	// the resulting corruption and reverted it by hand before the cause was found.
+	it('parseArgs reads --domain', () => {
+		expect(parseArgs(['--domain=twitch']).domain).toBe('twitch');
+		expect(parseArgs([]).domain).toBeNull();
+	});
+
+	// captureVerdict is called on four runtime paths and was deleted wholesale by
+	// a region splice. Nothing caught it: unit tests exercise pure helpers
+	// directly, and the runner paths have no coverage, so `--mode=scan` would
+	// have thrown ReferenceError in front of a user. The durable guard is
+	// biome's noUndeclaredVariables, now enabled; this pins the function itself.
+	it('captureVerdict exists and separates absence from breakage', () => {
+		expect(typeof captureVerdict).toBe('function');
+		expect(captureVerdict([]).verdict).toBe('no-capture');
+		expect(captureVerdict([{ method: 'DOCUMENT' }]).verdict).toBe('document-only');
+		expect(captureVerdict([{ method: 'GET' }]).verdict).toBe('has-data-traffic');
 	});
 });

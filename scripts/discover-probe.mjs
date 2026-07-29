@@ -73,6 +73,10 @@ export function parseArgs(argv) {
 	return {
 		mode: typeof flags.mode === 'string' ? flags.mode : 'scan',
 		url: typeof flags.url === 'string' ? flags.url : null,
+		// Load-bearing: without this, opts.domain is undefined, the coverage filter
+		// passes every domain, and --record rewrites every baseline — including the
+		// reference domain's, from a session where its test server was not running.
+		domain: typeof flags.domain === 'string' ? flags.domain : null,
 		port: Number(flags.port ?? 3001),
 		budget: Number(flags.budget ?? 3),
 		limit: Number(flags.limit ?? 60),
@@ -569,6 +573,35 @@ export function coverageDiff(entries = [], routes = [], examples = []) {
 		unaccounted: unaccounted.sort((a, b) => b.hits - a.hits),
 		recallFloor: total === 0 ? null : Math.round((accounted.length / total) * 100),
 	};
+}
+
+/**
+ * What a traffic capture says about the site, as a verdict.
+ *
+ * "Nothing found" and "nothing captured" look identical in a bare listing and
+ * mean opposite things — one is a finding about the site, the other a broken
+ * setup. Naming them apart is the difference between recording a site as static
+ * and noticing the browser was never connected.
+ */
+export function captureVerdict(entries) {
+	if (entries.length === 0) {
+		return {
+			verdict: 'no-capture',
+			detail:
+				'Zero entries. Only WS-connected browsers capture traffic — this usually means no ' +
+				'browser is connected, not that the site is quiet. Connect one and navigate before scanning.',
+		};
+	}
+	const dataEntries = entries.filter((e) => e.method !== 'DOCUMENT' && e.method !== 'WS-FRAME');
+	if (dataEntries.length === 0) {
+		return {
+			verdict: 'document-only',
+			detail:
+				'Only document responses. The page fetched no data of its own, so the data is either ' +
+				'embedded in the HTML or arrives on a page this session has not visited. Run --mode=sources next.',
+		};
+	}
+	return { verdict: 'has-data-traffic', detail: `${dataEntries.length} data request(s) captured` };
 }
 
 /** Group traffic entries into a per-endpoint summary. Pure. */
