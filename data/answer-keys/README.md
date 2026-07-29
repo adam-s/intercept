@@ -54,3 +54,17 @@ The same distinction settles where a transport belongs. Twitch's hermes socket
 carries an encrypted envelope and its chat socket carries IRC text; both are one
 row, `WebSocket`, with the encoding recorded as a property. Filing an encoding
 as its own expected transport made a socket we did observe score as a miss.
+
+## `detectableBy` is about the tool; `reachable` is about the target
+
+They get confused, and the confusion hides things. `detectableBy` says whether
+the classifier can ever emit a row: `observation` if some primitive or payload
+shape produces it, `scan` if only reading source can settle it. `reachable` says
+whether *this* target's instance can be exercised at all — a form behind a login,
+an endpoint needing an account, a page type that does not exist without one.
+
+A row that is unreachable here is not a row the tool cannot see anywhere.
+Recording it as `scan` makes the scorer stop asking, which is exactly backwards:
+the transport is real, present, and merely out of reach for this session. Say
+so, and leave the detectability alone.
+

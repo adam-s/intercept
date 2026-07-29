@@ -45,7 +45,8 @@
 				"streamingData.adaptiveFormats"
 			],
 			"note": "Gated on a visitorData minted by a browser that navigated the specific watch page; a bare POST's token returns UNPLAYABLE.",
-			"detectableBy": "observation"
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29. Delivered as UMP/SABR over /videoplayback with a vendor content type, not a playlist extension."
 		},
 		{
 			"transport": "Polling/Long-poll",
@@ -55,6 +56,41 @@
 				"www.youtube.com/youtubei/v1/updated_metadata"
 			],
 			"note": "Both are ordinary POSTs, so a table with no polling row records them as plain endpoints and concludes the site has no realtime transport. The tell is the cadence, not the request."
+		},
+		{
+			"transport": "Beacon/Telemetry",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Cross-frame RPC",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Form-encoded POST",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Service Worker",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Streaming response",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "JSONP",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end. suggestqueries host returns a function-call wrapper; the sweep filed it as an ordinary GET until the detector was widened."
 		}
 	],
 	"axes": [
@@ -99,6 +135,11 @@
 			"name": "CPN (content playback nonce)",
 			"class": "invented",
 			"note": "A random 16-character value the client generates itself and sends with playback requests. Not harvested from a response and not computed from anything \u2014 the client makes it up and the server expects one. A route that omits it fails for a reason that looks nothing like the cause."
+		},
+		{
+			"name": "BotGuard PoToken",
+			"class": "computed",
+			"note": "Minted through an obfuscated challenge at api/jnn/v1/GenerateIT. Required for adaptive HD formats; not attempted by any run."
 		}
 	],
 	"redundantPaths": {
@@ -109,5 +150,11 @@
 			"JS player",
 			"InnerTube API"
 		]
+	},
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 9,
+		"shapes": 80,
+		"challenge": "none observed"
 	}
 }

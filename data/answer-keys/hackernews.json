@@ -12,6 +12,18 @@
 			"endpoints": [],
 			"note": "Absent. Data is in the markup as ordinary table rows, not as a payload.",
 			"detectableBy": "scan"
+		},
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29. The only transport. Two call shapes total."
+		},
+		{
+			"transport": "Form-encoded POST",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end. Vote and comment forms exist in the DOM; unreachable without an account.",
+			"reachable": "session-gated",
+			"note": "Vote and comment forms are in the DOM and the classifier can emit this row \u2014 but exercising it needs an account, and the sweep will not submit a form in any case. Detectability is a property of the tool; reachability is a property of the target and the session. Conflating them makes a row that cannot be reached here look like a row the tool cannot see anywhere."
 		}
 	],
 	"publicApis": [
@@ -23,5 +35,16 @@
 			"endpoint": "hn.algolia.com/api/v1/",
 			"note": "Third-party search index over the same content. Same caveat."
 		}
+	],
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 1,
+		"shapes": 2,
+		"challenge": "none"
+	},
+	"sessionGated": [
+		"vote",
+		"collapse",
+		"snip-story (fetch/json)"
 	]
 }

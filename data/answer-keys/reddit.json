@@ -43,6 +43,46 @@
 			],
 			"note": "Records live in HTML attributes on custom elements \u2014 no script tag, no hydration payload. Verified absent as hydration: a direct fetch of the homepage, a subreddit and a post page contained none of the framework markers.",
 			"detectableBy": "scan"
+		},
+		{
+			"transport": "Beacon/Telemetry",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Cross-frame RPC",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "HLS/Media",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Polling/Long-poll",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Service Worker",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Streaming response",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Worker-scoped",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Form-encoded POST",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end. A sweep will not submit a form, so this cannot fire from a direct pass."
 		}
 	],
 	"variants": [
@@ -56,5 +96,11 @@
 			"name": "loid cookie",
 			"note": "Issued only by a JS bot-check, so it cannot be learned from API documentation."
 		}
-	]
+	],
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 10,
+		"shapes": 38,
+		"challenge": "reCAPTCHA"
+	}
 }

@@ -46,7 +46,38 @@
 				"usher.ttvnw.net/vod/v2/{id}.m3u8"
 			],
 			"note": "Playlist needs an access token minted by a GraphQL call first. The player also fetches and parses the playlist inside a Web Worker \u2014 ad-blocking projects hook exactly that worker \u2014 so a page-scoped capture sees no media at all on a streaming page.",
-			"detectableBy": "observation"
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29. Verified to media: playlist -> variant -> a fetched MP4 segment."
+		},
+		{
+			"transport": "Beacon/Telemetry",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Polling/Long-poll",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Worker-scoped",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "JSON API (XHR)",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Cross-frame RPC",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end."
 		}
 	],
 	"gates": [
@@ -58,5 +89,11 @@
 			"name": "Kasada",
 			"note": "k.twitchcdn.net serves the device-ID script. Present from first navigation."
 		}
-	]
+	],
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 8,
+		"shapes": 27,
+		"challenge": "Kasada"
+	}
 }
