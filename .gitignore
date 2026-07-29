@@ -45,7 +45,7 @@ apps/api/data/
 # Temporary handoff state (not committed)
 .claude/tuning-handoff.md
 .claude/dashboard-tuning-handoff.md
-.claude/user-consent.md
+.agents/user-consent.md
 
 # Route-spec baselines are shape fingerprints only — no captured data.
 !/data/route-spec-baseline/

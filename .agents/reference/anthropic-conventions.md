@@ -189,7 +189,7 @@ AGENTS.md, which for a monorepo with `domains/**`, `apps/web/**`, and
 **Every agent-shared artifact lives in `.agents/` (canonical) so it works across
 coding agents.** Root `AGENTS.md` holds the project instructions and root
 `CLAUDE.md` imports it via `@AGENTS.md`. `.claude/` keeps only what is genuinely
-Claude-Code-specific — `settings.json` — plus symlinks (`CLAUDE.md`, `skills`,
+Claude-Code-specific — `settings.json` — plus directory symlinks (`skills`,
 `rules`, `agents`) so auto-discovery still resolves. Hook scripts need no
 symlink: `settings.json` names them by absolute path.
 
@@ -204,7 +204,7 @@ re-verify the rest against the tree before relying on them.
 |---|---|---|
 | `AGENTS.md` (root) | ✓ aligned | Canonical project instructions, cross-agent |
 | `CLAUDE.md` (root) | ✓ aligned | Thin `@AGENTS.md` import + entry-point note |
-| `.claude/CLAUDE.md` | ✓ aligned | Symlink → `../AGENTS.md` |
+| `.claude/CLAUDE.md` | ✓ removed | Deliberately absent. A memory file loads by path, so a symlink is a second full copy in context rather than a pointer; the root `CLAUDE.md` already imports the canon. Directory symlinks stay — they hold lazily-read material. |
 | `.claude/skills` → `.agents/skills` | ✓ aligned | Symlink; skill folders keep the standard `SKILL.md` shape |
 | `.agents/skills/api-discovery/` | ✓ aligned | Discovery protocol entry point; carries `reference/`, `scripts/`, `templates/` |
 | `.agents/skills/app/` | ✓ aligned | Plain-language app build — asks, discovers, then builds a dashboard |

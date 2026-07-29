@@ -58,7 +58,19 @@ describe('anthropic-conventions drift-check table', () => {
 		expect(readlinkSync(resolve(ROOT, '.claude/skills'))).toMatch(/\.agents\/skills\/?$/);
 		expect(readlinkSync(resolve(ROOT, '.claude/rules'))).toMatch(/\.agents\/rules\/?$/);
 		expect(readlinkSync(resolve(ROOT, '.claude/agents'))).toMatch(/\.agents\/agents\/?$/);
-		expect(readlinkSync(resolve(ROOT, '.claude/CLAUDE.md'))).toMatch(/AGENTS\.md$/);
+	});
+
+	// A memory file loads on sight, by path, and a symlink is not a pointer the
+	// loader can dedupe — it *is* the file at a second path, so the whole thing
+	// lands in context again. Directories of lazily-read material are safe to
+	// link; memory files are not, and the root entry point already provides the
+	// discovery a linked one would.
+	it('symlinks no memory file into .claude/', () => {
+		const memoryNames = ['CLAUDE.md', 'AGENTS.md'];
+		const linked = readdirSync(resolve(ROOT, '.claude'), { withFileTypes: true })
+			.filter((d) => d.isSymbolicLink() && memoryNames.includes(d.name))
+			.map((d) => d.name);
+		expect(linked).toEqual([]);
 	});
 
 	// The portability invariant: an agent that has never heard of .claude/ must

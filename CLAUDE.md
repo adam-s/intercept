@@ -14,6 +14,14 @@ agents read the same canon:
 | [.agents/reference/](.agents/reference/) | Anti-slop rules, `.claude/` format conventions |
 | [docs/](docs/) | Project facts: layout, ports, commands |
 
-`.claude/` holds only Claude-Code-specific wiring: `settings.json`, and symlinks
-into `.agents/` (`CLAUDE.md`, `rules`, `skills`, `agents`) so auto-discovery
-keeps working. Edit the `.agents/` originals, never this file or the symlinks.
+`.claude/` holds only Claude-Code-specific wiring: `settings.json`, and
+directory symlinks into `.agents/` (`rules`, `skills`, `agents`) so
+auto-discovery keeps working. Edit the `.agents/` originals, never the symlinks.
+
+Those three are directories of lazily-read material: a rule or skill is read
+when it is reached, and one file arrives once whichever path led to it. A memory
+file is different in kind — it loads on sight, by path. Symlinking one into
+`.claude/` therefore buys no discovery this file does not already provide, and
+costs a second full copy in context every time anything under `.claude/` is
+touched. So: symlink directories of lazily-read material; never symlink a memory
+file.
