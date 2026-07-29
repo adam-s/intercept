@@ -189,27 +189,48 @@ export function buildManifest(
 	);
 }
 
-/** Which elimination-table row each observed primitive answers. */
+/**
+ * Which elimination-table row each observed primitive answers.
+ *
+ * The names are the static scanner's names on purpose. One transport must not
+ * be called two things by the two halves of discovery — a scan hinting at
+ * "WebRTC" and an observation reporting "WebRTC data channel" produce two rows
+ * nobody reconciles, and a wrong verdict in either survives because neither can
+ * contradict the other. A repo-level test pins the two lists together.
+ *
+ * `fetch` and XHR collapse into one row deliberately: the same transport
+ * reached through two APIs. Splitting them would report a site that migrated
+ * from one to the other as having gained a transport.
+ */
 const KIND_TO_TRANSPORT: Record<string, string> = {
-	fetch: 'JSON API (fetch)',
+	fetch: 'JSON API (XHR)',
 	xhr: 'JSON API (XHR)',
 	wire: 'JSON API (XHR)',
 	websocket: 'WebSocket',
 	'websocket-frame': 'WebSocket',
 	eventsource: 'SSE',
-	beacon: 'Beacon / telemetry',
-	webrtc: 'WebRTC data channel',
+	beacon: 'Beacon/Telemetry',
+	'image-beacon': 'Beacon/Telemetry',
+	webrtc: 'WebRTC',
 	webtransport: 'WebTransport',
-	worker: 'Worker-scoped traffic',
-	serviceworker: 'Service worker',
-	importscripts: 'Worker-scoped traffic',
+	worker: 'Worker-scoped',
+	importscripts: 'Worker-scoped',
+	serviceworker: 'Service Worker',
 	jsonp: 'JSONP',
-	'image-beacon': 'Beacon / telemetry',
-	'media-append': 'HLS/DASH adaptive media',
+	'media-append': 'HLS/Media',
 	'form-submit': 'Form-encoded POST',
 	postmessage: 'Cross-frame RPC',
 	broadcast: 'Cross-frame RPC',
 };
+
+/**
+ * Every transport name an observation can produce, including the one derived
+ * from payload shape rather than from a primitive. Exported so the drift pin
+ * can compare it against the scanner's list.
+ */
+export const OBSERVABLE_TRANSPORTS: string[] = [
+	...new Set([...Object.values(KIND_TO_TRANSPORT), 'GraphQL']),
+].sort();
 
 /** A transport row with observation behind it, rather than recollection. */
 export interface TransportVerdict {

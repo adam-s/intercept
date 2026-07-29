@@ -227,33 +227,39 @@ So name the data types first — the things a consumer would actually ask for �
 and carry a row set for each. A transport is only ✗ for a data type once you
 have probed for it there.
 
-```text
-## Transport Elimination: [domain]
-| Transport | Present? | Evidence |
-|---|---|---|
-| Embedded JSON | ✓ or ✗ | |
-| JSON API (XHR) | ✓ or ✗ | |
-| HTML-over-the-wire | ✓ or ✗ | |
-| GraphQL | ✓ or ✗ | |
-| WebSocket | ✓ or ✗ | |
-| WebTransport | ✓ or ✗ | |
-| WebRTC | ✓ or ✗ | |
-| HLS/Media | ✓ or ✗ | |
-| gRPC-Web | ✓ or ✗ | |
-| SSE | ✓ or ✗ | |
-| Encoded/Binary | ✓ or ✗ | |
-```
+**Do not write this table from memory — derive it.** The capture layer patches
+every browser egress primitive and reduces what it saw into the table directly,
+so each ✓ carries the call shape that produced it. Reasoning about traffic
+cannot tell an `EventSource` from a long-poll `fetch`, cannot see a JSONP call
+that the wire files under "script", and cannot recall a socket that opened
+during a burst of two hundred requests. Derived, present/absent is a fact with
+an event behind it, and your job narrows to explaining rows and closing the ones
+that read absent.
 
-Add a `Pass` column recording which pass first found each ✓, and note the
-per-pass new-finding count beneath the table.
+Paste the derived table, then add per data type:
 
-Every row carries a verdict and evidence — captured output, not recollection.
+- a `Pass` column recording which pass first found each ✓, with the per-pass
+  new-finding count beneath the table, and
+- for every ✗, a line saying what you did to make it fire.
 
-**A ✗ needs evidence of absence, not absence of evidence.** "WebSocket ✗" is
-not a finding; "WebSocket ✗ — 3 bundles scanned for `new WebSocket(`/`wss://`,
-no live or chat page type exists on this site" is. Write what you probed and
-where, so the claim can be falsified. A ✗ that only records a conclusion is
-indistinguishable from not having looked.
+**A derived ✗ means "not observed", which is weaker than "the site does not have
+it".** A transport that only opens behind an interaction is absent from a
+capture of a page that was merely loaded — which is why the interaction sweep
+exists and why a ✗ recorded before the sweep ran is not yet a finding. Upgrade a
+✗ to a claim about the site only by saying what you provoked and where: "no
+socket after the sweep, and no page type on this site mounts a live surface"
+is falsifiable; "WebSocket ✗" is a conclusion indistinguishable from not having
+looked.
+
+Two ways a row misleads even when the mechanism worked, both worth checking:
+
+- **The primitive is right and the payload is the story.** One WebSocket row
+  can be a JSON feed, a text protocol tunnelled through it, or an encrypted
+  envelope. Read a frame before you decide what the row means.
+- **Elimination can be correct and still hide a transport.** A site with no
+  WebSocket may still stream — over long-poll, over SSE, over repeated fetches
+  on a timer. A ✗ closes one row; it never closes the question the row was
+  standing in for.
 
 Every Gap=Y endpoint has a planned route. **BUILD does not start until this
 table is complete.**

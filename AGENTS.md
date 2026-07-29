@@ -71,17 +71,26 @@ transport type, and reading it beats inventing a shape.
    spends the budget that would have found the real cause.
 4. **Pin what you fix.** Every fixed behavior gets a regression test; every
    locked-down interface gets a contract test.
-5. **Break-it review at checkpoints.** Review the production code, then the
+5. **An obligation without a gate is a suggestion.** An instruction is followed
+   in proportion to whether something checks it, not to how clearly it is
+   written — two obligations stated in the same voice, in adjacent lines, are
+   obeyed and ignored according to which one a running check covers. So every
+   obligation added to an instruction file names the check that enforces it, in
+   the same change. If no check can be named, write the check first or drop the
+   obligation; a rule that only a conscientious reader honours is a rule that
+   quietly stops being true. The same logic upgrades guidance that keeps
+   getting missed: the fix is a gate, not a firmer sentence.
+6. **Break-it review at checkpoints.** Review the production code, then the
    tests, then mutate the code to confirm the suite actually bites.
-6. **Record, generalized.** Accepted tradeoffs are recorded where the knowledge
+7. **Record, generalized.** Accepted tradeoffs are recorded where the knowledge
    lives — a code comment, a doc, a script docblock. A rule added here must
    generalize: if you can name the failing instance in the rule, it's a fact,
    not a rule.
-7. **Pinned lessons are re-probeable.** A pin records what a probe showed
+8. **Pinned lessons are re-probeable.** A pin records what a probe showed
    *then*, not eternal truth. When new evidence contradicts one, re-probe and
    update the pin, saying what changed and when — a stale lesson misdirects the
    next agent as surely as a missing one.
-8. **Repeated difficulty is itself a finding.** Several approaches to one
+9. **Repeated difficulty is itself a finding.** Several approaches to one
    problem means the problem is misunderstood. Stop, write down what each
    attempt disproved, and re-probe.
 

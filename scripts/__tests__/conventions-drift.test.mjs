@@ -127,13 +127,40 @@ describe('the elimination table and the signature table are one list', () => {
 	// The original defect: the rule listed 8 transports, the scanner knew 7 under
 	// different names, and neither could contradict the other. A row the scanner
 	// cannot see is a row where a wrong verdict survives unchallenged.
-	it('every signature has a row in the discovery rule, and vice versa', async () => {
+	//
+	// The table is now derived from what the capture observed rather than written
+	// out in the rule, so the two lists to reconcile are the runtime one and the
+	// static one. Same defect, one layer down: a transport the scanner hints at
+	// but observation names differently produces two rows nobody merges.
+	it('every transport observation can name is a transport the scanner knows', async () => {
 		const { TRANSPORT_SIGNATURES } = await import('../discover-probe.mjs');
-		const rule = readFileSync(resolve(ROOT, '.agents/rules/discovery.md'), 'utf8');
-		const table = rule.slice(rule.indexOf('| Transport | Present? | Evidence |'));
-		const rows = [...table.matchAll(/^\| ([^|]+?) \| ✓ or ✗/gm)].map((m) => m[1].trim());
+		const { OBSERVABLE_TRANSPORTS } = await import('../../packages/browser/src/driver/manifest.ts');
 
-		expect(rows.length).toBeGreaterThan(0);
-		expect(rows.sort()).toEqual(Object.keys(TRANSPORT_SIGNATURES).sort());
+		expect(OBSERVABLE_TRANSPORTS.length).toBeGreaterThan(0);
+		const unknown = OBSERVABLE_TRANSPORTS.filter((t) => !(t in TRANSPORT_SIGNATURES));
+		expect(unknown).toEqual([]);
+	});
+
+	// The reverse containment does not hold, and the difference is the point:
+	// these four are verdicts about a payload's shape, not about which primitive
+	// the page reached for, so no runtime patch can produce them. Listing them
+	// explicitly keeps "observation cannot see this" distinct from "somebody
+	// forgot to wire it up".
+	it('names the rows only a static scan can reach, so the gap stays deliberate', async () => {
+		const { TRANSPORT_SIGNATURES } = await import('../discover-probe.mjs');
+		const { OBSERVABLE_TRANSPORTS } = await import('../../packages/browser/src/driver/manifest.ts');
+
+		const scanOnly = Object.keys(TRANSPORT_SIGNATURES)
+			.filter((t) => !OBSERVABLE_TRANSPORTS.includes(t))
+			.sort();
+		expect(scanOnly).toEqual(['Embedded JSON', 'Encoded/Binary', 'HTML-over-the-wire', 'gRPC-Web']);
+	});
+
+	// The rule stopped carrying a literal table when the table became derived.
+	// A copy left behind would be the stale-record failure AGENTS.md warns about.
+	it('the discovery rule no longer carries a hand-written table to drift from', () => {
+		const rule = readFileSync(resolve(ROOT, '.agents/rules/discovery.md'), 'utf8');
+		expect(rule).not.toContain('| ✓ or ✗ |');
+		expect(rule).toMatch(/derive it/i);
 	});
 });

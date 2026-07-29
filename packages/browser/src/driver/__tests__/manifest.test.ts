@@ -184,7 +184,7 @@ describe('deriveTransports', () => {
 
 	it('marks unobserved transports absent with no evidence', () => {
 		const v = deriveTransports(buildManifest([ev({ kind: 'fetch' })]));
-		expect(v.find((r) => r.transport === 'WebRTC data channel')).toMatchObject({
+		expect(v.find((r) => r.transport === 'WebRTC')).toMatchObject({
 			present: false,
 			evidence: [],
 		});
@@ -224,7 +224,7 @@ describe('deriveTransports', () => {
 	it('renders a table with a row per transport', () => {
 		const table = renderTransports(deriveTransports(buildManifest([ev({ kind: 'beacon' })])));
 		expect(table).toContain('| Transport | Present | Evidence |');
-		expect(table).toMatch(/\| Beacon \/ telemetry \| ✓ \|/);
+		expect(table).toMatch(/\| Beacon\/Telemetry \| ✓ \|/);
 		expect(table).toMatch(/\| WebTransport \| ✗ \| \(not observed\) \|/);
 	});
 });

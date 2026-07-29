@@ -295,6 +295,66 @@ export const TRANSPORT_SIGNATURES = {
 		strong: [/protobuf/, /\.proto\b/, /ArrayBuffer|Uint8Array/, /atob\s*\(/],
 		wire: [/application\/octet-stream|application\/x-protobuf/],
 	},
+	// The rows below name transports the runtime instrument can prove by the
+	// primitive the page reached for. They carry signatures anyway, because a
+	// signature is what turns "we never saw it fire" into "here is where it is
+	// constructed, go make it fire" — the cheap half of closing a ✗.
+	JSONP: {
+		scope: 'both',
+		// A real API call that the wire files under "script", so it is invisible
+		// to any capture that classifies by resource type.
+		strong: [/[?&](callback|jsonp)=/i, /createElement\(\s*['"]script['"]\s*\)/, /window\[['"]?cb/],
+		library: [/jsonp/],
+		wire: [/application\/javascript/],
+	},
+	'Worker-scoped': {
+		scope: 'both',
+		// A worker has its own global scope, so nothing patched in the page sees
+		// its traffic. Finding the constructor is how you learn where to look.
+		strong: [/new\s+(Shared)?Worker\s*\(/, /importScripts\s*\(/, /worker_threads|comlink/],
+		library: [/workerize|comlink|partytown/],
+		wire: [],
+	},
+	'Service Worker': {
+		scope: 'both',
+		// A service worker can answer a fetch from cache, so a request the page
+		// made may never reach the network at all.
+		strong: [/serviceWorker\.register/, /self\.addEventListener\(\s*['"]fetch/, /workbox/],
+		library: [/workbox|sw-precache|next-pwa/],
+		wire: [],
+	},
+	'Cross-frame RPC': {
+		scope: 'both',
+		// An embedded player or checkout widget does the real fetching inside its
+		// own frame and answers the host page over postMessage.
+		strong: [
+			/postMessage\s*\(/,
+			/new\s+BroadcastChannel\s*\(/,
+			/addEventListener\(\s*['"]message['"]/,
+		],
+		library: [/penpal|post-robot|comlink/],
+		wire: [],
+	},
+	'Beacon/Telemetry': {
+		scope: 'both',
+		// Not an API to wrap, but it names third-party hosts, which is what keeps
+		// them out of a coverage count that would otherwise read as a gap.
+		strong: [/sendBeacon\s*\(/, /new\s+Image\s*\(\s*\)/, /navigator\.sendBeacon/],
+		library: [/segment|amplitude|mixpanel|datadog|sentry/],
+		wire: [/text\/plain/],
+	},
+	'Form-encoded POST': {
+		scope: 'both',
+		// The oldest transport still in use, and the one a JSON-shaped scan misses
+		// entirely — server-rendered sites vote, page, and search through it.
+		strong: [
+			/application\/x-www-form-urlencoded/,
+			/new\s+FormData\s*\(/,
+			/<form[^>]+method=["']?post/i,
+		],
+		library: [/qs\b|form-urlencoded/],
+		wire: [/application\/x-www-form-urlencoded|multipart\/form-data/],
+	},
 };
 
 /**
