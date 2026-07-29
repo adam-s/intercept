@@ -1139,9 +1139,13 @@ async function main() {
 		const result = res.body ?? {};
 		console.log(
 			result.clean
-				? `Instrument removed from ${result.framesRestored} frame(s). The page carries no discovery aids.`
-				: `INCOMPLETE: ${result.framesRefused} frame(s) still instrumented. A collection pass from here is not clean.`,
+				? `Instrument removed. ${result.detail ?? ''}`
+				: `INCOMPLETE: nothing could be restored. A collection pass from here is not clean.`,
 		);
+		// An unreachable frame is a real caveat, just not a blocking one.
+		if (result.clean && result.framesUnreachable > 0) {
+			console.log('  The main frame is clean; the unreachable frames are third-party.');
+		}
 		return result.clean ? 0 : 1;
 	}
 

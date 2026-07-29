@@ -88,3 +88,28 @@ Also known and accepted for now: the camoufox capture path cannot be benchmarked
 unattended, because that driver refuses true headless by design. Its recall was
 verified headed at 13/13; any future claim about it needs the same attended run.
 
+## Top of the queue: one capture, not two
+
+A live Twitch run reported `HLS/Media` absent while the video was playing. The
+cause is structural rather than a missing signature: the remote service runs its
+own CDP capture bound to the page, and the driver's `traffic-capture.ts` — the
+module written to replace it, and the one improved all session — is not what
+executes. Two implementations of one concern, and the docblock on the unused one
+claimed it had already replaced the other.
+
+The evidence is measured, not argued. Against the benchmark's worker fixture,
+the context-level Playwright listener records the worker's own fetch
+(`?from=worker` appears as a wire row); the page-scoped CDP session records
+nothing. Twitch fetches its media segments from a worker, so a page-scoped
+capture shows no media at all on a streaming page.
+
+Playwright's `CDPSession.send` takes no session id, so flat auto-attach cannot
+route `Network.enable` to worker targets through it — the CDP path cannot be
+fixed in place that way. The fix is to unify on the driver module and delete the
+duplicate, which also removes the Chromium binding the driver module was written
+to remove.
+
+Care required: the CDP capture also does pre-hydration Document capture, and
+running both at once would double-count entries. This is a refactor with a
+migration, not a patch.
+

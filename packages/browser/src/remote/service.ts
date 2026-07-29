@@ -1288,7 +1288,8 @@ export class RemoteBrowserService {
 	async removeInstrument(): Promise<{
 		clean: boolean;
 		framesRestored: number;
-		framesRefused: number;
+		framesUnreachable: number;
+		detail: string;
 	}> {
 		if (!this.page) throw new Error('Browser not started');
 		const result = await removeEgressInstrument(this.page as never);
