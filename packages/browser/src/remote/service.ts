@@ -1379,6 +1379,29 @@ export class RemoteBrowserService {
 	 * read together: the table says which transports fired, the manifest says
 	 * which call shapes proved it.
 	 */
+	/**
+	 * Reduce wire traffic alone, without touching the JS-level buffer.
+	 *
+	 * Draining is destructive by design — events are spliced out so nothing is
+	 * counted twice — which makes the full pipeline unusable for anything that
+	 * merely wants to look. The coverage diff is exactly that: it reads what has
+	 * been seen so far and must not consume it.
+	 */
+	manifestFromWire(wire: Array<{ method: string; url: string; body?: unknown }> = []): {
+		rows: ManifestRow[];
+		transports: TransportVerdict[];
+		events: number;
+		challenges: ChallengePresence[];
+	} {
+		const rows = buildManifest([], wire);
+		return {
+			rows,
+			transports: deriveTransports(rows),
+			events: 0,
+			challenges: detectChallengePresence(rows),
+		};
+	}
+
 	async captureManifest(
 		wire: Array<{ method: string; url: string; body?: unknown }> = [],
 	): Promise<{

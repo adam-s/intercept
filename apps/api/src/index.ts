@@ -185,12 +185,17 @@ app.get('/browser/manifest', async (c) => {
 	const browser = getActiveBrowser();
 	if (!browser) return c.json({ error: 'No active browser' }, 503);
 	try {
+		// Draining is destructive: the JS-level buffer is spliced empty so events
+		// are never double-counted. A reader that only wants to look — the coverage
+		// diff, a status check — must be able to ask without consuming what the
+		// next caller needs.
+		const drain = c.req.query('drain') !== 'false';
 		// Wire-level entries fold in alongside the JS-level ones: a call seen by
 		// both becomes one row that says so, and a call only the wire saw — a
 		// service worker, a redirect — still gets a row.
 		const { entries } = getTrafficEntries();
 		const wire = entries.map((e) => ({ method: e.method, url: e.url, body: e.responseBody }));
-		const result = await browser.captureManifest(wire);
+		const result = drain ? await browser.captureManifest(wire) : browser.manifestFromWire(wire);
 		return c.json({
 			...result,
 			// Rendered here with the shared renderer rather than re-implemented by

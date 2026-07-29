@@ -1019,7 +1019,20 @@ async function main() {
 	}
 
 	if (opts.mode === 'coverage') {
-		const entries = await getTraffic(base, opts.timeout);
+		// Recall is read off the manifest, not off raw traffic, so there is one
+		// answer to "what did we miss" rather than two that can disagree. The
+		// reduction also fixes the denominator: an endpoint called two hundred
+		// times is one call shape, and counting it two hundred times made a busy
+		// page look better covered than a quiet one.
+		//
+		// Non-draining, because this only looks. Draining here would consume the
+		// events the next manifest call needs.
+		const man = await api(base, '/browser/manifest?drain=false', undefined, opts.timeout);
+		const rows = man.status === 200 ? (man.body?.rows ?? []) : [];
+		const entries =
+			rows.length > 0
+				? rows.map((r) => ({ method: r.method, url: r.example }))
+				: await getTraffic(base, opts.timeout);
 		const index = await api(base, '/api', undefined, opts.timeout);
 		const doms = (index.body?.domains ?? []).filter((d) => !opts.domain || d.name === opts.domain);
 		const routes = doms.flatMap((d) => d.routes ?? []);
@@ -1033,7 +1046,7 @@ async function main() {
 		}
 
 		console.log(
-			`${routes.length} route(s) built. ${diff.total} endpoint(s) the browser actually called.`,
+			`${routes.length} route(s) built. ${diff.total} distinct call shape(s) the browser actually made.`,
 		);
 		console.log(`Recall floor: ~${diff.recallFloor}% — a FLOOR, because interaction-gated`);
 		console.log('endpoints never fire under passive browsing. The real surface is larger.\n');
