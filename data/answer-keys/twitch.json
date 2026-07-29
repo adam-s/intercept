@@ -104,5 +104,34 @@
 			"assets.twitch.tv/assets/amazon-ivs-wasmworker.min-*.js",
 			".wasm module"
 		]
+	},
+	"breadthPass": {
+		"date": "2026-07-29",
+		"pages": 7,
+		"transports": 9,
+		"saturatedAt": 2,
+		"hosts": 18,
+		"perPass": [
+			8,
+			1,
+			0,
+			0,
+			0,
+			0,
+			0
+		],
+		"observed": [
+			"Beacon/Telemetry",
+			"GraphQL",
+			"HLS/Media",
+			"HTML-over-the-wire",
+			"JSON API (XHR)",
+			"JSONP",
+			"Polling/Long-poll",
+			"WebSocket",
+			"Worker-scoped"
+		],
+		"method": "Instrumented, swept each page type, drained after each so the event buffer could not cap.",
+		"note": "Every target saturated on transport classes by the second pass. Later pages added endpoints within transports already found, never a new class \u2014 which is what the saturation rule predicts and is worth knowing before budgeting a run."
 	}
 }

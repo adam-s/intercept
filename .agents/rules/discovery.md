@@ -180,6 +180,14 @@ stop signal; a pass that adds something means run another. That delta is the
 only evidence available that the inventory is complete, so write it into the
 elimination table rather than discarding it.
 
+Measured across five large sites, transport classes saturate fast: every one was
+complete by the second pass, and pages three through seven added endpoints
+within transports already found and never a new class. Budget accordingly — a
+third and fourth page type are cheap insurance, a seventh is spending on
+endpoint inventory while calling it breadth. What does *not* saturate that
+quickly is page-type variety: the second pass is only decisive if it visited a
+genuinely different kind of page, and two listings pages are one page type.
+
 **Saturate on transports, not on endpoints.** These are different targets and
 conflating them either stops you early or never lets you stop. A large site has
 hundreds of minor endpoints and enumerating them all is not the job; the
@@ -330,6 +338,24 @@ a URL shows it and no amount of endpoint enumeration finds it, because the path
 is identical and only the identity differs. When traffic carries a self-
 description, vary it and compare: that is a second axis, and a run that explored
 only paths explored half the surface.
+
+**A description of a resource is not a handle to it.** A site can hand you a
+complete inventory — an id, a codec, a byte length, a duration — with no address
+for any of it, because the bytes are negotiated separately by its own client
+rather than served from a URL. Nothing is missing from that response and nothing
+in it can be fetched. When that is the case, say so: an empty address list
+reported as an empty inventory is a different and wrong fact, and the reader
+will conclude the resource does not exist. Then reach for what can still be
+done — the site's own client is present and working, and driving it is a result
+where reimplementing its negotiation is a project.
+
+**Establishing a connection is not making a request.** A socket that opens, a
+stream that is accepted, a page that loads — each is a channel, and a channel
+carries nothing until something is asked for over it. A subscription that
+announces itself to the caller and never subscribes upstream stays open, stays
+silent, and closes on its own deadline, which reads exactly like a source with
+nothing to say. When a stream yields nothing, check that the ask was made before
+concluding anything about the supply.
 
 **Ask which transports carry the *same* records, not only which exist.** A site
 routinely serves overlapping data more than one way — the initial document, a

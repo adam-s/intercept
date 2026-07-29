@@ -156,5 +156,33 @@
 		"transports": 9,
 		"shapes": 80,
 		"challenge": "none observed"
+	},
+	"breadthPass": {
+		"date": "2026-07-29",
+		"pages": 6,
+		"transports": 9,
+		"saturatedAt": 2,
+		"hosts": 14,
+		"perPass": [
+			5,
+			4,
+			0,
+			0,
+			0,
+			0
+		],
+		"observed": [
+			"Beacon/Telemetry",
+			"Cross-frame RPC",
+			"Form-encoded POST",
+			"HLS/Media",
+			"HTML-over-the-wire",
+			"JSON API (XHR)",
+			"Polling/Long-poll",
+			"Service Worker",
+			"Streaming response"
+		],
+		"method": "Instrumented, swept each page type, drained after each so the event buffer could not cap.",
+		"note": "Every target saturated on transport classes by the second pass. Later pages added endpoints within transports already found, never a new class \u2014 which is what the saturation rule predicts and is worth knowing before budgeting a run."
 	}
 }

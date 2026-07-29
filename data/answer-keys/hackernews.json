@@ -46,5 +46,21 @@
 		"vote",
 		"collapse",
 		"snip-story (fetch/json)"
-	]
+	],
+	"breadthPass": {
+		"date": "2026-07-29",
+		"pages": 2,
+		"transports": 1,
+		"saturatedAt": 1,
+		"hosts": 1,
+		"perPass": [
+			1,
+			0
+		],
+		"observed": [
+			"HTML-over-the-wire"
+		],
+		"method": "Instrumented, swept each page type, drained after each so the event buffer could not cap.",
+		"note": "Every target saturated on transport classes by the second pass. Later pages added endpoints within transports already found, never a new class \u2014 which is what the saturation rule predicts and is worth knowing before budgeting a run."
+	}
 }

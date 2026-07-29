@@ -179,6 +179,12 @@ work order. The maintainer directs what gets built.
   an instruction-tuning run, a review, a break-it pass — the artifact must not
   contain the expected outcome. Naming the intended finding contaminates the
   proof; the demonstration's whole value is the independence it forfeits.
+- **A fixture must exhibit the property it is there to demonstrate.** A stand-in
+  that answers instantly cannot show a behaviour defined by waiting; one that
+  serves a shape it does not really have proves nothing about a reader of the
+  real shape. When a fixture and a detector disagree, suspect the fixture first —
+  it is the newer and less examined of the two, and a detector correctly refusing
+  a bad imitation looks identical to a detector that is broken.
 - **Capture ground truth; don't reconstruct it.** When a later step needs a fact
   — a response shape, a token's expiry, an indicated total — record it at the
   source, in-band, so it is a property of the captured data rather than
