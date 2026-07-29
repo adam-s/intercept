@@ -110,6 +110,46 @@ function instrumentSource(
 	const events: unknown[] = [];
 	const t0 = Date.now();
 
+	/**
+	 * Carry the buffer across a navigation.
+	 *
+	 * The buffer lives in this closure, which is what keeps it off `window` — and
+	 * means it dies with the document. That is invisible while a page is only
+	 * being watched and fatal once it is being *driven*, because the provocations
+	 * worth making are the ones that navigate. A search form records its
+	 * submission and navigates in the same tick: no poll interval is short enough
+	 * to read the gap, and the event that proves the transport is the one
+	 * guaranteed to be lost.
+	 *
+	 * So the buffer is handed to the next document through `sessionStorage`, which
+	 * is per-tab, per-origin, and survives exactly the same-origin navigations
+	 * this needs to cross. The key exists only between `pagehide` and the next
+	 * install, and the uninstall path clears it, so the residue is bounded rather
+	 * than permanent — a real tell, and a smaller one than losing the finding.
+	 */
+	const HANDOFF_KEY = `${globalName}_handoff`;
+	try {
+		const carried = g.sessionStorage?.getItem(HANDOFF_KEY);
+		if (carried) {
+			g.sessionStorage.removeItem(HANDOFF_KEY);
+			const parsed = JSON.parse(carried);
+			if (Array.isArray(parsed)) events.push(...parsed.slice(0, limits.maxEvents));
+		}
+	} catch {
+		/* storage may be denied by policy; the live buffer still works */
+	}
+	try {
+		g.addEventListener?.('pagehide', () => {
+			try {
+				if (events.length) g.sessionStorage?.setItem(HANDOFF_KEY, JSON.stringify(events));
+			} catch {
+				/* a full or denied store loses this document's tail, nothing more */
+			}
+		});
+	} catch {
+		/* no event target here — worker scope, where there is no navigation */
+	}
+
 	// Idempotence without a global: ping the channel and see whether an earlier
 	// install answers. Dispatcher and listener are both in this world, so they
 	// share the detail object and the flag survives the round trip.
@@ -642,6 +682,54 @@ function instrumentSource(
 					method: String(f?.method || 'GET').toUpperCase(),
 					url: urlOf(f?.action),
 				});
+			});
+
+			// A form reaches the network two ways and they do not overlap. The patch
+			// above sees `form.submit()` and nothing else; a person pressing Enter or
+			// clicking a submit button runs the browser's own submission algorithm,
+			// which never calls that method and fires this event instead. Measured
+			// on all three triggers: button click and Enter produce only the event,
+			// `form.submit()` produces only the method call, and each puts a real
+			// request on the wire. So capturing one of the two misses whichever half
+			// the site uses — and the scripted call, the half we had, is the rare one.
+			// A search box is the common case, and it submits the way we could not see.
+			const onSubmit = (ev: Event) => {
+				try {
+					// biome-ignore lint/suspicious/noExplicitAny: foreign element
+					const f = (ev as any).target;
+					// biome-ignore lint/suspicious/noExplicitAny: foreign element
+					const submitter = (ev as any).submitter;
+					// The button that submits may redirect the form to somewhere else.
+					const method = String(
+						submitter?.getAttribute?.('formmethod') || f?.method || 'GET',
+					).toUpperCase();
+					const action = submitter?.getAttribute?.('formaction') || f?.action;
+					// Field names are the finding. The URL says which endpoint; the
+					// names say what it accepts, and on a GET form they are exactly the
+					// query parameters a route will have to send.
+					let body = '';
+					try {
+						const parts: string[] = [];
+						for (const [k, v] of new g.FormData(f).entries()) {
+							parts.push(`${k}=${typeof v === 'string' ? v.slice(0, 40) : '[file]'}`);
+							if (parts.length >= 20) break;
+						}
+						body = parts.join('&').slice(0, limits.maxBodyChars);
+					} catch {
+						/* a detached or exotic form still yields a useful url and method */
+					}
+					rec({ kind: 'form-submit', method, url: urlOf(action), body });
+				} catch {
+					/* observation must never break the page's own submission */
+				}
+			};
+			g.document.addEventListener('submit', onSubmit, true);
+			restores.push(() => {
+				try {
+					g.document.removeEventListener('submit', onSubmit, true);
+				} catch {
+					/* already gone with the document */
+				}
 			});
 		}
 	} catch {

@@ -50,17 +50,40 @@ runs during the pass that has to succeed.
 
 ```bash
 # Instrumented pass — patches the page's egress primitives, exercises it, and
-# prints the elimination table derived from what actually fired.
-node scripts/discover-probe.mjs --mode=manifest --sweep --port=XXXX
+# prints the elimination table derived from what actually fired. The sweep runs
+# by default; --no-sweep turns it off for aid-suppression experiments only.
+node scripts/discover-probe.mjs --mode=manifest --port=XXXX
 
 # Ends it and hands the page back unmodified. Run before collecting anything.
 node scripts/discover-probe.mjs --mode=uninstall --port=XXXX
 ```
 
-`--sweep` is not cosmetic. Measured against a fixture carrying transports that
-appear only after interaction, a merely loaded page yielded eight transports and
-sixteen call shapes; the same page exercised yielded nine and twenty-two, and
-every interaction-gated endpoint came only from the second.
+**Interception is half of this and interaction is the other half.** The
+instrument can only report calls the page decided to make, and a page makes most
+of its calls in response to something. Measured against a fixture where every
+endpoint sits behind exactly one provocation, a merely loaded page reached one of
+seven; exercised, it reached all seven. The six were not harder to find — they
+were unreachable, and a capture without them reports six absent transports with
+total confidence.
+
+So the transports you are looking for are, disproportionately, the ones nobody
+sees by loading a page:
+
+| Not reached by | Reached by |
+|---|---|
+| the typeahead endpoint | typing one character |
+| the search endpoint itself | pressing Enter, or submitting the form |
+| a sort or filter refetch | changing a `<select>` |
+| a manifest and its segments | playing the player |
+| a panel's own transports | activating the tab that mounts it |
+| the next page | reaching the scroll boundary |
+
+The sweep does all of those generically — standard HTML and ARIA vocabulary
+only, no selector from any target — and refuses anything state-changing by HTTP
+method rather than by the word on the button. What it structurally cannot reach
+is a custom widget with no standard role: a `<div>` with click handlers looks
+like text. When a page's main control is one of those, say so and drive it by
+hand through the browser rather than recording the transport as absent.
 
 **Do not write the elimination table from memory — paste the derived one.** Each
 ✓ arrives with the call shape that produced it. Your job is to explain rows and

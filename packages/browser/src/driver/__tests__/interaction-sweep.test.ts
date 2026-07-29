@@ -7,6 +7,7 @@
  * form, not a failed assertion.
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
 	DESTRUCTIVE,
@@ -15,6 +16,11 @@ import {
 	SWEEP_LIMITS,
 	sweepPlan,
 } from '../interaction-sweep.js';
+import {
+	assertPageFunctionIsPortable,
+	extractFunctionBody,
+	findNestedFunctions,
+} from '../page-function.js';
 import type { DriverPage } from '../types.js';
 
 describe('sweepPlan', () => {
@@ -42,7 +48,49 @@ describe('sweepPlan', () => {
 		for (const a of plan) expect(a.why.length).toBeGreaterThan(10);
 	});
 
-	it('is target-agnostic — no selector names a specific site', () => {
+	/**
+	 * Target-agnosticism, pinned structurally rather than by a denylist of sites.
+	 *
+	 * Listing the sites we happen to have run against proves nothing about the
+	 * next one: the selector `.js-feed-item` names no site in that list and is
+	 * still a bet on one codebase. What makes a selector portable is its
+	 * vocabulary — standard element names and standard attributes are defined by
+	 * HTML and ARIA, so they mean the same thing on a site nobody here has seen.
+	 * A class or id selector means whatever one team decided last Tuesday.
+	 */
+	it('selects only on standard HTML and ARIA vocabulary', () => {
+		const selectors = plan.map((a) => a.selector ?? '').join(',');
+		expect(selectors).not.toMatch(/\.[a-zA-Z]/); // no class selectors
+		expect(selectors).not.toMatch(/#[a-zA-Z]/); // no id selectors
+
+		const STANDARD_ELEMENTS = [
+			'input',
+			'select',
+			'video',
+			'audio',
+			'a',
+			'article',
+			'nav',
+			'summary',
+			'button',
+			'form',
+		];
+		const STANDARD_ATTRS = /^(role|aria-[a-z]+|type|href|contenteditable|data-testid)$/;
+		for (const part of selectors
+			.split(',')
+			.map((x) => x.trim())
+			.filter(Boolean)) {
+			for (const token of part.split(/\s+/)) {
+				const element = token.match(/^([a-zA-Z]+)/)?.[1];
+				if (element) expect(STANDARD_ELEMENTS).toContain(element);
+				for (const attr of [...token.matchAll(/\[([a-zA-Z-]+)/g)].map((m) => m[1])) {
+					expect(attr).toMatch(STANDARD_ATTRS);
+				}
+			}
+		}
+	});
+
+	it('still names no site, which the vocabulary rule already implies', () => {
 		const selectors = plan.map((a) => a.selector ?? '').join(' ');
 		expect(selectors).not.toMatch(/twitch|reddit|youtube|yahoo|boardshop/i);
 	});
@@ -232,5 +280,91 @@ describe('label reading does not manufacture a refusal', () => {
 		expect(isDestructive(plain)).toBe(false);
 		const explicit = ['Save', null, null, null, 'submit'].filter(Boolean).join(' ');
 		expect(isDestructive(explicit)).toBe(true);
+	});
+});
+
+describe('no driver call can hang the sweep', () => {
+	/**
+	 * A hang is strictly worse than a failure: no output, no partial result,
+	 * nothing to read, and a caller that waits forever. The action cap and the
+	 * wall clock are only consulted *between* steps, so they bound a sweep that
+	 * keeps returning and do nothing for one that stops returning — which is what
+	 * happened, on a real page, with a stale handle after a form submission.
+	 *
+	 * So every driver round trip goes through `bounded`. This reads the source
+	 * because the property is "no call site was missed", and a behavioural test
+	 * can only cover the call sites it thought to exercise.
+	 */
+	const source = readFileSync(new URL('../interaction-sweep.ts', import.meta.url), 'utf8');
+	const body = source.slice(source.indexOf('export async function runSweep'));
+
+	it('routes every driver round trip through bounded()', () => {
+		// The chain must be matched whole. An earlier version stopped at one level
+		// of property access, so `p.keyboard.press(` was invisible to the check
+		// written to find it — and unbounding that exact call stayed green.
+		const unbounded = [...body.matchAll(/await\s+(p|h)\.((?:\w+\.)*\w+)\(/g)]
+			// A timer cannot hang; everything else is a round trip to the browser.
+			.filter((m) => m[2] !== 'waitForTimeout')
+			.map((m) => `await ${m[1]}.${m[2]}(`);
+		expect(unbounded).toEqual([]);
+	});
+
+	it('bounded() rejects rather than waiting forever', async () => {
+		const { runSweep: _r } = await import('../interaction-sweep.js');
+		expect(_r).toBeTypeOf('function');
+		// A page whose every call never settles must still return a result.
+		const stalled = {
+			evaluate: () => new Promise(() => {}),
+			waitForTimeout: async () => {},
+			keyboard: { press: () => new Promise(() => {}), type: () => new Promise(() => {}) },
+			$$: () => new Promise(() => {}),
+			goto: () => new Promise(() => {}),
+		} as unknown as DriverPage;
+		const result = await runSweep(stalled, { dwellMs: 1, maxMs: 2_000 });
+		expect(result.skipped.length).toBeGreaterThan(0);
+	}, 60_000);
+});
+
+describe('page-bound functions survive the build', () => {
+	/**
+	 * The gate for the hazard in browser/driver/page-function. It reads the file
+	 * on disk rather than the function object, because the runtime form is
+	 * decided by whichever transpiler built the test: a `toString()` check stays
+	 * green under Vitest even with the shipped build broken, which was confirmed
+	 * by reintroducing the original defect and watching it pass.
+	 */
+	const source = readFileSync(new URL('../interaction-sweep.ts', import.meta.url), 'utf8');
+
+	it('elementMeta contains no nested function', () => {
+		expect(() => assertPageFunctionIsPortable(source, 'elementMeta')).not.toThrow();
+	});
+
+	it('rejects the nested arrow that caused the outage', () => {
+		const broken = source.replace(
+			'const label = [',
+			"const attr = (n: string) => el.getAttribute(n) || '';\n\tconst label = [",
+		);
+		expect(broken).not.toEqual(source);
+		expect(() => assertPageFunctionIsPortable(broken, 'elementMeta')).toThrow(/nested arrow/);
+	});
+
+	it('fails loudly when the function is renamed rather than skipping it', () => {
+		expect(() => assertPageFunctionIsPortable(source, 'noSuchFunction')).toThrow(/was not found/);
+	});
+
+	it('reads through comments, so prose about arrows is not code', () => {
+		expect(findNestedFunctions('// mentions => an arrow')).toEqual([]);
+		expect(findNestedFunctions('const f = () => 1;')).toEqual(['arrow function']);
+	});
+
+	// Extraction that silently grabbed the return-type annotation instead of the
+	// body would report every function as clean, which is the failure mode this
+	// whole module exists to remove one level down.
+	it('extracts the body itself, not the return type beside it', () => {
+		const body = extractFunctionBody(source, 'elementMeta');
+		expect(body).toContain('getAttribute');
+		expect(extractFunctionBody('function f(x): { a: string } { return q; }', 'f')).toBe(
+			' return q; ',
+		);
 	});
 });

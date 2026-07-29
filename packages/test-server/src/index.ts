@@ -10,6 +10,7 @@
  *                        attributes, HTML fragments, worker and service-worker
  *                        scope, cross-frame RPC, beacons
  * - /sites/benchmark/  — Calibration: one call per egress primitive, on load
+ * - /sites/gatedboard/  — Calibration: nothing fires until it is provoked
  */
 
 import type { IncomingMessage } from 'node:http';
@@ -21,6 +22,7 @@ import { WebSocketServer } from 'ws';
 import { createBenchmarkSite } from './sites/benchmark';
 import { createBoardshopSite } from './sites/boardshop';
 import { createDataboardSite } from './sites/databoard';
+import { createGatedboardSite } from './sites/gatedboard';
 import { createHcaptchaSite } from './sites/hcaptcha';
 import { createLiveboardSite } from './sites/liveboard';
 import { createNewsboardSite } from './sites/newsboard';
@@ -40,6 +42,7 @@ export interface TestServerInstance {
 
 const SITES = [
 	'benchmark',
+	'gatedboard',
 	'boardshop',
 	'liveboard',
 	'newsboard',
@@ -81,6 +84,7 @@ export async function createTestServer(
 
 	// Mount sites
 	app.route('/sites/benchmark', createBenchmarkSite());
+	app.route('/sites/gatedboard', createGatedboardSite());
 	app.route('/sites/boardshop', createBoardshopSite());
 	app.route('/sites/liveboard', createLiveboardSite());
 	app.route('/sites/newsboard', createNewsboardSite());

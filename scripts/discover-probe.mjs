@@ -46,12 +46,21 @@
  *                      Run before any collection pass.
  *
  * FLAGS FOR manifest
- *   --sweep            Exercise the page before draining: dwell, scroll, type,
- *                      hover, expand. Without it a capture reports every
- *                      transport that opens behind an interaction as absent,
- *                      which is indistinguishable from the site not having one.
- *                      It is also the loudest aid there is — synthetic
- *                      interaction has no human trajectory — so it is opt-in.
+ *   --no-sweep         Skip the interaction sweep. The sweep is ON by default,
+ *                      because the mode's output is a present/absent verdict
+ *                      table and a verdict taken from a page nobody touched is
+ *                      not a verdict: every transport that opens behind an
+ *                      interaction reads absent, which is indistinguishable
+ *                      from the site not having one. It used to be opt-in with
+ *                      a printed warning, and a warning is not a gate — the
+ *                      table looked finished either way, and the flag was the
+ *                      easiest thing in the run to leave off.
+ *
+ *                      Skip it when suppressing aids one at a time to find what
+ *                      a hardened site reacted to. Synthetic interaction has no
+ *                      human trajectory and is the loudest aid here, so it is
+ *                      the first one to drop — and the output says which way it
+ *                      ran, so a quiet table is never mistaken for a clean one.
  *
  * USAGE
  *   node scripts/discover-probe.mjs --mode=scan
@@ -111,7 +120,9 @@ export function parseArgs(argv) {
 		timeout: Number(flags.timeout ?? 20_000),
 		settle: Number(flags.settle ?? 5_000),
 		json: flags.json === true,
-		sweep: flags.sweep === true,
+		// Default on: see the flag docs above. `--sweep` stays accepted so existing
+		// commands and docs keep working, and now means the same as the default.
+		sweep: flags['no-sweep'] !== true,
 		help: flags.help === true || flags.h === true,
 	};
 }
@@ -1377,7 +1388,7 @@ async function main() {
 			console.log(
 				opts.sweep
 					? 'The page was exercised, so these are better evidence — but still not proof of absence.'
-					: 'The page was NOT exercised. Re-run with --sweep before treating any of these as a verdict.',
+					: 'The page was NOT exercised (--no-sweep). These rows are statements about page load, not about the site.',
 			);
 		}
 		console.log();

@@ -137,6 +137,30 @@ export function startTrafficCapture(
 				return;
 			}
 
+			// Media is evidence without a body. The data filter drops it outright and
+			// is right to: nobody wants a video in a capture, and its bytes answer no
+			// question a route asks. But the *request* answers one — it is the whole
+			// evidence for the HLS/Media row, and on a site with a plain progressive
+			// player it is the only evidence there will ever be, because a `<video>`
+			// element acting on markup touches no JavaScript primitive for a patch to
+			// see. Dropping the request along with the body reported "this page has
+			// no media" about a page that was playing a video at the time.
+			//
+			// So the URL is recorded and the body is not read at all — no transfer,
+			// no memory, and the row it justifies is honest.
+			if (resourceType === 'media') {
+				onCapture(
+					{ method: request.method(), url: request.url(), headers: {}, body: null },
+					{
+						url,
+						status: response.status(),
+						headers: { 'content-type': contentType },
+						body: { type: 'media-request', note: 'body deliberately not read' },
+					},
+				);
+				return;
+			}
+
 			const decision = captureDecision({
 				url,
 				resourceType,
@@ -326,6 +350,110 @@ export async function drainEgressEvents(page: DriverPage): Promise<EgressEvent[]
 		}
 	}
 	return out;
+}
+
+/**
+ * Accumulate egress events across navigations.
+ *
+ * The instrument's buffer lives in a closure in one document, which is what
+ * keeps it off `window` and invisible to a page reading its own globals. The
+ * cost of that is total: when the document goes, the buffer goes with it, and
+ * `addInitScript` gives the *next* document a fresh empty one. Drain at the end
+ * of a session that navigated and you get the last page's calls and nothing
+ * else.
+ *
+ * Passive browsing hid this, because passive browsing does not navigate. The
+ * interaction sweep navigates constantly — that is most of what it is for.
+ * Running a query, submitting a search form, and following a tab each replace
+ * the document, and each was measured firing a real request that the final
+ * drain then reported as absent. Four of seven provocations reached their
+ * endpoint and none of the four appeared in the capture.
+ *
+ * So the accumulator drains on the way out of every document, before the new
+ * one commits, and keeps the events in Node where no navigation can reach them.
+ * Nothing about the page changes: the same drain, on a schedule rather than
+ * once.
+ */
+/**
+ * How often the collector empties the page's buffer.
+ *
+ * Short enough that a provocation and the navigation it causes rarely fall in
+ * the same gap; long enough that it is a handful of reads over a sweep rather
+ * than a stream of them.
+ */
+const COLLECTOR_INTERVAL_MS = 1_200;
+
+export function startEgressCollector(page: DriverPage): {
+	/** Everything captured so far, including a final drain of the live document. */
+	collect: () => Promise<EgressEvent[]>;
+	/** Stop listening. Safe to call more than once. */
+	stop: () => void;
+} {
+	// biome-ignore lint/suspicious/noExplicitAny: frame events are engine-level
+	const p = page as any;
+	const accumulated: EgressEvent[] = [];
+	let draining: Promise<void> = Promise.resolve();
+
+	// Serialized, because two drains racing would each read and clear the same
+	// buffer and the loser would return an empty array over events it just took.
+	const drainOnce = () => {
+		draining = draining.then(async () => {
+			try {
+				accumulated.push(...(await drainEgressEvents(page)));
+			} catch (err) {
+				DEBUG('traffic-capture', `collector drain skipped: ${String(err).slice(0, 80)}`);
+			}
+		});
+		return draining;
+	};
+
+	// Draining when a navigation *starts* looks like the precise answer and is
+	// not: by the time the navigation request is observable the outgoing renderer
+	// has stopped answering `evaluate`, so the drain returns nothing and the
+	// document takes its events with it. Measured — every provocation before the
+	// first navigation went missing, and the only endpoint that survived was the
+	// one a later keystroke happened to fire again in the final document, which
+	// made the capture look partially working rather than empty.
+	//
+	// So the schedule is a plain interval, taken while the document is
+	// unambiguously alive. Less elegant, and it is the version that works. The
+	// navigation hook stays as a best-effort extra: when it does answer it
+	// shortens the window, and when it does not it costs nothing.
+	const onRequest = (req: { isNavigationRequest?: () => boolean }) => {
+		try {
+			if (req.isNavigationRequest?.()) void drainOnce();
+		} catch {
+			/* a request we cannot classify is not worth failing over */
+		}
+	};
+
+	try {
+		p.on?.('request', onRequest);
+	} catch (err) {
+		DEBUG('traffic-capture', `collector could not listen: ${String(err).slice(0, 80)}`);
+	}
+
+	const ticker = setInterval(() => void drainOnce(), COLLECTOR_INTERVAL_MS);
+	// Node should not be held open by a capture that nobody is waiting on.
+	(ticker as unknown as { unref?: () => void }).unref?.();
+
+	let stopped = false;
+	return {
+		collect: async () => {
+			await drainOnce();
+			return [...accumulated];
+		},
+		stop: () => {
+			if (stopped) return;
+			stopped = true;
+			clearInterval(ticker);
+			try {
+				p.off?.('request', onRequest);
+			} catch {
+				/* already gone with the page */
+			}
+		},
+	};
 }
 
 /**

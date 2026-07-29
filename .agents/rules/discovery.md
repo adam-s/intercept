@@ -98,17 +98,31 @@ protection:
 | Output | the manifest and the elimination table | route responses |
 | If it is blocked | says nothing about the site | a real finding |
 
-In commands: `discover-probe --mode=manifest --sweep` is the instrumented pass —
-it installs the instrument, exercises the page, and prints the elimination table
-derived from what fired. `--mode=uninstall` ends it and hands the page back.
-`route-spec` refuses to run until that has happened, so the clean pass cannot
-start by accident.
+In commands: `discover-probe --mode=manifest` is the instrumented pass — it
+installs the instrument, **exercises the page**, and prints the elimination
+table derived from what fired. `--mode=uninstall` ends it and hands the page
+back. `route-spec` refuses to run until that has happened, so the clean pass
+cannot start by accident.
 
-Exercising the page is not optional cosmetics. Measured against a fixture
-carrying transports that appear only after interaction, a merely loaded page
-yielded eight transports and sixteen call shapes; the same page exercised
-yielded nine and twenty-two, and every interaction-gated endpoint came only from
-the second. A capture with no sweep behind it is a statement about page load.
+Exercising the page is the method, not a refinement of it. **Interception is
+half the work and interaction is the other half**: the instrument can only
+report calls the page decided to make, and a page decides to make most of its
+calls in response to something. Load it and walk away and you have measured its
+opening move.
+
+Measured against a fixture where every endpoint sits behind exactly one
+provocation, a merely loaded page reached one of seven; the same page exercised
+reached all seven. The six were not harder to find — they were unreachable, and
+a capture taken without them reported six absent transports with total
+confidence.
+
+So the sweep runs by default and `--no-sweep` turns it off. It was opt-in once,
+with a printed warning when it was skipped, and that is precisely the shape
+AGENTS.md warns about: the table looked finished either way, the flag was the
+easiest thing in the run to leave off, and nothing failed when it was. Reach for
+`--no-sweep` only when deliberately suppressing aids one at a time (below) — the
+output states which way it ran, so a quiet table is never mistaken for a clean
+one.
 
 The instrumented pass answers *what is here*. The clean pass uses that answer
 and carries no aids at all — the instrument is removed, the sweep does not run,
