@@ -13,6 +13,7 @@ import type { EgressEvent } from '../instrument.js';
 import {
 	buildManifest,
 	deriveTransports,
+	detectChallengePresence,
 	MANIFEST_LIMITS,
 	parseTarget,
 	renderTransports,
@@ -226,5 +227,60 @@ describe('deriveTransports', () => {
 		expect(table).toContain('| Transport | Present | Evidence |');
 		expect(table).toMatch(/\| Beacon\/Telemetry \| ✓ \|/);
 		expect(table).toMatch(/\| WebTransport \| ✗ \| \(not observed\) \|/);
+	});
+});
+
+describe('detectChallengePresence', () => {
+	// Attribution, not defence. A run carrying discovery aids that then hits a
+	// wall cannot say whether the wall was the site's policy or a reaction to
+	// being watched — and recording "this site blocks us" from such a run puts a
+	// wrong fact in front of every later attempt.
+	const row = (host: string, template = '/') => ({
+		kind: 'wire' as const,
+		method: 'GET',
+		host,
+		template,
+		params: [],
+		count: 1,
+		example: `https://${host}${template}`,
+	});
+
+	it.each([
+		['Kasada', 'k.twitchcdn.net', '/abc/def/fp'],
+		['DataDome', 'js.datadome.co', '/tags.js'],
+		['PerimeterX / HUMAN', 'client.perimeterx.net', '/px/xhr'],
+		['Cloudflare', 'example.test', '/cdn-cgi/challenge-platform/x'],
+		['reCAPTCHA', 'www.google.com', '/sorry/index'],
+		['hCaptcha', 'hcaptcha.com', '/checksiteconfig'],
+	])('recognises %s', (vendor, host, path) => {
+		const found = detectChallengePresence([row(host, path)]);
+		expect(found.map((f) => f.vendor)).toContain(vendor);
+	});
+
+	it('reports nothing on a page with no protection', () => {
+		expect(detectChallengePresence([row('api.example.test', '/v1/items')])).toEqual([]);
+	});
+
+	it('carries the evidence that identified the vendor', () => {
+		const [found] = detectChallengePresence([row('k.twitchcdn.net', '/a/b/fp')]);
+		expect(found.evidence[0]).toContain('k.twitchcdn.net');
+	});
+
+	it('reports each vendor once however many rows matched', () => {
+		const rows = Array.from({ length: 10 }, (_, i) => row('js.datadome.co', `/tag${i}.js`));
+		const found = detectChallengePresence(rows);
+		expect(found).toHaveLength(1);
+		expect(found[0].evidence.length).toBeLessThanOrEqual(3);
+	});
+
+	// An ordinary CDN path must not read as a wall, or the warning becomes noise
+	// and gets ignored at exactly the moment it matters.
+	it.each([
+		'cdn.example.test/assets/k.js',
+		'example.test/api/track',
+		'static.test/pixel.gif',
+	])('does not flag %s', (url) => {
+		const [host, ...rest] = url.split('/');
+		expect(detectChallengePresence([row(host, `/${rest.join('/')}`)])).toEqual([]);
 	});
 });

@@ -1105,6 +1105,22 @@ async function main() {
 		// An absent row means "not observed", which is weaker than "not present".
 		// Saying so here keeps the distinction attached to the output rather than
 		// leaving it to be remembered.
+		// Stated before the table, because it changes what the table means: a thin
+		// result from a watched page is a different finding from a thin result
+		// from an unwatched one, and only one of them is about the site.
+		const challenges = result.challenges ?? [];
+		if (challenges.length) {
+			console.log();
+			console.log('BOT PROTECTION OBSERVED — this run cannot attribute a block to the site:');
+			for (const ch of challenges) {
+				console.log(`  ${ch.vendor}: ${ch.evidence.join(', ')}`);
+			}
+			console.log('  Aids were installed while these fired. If anything is refused from here,');
+			console.log(
+				"  re-test with --mode=uninstall first before recording it as the site's policy.",
+			);
+		}
+
 		if (sweep) {
 			console.log();
 			console.log(

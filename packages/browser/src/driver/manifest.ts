@@ -299,3 +299,51 @@ export function renderTransports(verdicts: TransportVerdict[]): string {
 	);
 	return ['| Transport | Present | Evidence |', '|---|---|---|', ...rows].join('\n');
 }
+
+/**
+ * Hosts and paths that mean a bot wall is watching this page.
+ *
+ * Vendor endpoints are recognisable in a manifest even when nothing has been
+ * refused yet: a fingerprinting collector fires long before an interstitial
+ * does. Seeing one is not a failure — it is the thing that decides whether a
+ * later block can be attributed to the site at all.
+ */
+const CHALLENGE_MARKERS: Array<{ vendor: string; match: RegExp }> = [
+	{ vendor: 'Kasada', match: /(^|\.)k\.[\w-]+\.(?:net|com)\/.*\/(?:fp|tl)|kpsdk/i },
+	{ vendor: 'DataDome', match: /datadome/i },
+	{ vendor: 'PerimeterX / HUMAN', match: /perimeterx|px-cloud|\/px\/xhr/i },
+	{ vendor: 'Cloudflare', match: /\/cdn-cgi\/challenge|turnstile/i },
+	{ vendor: 'Akamai', match: /akam\/\d|_abck|\/akamai\//i },
+	{ vendor: 'hCaptcha', match: /hcaptcha\.com/i },
+	{ vendor: 'reCAPTCHA', match: /recaptcha|google\.com\/sorry/i },
+];
+
+/** A bot-protection vendor observed in the manifest, with what gave it away. */
+export interface ChallengePresence {
+	vendor: string;
+	evidence: string[];
+}
+
+/**
+ * Which bot-protection vendors this capture saw.
+ *
+ * Load-bearing for attribution rather than for defence. A run that carried
+ * discovery aids and then hit a wall cannot say whether the wall was the site's
+ * policy or a reaction to being instrumented, and recording "this site blocks
+ * us" from such a run puts a wrong fact in front of every later attempt.
+ * Knowing a vendor was present turns that from something to remember into
+ * something the output states.
+ */
+export function detectChallengePresence(rows: ManifestRow[]): ChallengePresence[] {
+	const seen = new Map<string, string[]>();
+	for (const row of rows) {
+		const target = `${row.host}${row.template}`;
+		for (const { vendor, match } of CHALLENGE_MARKERS) {
+			if (!match.test(target)) continue;
+			const list = seen.get(vendor) ?? [];
+			if (list.length < 3 && !list.includes(target)) list.push(target);
+			seen.set(vendor, list);
+		}
+	}
+	return [...seen.entries()].map(([vendor, evidence]) => ({ vendor, evidence }));
+}

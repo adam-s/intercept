@@ -24,7 +24,9 @@ import type { EgressEvent } from '../driver/instrument';
 import { runSweep, type SweepAction, type SweepLimits } from '../driver/interaction-sweep';
 import {
 	buildManifest,
+	type ChallengePresence,
 	deriveTransports,
+	detectChallengePresence,
 	type ManifestRow,
 	type TransportVerdict,
 } from '../driver/manifest';
@@ -1333,10 +1335,23 @@ export class RemoteBrowserService {
 	 */
 	async captureManifest(
 		wire: Array<{ method: string; url: string; body?: unknown }> = [],
-	): Promise<{ rows: ManifestRow[]; transports: TransportVerdict[]; events: number }> {
+	): Promise<{
+		rows: ManifestRow[];
+		transports: TransportVerdict[];
+		events: number;
+		challenges: ChallengePresence[];
+	}> {
 		const events = await this.drainEgress();
 		const rows = buildManifest(events, wire);
-		return { rows, transports: deriveTransports(rows), events: events.length };
+		return {
+			rows,
+			transports: deriveTransports(rows),
+			events: events.length,
+			// Reported alongside the transports because it changes what the
+			// transports mean: a thin table from a watched page is not the same
+			// finding as a thin table from an unwatched one.
+			challenges: detectChallengePresence(rows),
+		};
 	}
 
 	/**
