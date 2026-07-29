@@ -390,6 +390,110 @@ export function endpointLiterals(source, limit = 40) {
 	return [...out].slice(0, limit);
 }
 
+/** Collapse minified whitespace so a snippet reads in one line. */
+function tidy(text) {
+	return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Context around each signature hit — the clue, not the verdict.
+ *
+ * A boolean "WebSocket: present" tells an agent to go looking. The ±window of
+ * source around `new WebSocket(` usually contains the URL construction itself:
+ * `new WebSocket(n+"/ws/v2?token="+r)` names the path and the auth parameter in
+ * one line. That is the difference between knowing a transport exists and
+ * knowing where to point at it.
+ *
+ * Deliberately lossy and capped. Minified source is enormous; the value is a
+ * digest small enough to read, so near-duplicates are dropped and the total is
+ * bounded. Missing a clue costs a probe; dumping a bundle costs the budget.
+ */
+export function extractSnippets(source, { window = 90, max = 24 } = {}) {
+	const out = [];
+	const seen = new Set();
+	for (const [transport, sig] of Object.entries(TRANSPORT_SIGNATURES)) {
+		for (const re of sig.strong ?? []) {
+			const g = new RegExp(re.source, `${re.flags.replace('g', '')}g`);
+			for (const m of source.matchAll(g)) {
+				const from = Math.max(0, m.index - Math.floor(window / 3));
+				const snippet = tidy(source.slice(from, m.index + m[0].length + window));
+				const key = snippet.slice(0, 48);
+				if (seen.has(key)) continue;
+				seen.add(key);
+				out.push({ transport, snippet });
+				if (out.length >= max) return out;
+			}
+		}
+	}
+	return out;
+}
+
+/** API-ish hosts named as string constants, which minification preserves. */
+export function extractHosts(source, max = 20) {
+	const hosts = new Map();
+	for (const m of source.matchAll(
+		/["'`]https?:\/\/([a-z0-9.-]+\.[a-z]{2,})(\/[A-Za-z0-9_\-/.]*)?["'`]/gi,
+	)) {
+		const host = m[1].toLowerCase();
+		if (/googletagmanager|google-analytics|doubleclick|facebook|sentry|cdn\.|fonts\./.test(host))
+			continue;
+		hosts.set(host, (hosts.get(host) ?? 0) + 1);
+	}
+	return [...hosts.entries()]
+		.sort((a, b) => b[1] - a[1])
+		.slice(0, max)
+		.map(([host, n]) => ({ host, n }));
+}
+
+/**
+ * Clues that multiply everything else, so they are reported first.
+ *
+ * A sourcemap turns minified source back into original names — the single
+ * highest-value find, and one grep away. A build manifest lists routes
+ * outright. Persisted GraphQL queries mean the endpoint takes a hash rather
+ * than a query string, which changes how a route must be written.
+ */
+export function extractHighValueClues(source) {
+	const clues = [];
+	for (const m of source.matchAll(/\/\/[#@]\s*sourceMappingURL=(\S+)/g)) {
+		clues.push({ kind: 'sourcemap', value: m[1], why: 'fetch it for original, unminified source' });
+	}
+	for (const m of source.matchAll(
+		/["'`](\/[A-Za-z0-9_\-/.]*(?:_buildManifest|routes-manifest|asset-manifest|openapi|swagger)[A-Za-z0-9_\-/.]*)["'`]/gi,
+	)) {
+		clues.push({ kind: 'manifest', value: m[1], why: 'may enumerate routes directly' });
+	}
+	for (const m of source.matchAll(/["']?(?:sha256Hash|persistedQuery)["']?\s*:/g)) {
+		clues.push({
+			kind: 'persisted-graphql',
+			value: m[0],
+			why: 'endpoint takes a query hash, not a query string',
+		});
+		break;
+	}
+	for (const m of source.matchAll(/operationName["']?\s*[:=]\s*["']([A-Za-z0-9_]{3,40})["']/g)) {
+		clues.push({ kind: 'graphql-operation', value: m[1], why: 'a named query to replay' });
+	}
+	const headerPatterns = [
+		/["']((?:x-)[a-z0-9-]{2,30}(?:id|key|token|version|auth|crumb|sig)[a-z0-9-]*)["']/gi,
+		/["'](client-id|client_id|api-key|apikey|authorization|csrf-token|device-id)["']/gi,
+	];
+	for (const re of headerPatterns) {
+		for (const m of source.matchAll(re)) {
+			clues.push({ kind: 'auth-header', value: m[1], why: 'header the API expects' });
+		}
+	}
+	const seen = new Set();
+	return clues
+		.filter((c) => {
+			const k = `${c.kind}:${c.value}`;
+			if (seen.has(k)) return false;
+			seen.add(k);
+			return true;
+		})
+		.slice(0, 20);
+}
+
 /** Group traffic entries into a per-endpoint summary. Pure. */
 export function summarize(entries) {
 	const byEndpoint = new Map();
@@ -698,6 +802,18 @@ async function main() {
 		}
 		console.log(`\nScanned ${scripts.length} script(s).`);
 
+		const clues = extractHighValueClues(corpus);
+		if (clues.length) {
+			console.log('\nHigh-value clues (chase these first):');
+			for (const c of clues) console.log(`  [${c.kind}] ${c.value} — ${c.why}`);
+		}
+
+		const hosts = extractHosts(corpus);
+		if (hosts.length) {
+			console.log('\nAPI-ish hosts named in source:');
+			for (const h of hosts) console.log(`  ${h.host} (${h.n}×)`);
+		}
+
 		const evidence = transportEvidence(corpus);
 		console.log('\nTransport evidence in source:');
 		for (const [name, ev] of Object.entries(evidence)) {
@@ -709,6 +825,12 @@ async function main() {
 		}
 		console.log('\nA STRONG hit is a fact about the code. Marking that row ✗ is a');
 		console.log('contradiction — probe it properly before writing the verdict.');
+
+		const snippets = extractSnippets(corpus);
+		if (snippets.length) {
+			console.log('\nSource context around each hit — usually contains the URL itself:');
+			for (const sn of snippets) console.log(`  [${sn.transport}] …${sn.snippet}…`);
+		}
 
 		if (endpoints.size) {
 			console.log(`\n${endpoints.size} API-shaped path(s) in source. Any absent from captured`);

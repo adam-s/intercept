@@ -8,6 +8,9 @@ import {
 	contentTypeOf,
 	contradictions,
 	endpointLiterals,
+	extractHighValueClues,
+	extractHosts,
+	extractSnippets,
 	hydrationMarkers,
 	PAGINATION_KEYS,
 	PAGINATION_SELECTORS,
@@ -246,5 +249,61 @@ describe('endpointLiterals', () => {
 
 	it('ignores ordinary strings', () => {
 		expect(endpointLiterals('const msg = "hello world"; x("/")')).toEqual([]);
+	});
+});
+
+describe('clue extraction', () => {
+	const bundle =
+		'var n="https://gql.twitch.tv";function f(){return new WebSocket(n+"/ws/v2?token="+r)}' +
+		'fetch("/gql",{headers:{"Client-ID":c,"x-device-id":d}});' +
+		'o={operationName:"StreamMetadata",extensions:{persistedQuery:{sha256Hash:"abc"}}};' +
+		'//# sourceMappingURL=main.js.map';
+
+	// The point of a snippet over a boolean: the surrounding source usually
+	// carries the URL construction, which is what you actually need next.
+	it('captures the URL construction around a transport hit', () => {
+		const ws = extractSnippets(bundle).find((s) => s.transport === 'WebSocket');
+		expect(ws.snippet).toContain('/ws/v2?token=');
+	});
+
+	it('caps output so a minified bundle cannot flood the budget', () => {
+		const huge = 'new WebSocket("wss://a");'.repeat(500);
+		expect(extractSnippets(huge, { max: 5 }).length).toBeLessThanOrEqual(5);
+	});
+
+	// Not one: a repeated call yields a few distinct leading contexts before the
+	// window stabilizes, and two strong patterns match each occurrence. The
+	// property that matters is that twenty hits collapse to a handful.
+	it('collapses near-duplicate snippets', () => {
+		const repeated = 'new WebSocket("wss://same/path");'.repeat(20);
+		expect(extractSnippets(repeated).length).toBeLessThan(5);
+	});
+
+	it('finds API hosts and ignores analytics CDNs', () => {
+		const hosts = extractHosts(`${bundle};x="https://www.google-analytics.com/g"`).map(
+			(h) => h.host,
+		);
+		expect(hosts).toContain('gql.twitch.tv');
+		expect(hosts).not.toContain('www.google-analytics.com');
+	});
+
+	// A sourcemap is the highest-value find in a minified bundle — it returns
+	// original names — so it is reported before anything else.
+	it('surfaces sourcemaps, persisted queries, operations, and auth headers', () => {
+		const kinds = extractHighValueClues(bundle).map((c) => c.kind);
+		expect(kinds).toContain('sourcemap');
+		expect(kinds).toContain('persisted-graphql');
+		expect(kinds).toContain('graphql-operation');
+		expect(kinds).toContain('auth-header');
+	});
+
+	it('catches header names that do not start with x-', () => {
+		const vals = extractHighValueClues(bundle).map((c) => c.value.toLowerCase());
+		expect(vals).toContain('client-id');
+	});
+
+	it('returns nothing for source with no clues', () => {
+		expect(extractHighValueClues('function add(a,b){return a+b}')).toEqual([]);
+		expect(extractSnippets('const x = 1;')).toEqual([]);
 	});
 });
