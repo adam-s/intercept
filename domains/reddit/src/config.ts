@@ -8,13 +8,23 @@ import type { InterceptorConfig } from '@interceptor/browser/shared/config';
 
 export const redditInterceptorConfig: InterceptorConfig = {
 	domainName: 'reddit',
-	// Discovery showed the site's data transport is `/svc/shreddit/**` — HTML
-	// fragments (feeds, comments, search) served to the page's own faceplate
-	// loaders. There is no bearer-token or API-key header to capture: the
-	// session is carried entirely in cookies the connected browser already
-	// holds, so requiredHeaders stays empty and routes call browser.browserFetch
-	// directly rather than waiting on a captured-header handshake.
-	interceptPatterns: ['https://www.reddit.com/svc/**', 'https://www.reddit.com/**'],
+	// Discovery found six data-bearing transports, three of them on
+	// `/svc/shreddit/**`: HTML fragments for feeds and profiles, a
+	// form-encoded POST for comment continuation, and an operation-name
+	// GraphQL gateway. The `.json` gateway and the v.redd.it media host sit
+	// on the same origin family and are included so their traffic is captured
+	// too.
+	//
+	// There is no bearer-token or API-key *header* to capture: what the
+	// session carries is a `csrf_token` cookie the connected browser already
+	// holds, and the realtime bearer is minted from it per call rather than
+	// harvested (see routes.ts, route 9). So requiredHeaders stays empty and
+	// routes never wait on a captured-header handshake.
+	interceptPatterns: [
+		'https://www.reddit.com/svc/**',
+		'https://www.reddit.com/**',
+		'https://v.redd.it/**',
+	],
 	requiredHeaders: [],
 	baseUrls: ['https://www.reddit.com'],
 };
