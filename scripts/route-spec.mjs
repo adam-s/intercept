@@ -95,20 +95,86 @@ export function parseArgs(argv) {
  * captured copy of the target's data, which must not land in git, and it would
  * go red on every ordinary content change rather than on a shape change.
  */
+/**
+ * At this many same-shaped keys, an object is a map and its keys are data.
+ *
+ * A struct's key names are its schema and a change in them is a regression. A
+ * map's key names are content: a feature-flag blob, a per-symbol quote table, a
+ * translations dictionary. Enumerating those pins the site's own release
+ * schedule, so the check fails whenever they ship a flag — a red that says
+ * nothing about our route.
+ */
+const MAP_LIKE_MIN_KEYS = 8;
+
 export function shapeOf(value, depth = 0) {
 	if (depth > 6) return '…';
 	if (value === null) return 'null';
 	if (Array.isArray(value)) {
-		// One element stands for the array: a shape check asks whether the
-		// element type changed, not how many arrived. Count is the
-		// completeness check's job.
-		return value.length === 0 ? '[]' : `[${shapeOf(value[0], depth + 1)}]`;
+		if (value.length === 0) return '[]';
+		// The union across elements, not element zero.
+		//
+		// A shape check asks whether the element type changed — count is the
+		// completeness check's job — but sampling one element only answers that
+		// when the elements agree. They routinely do not: a delta stream sends
+		// each frame carrying just the fields that changed, so element zero is
+		// whichever tick happened to arrive first. Measured on a live protobuf
+		// quote stream, the pin flapped between runs with nothing wrong, because
+		// two of eleven fields are present only on some ticks.
+		//
+		// So a key absent from any element is marked optional, and absence of an
+		// optional key is not a regression. A field that vanishes from *every*
+		// element still is.
+		const objects = value.filter((v) => v && typeof v === 'object' && !Array.isArray(v));
+		if (objects.length === value.length && objects.length > 1) {
+			const counts = new Map();
+			const shapes = new Map();
+			for (const el of objects) {
+				for (const k of Object.keys(el)) {
+					counts.set(k, (counts.get(k) ?? 0) + 1);
+					if (!shapes.has(k)) shapes.set(k, shapeOf(el[k], depth + 1));
+				}
+			}
+			const keys = [...counts.keys()].sort();
+			const inner = keys
+				.map((k) => `${k}${counts.get(k) === objects.length ? '' : '?'}:${shapes.get(k)}`)
+				.join(',');
+			return `[{${inner}}]`;
+		}
+		return `[${shapeOf(value[0], depth + 1)}]`;
 	}
 	if (typeof value === 'object') {
 		const keys = Object.keys(value).sort();
+		// A map, described by what its values look like rather than by its keys.
+		if (keys.length >= MAP_LIKE_MIN_KEYS) {
+			const valueShapes = new Set(keys.map((k) => shapeOf(value[k], depth + 1)));
+			if (valueShapes.size === 1) return `{*:${[...valueShapes][0]}}`;
+		}
 		return `{${keys.map((k) => `${k}:${shapeOf(value[k], depth + 1)}`).join(',')}}`;
 	}
 	return typeof value;
+}
+
+/**
+ * Whether an actual shape satisfies a baseline that marks some keys optional.
+ *
+ * Compared as text after removing every optional key from both sides, so a
+ * frame that simply did not carry `dayVolume` this time is accepted while a
+ * frame that lost `price` is not.
+ */
+export function shapeSatisfies(baselineShape, actualShape) {
+	if (baselineShape === actualShape) return true;
+	if (!baselineShape?.includes('?:')) return false;
+	const optional = [...baselineShape.matchAll(/([A-Za-z0-9_]+)\?:/g)].map((m) => m[1]);
+	const strip = (shape) => {
+		let out = shape;
+		for (const key of optional) {
+			// Drop the key wherever it appears, optional-marked or not, with the
+			// comma on whichever side it has one.
+			out = out.replace(new RegExp(`,?${key}\\??:[^,}]*`, 'g'), '');
+		}
+		return out.replace(/\{,/g, '{');
+	};
+	return strip(baselineShape) === strip(actualShape);
 }
 
 /** Field names sites use for "here are the items". */
@@ -195,7 +261,10 @@ export function diffShape(baselineShape, actualShape) {
 	// route to whichever shape got recorded first turns designed behavior into a
 	// permanent red. Record mode accumulates; assert passes on any member.
 	const accepted = Array.isArray(baselineShape) ? baselineShape : [baselineShape];
-	if (accepted.includes(actualShape)) {
+	// Optional-key tolerance, so a recorded shape whose array elements disagreed
+	// accepts a later sample missing one of those keys. Exact match first, so the
+	// common case costs nothing.
+	if (accepted.some((s) => shapeSatisfies(s, actualShape))) {
 		return { verdict: 'no-signal-flipped' };
 	}
 	if (accepted.length > 1) {

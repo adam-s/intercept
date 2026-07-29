@@ -342,3 +342,75 @@ describe('coverage is a claim about one route, not one path', () => {
 		expect(skipped.sort()).toEqual(['DELETE /api/x/b', 'POST /api/x/a']);
 	});
 });
+
+describe('a shape pin describes schema, never content', () => {
+	/**
+	 * Three live failures shared one cause: the pin was treating variable content
+	 * as though it were structure, so the check went red on the site doing
+	 * ordinary things.
+	 */
+	it('takes the union across array elements, not element zero', () => {
+		// A delta stream: each frame carries only what changed.
+		const body = {
+			frames: [
+				{ id: 'AAPL', price: 1, dayVolume: 9 },
+				{ id: 'TSLA', price: 2 },
+			],
+		};
+		const shape = shapeOf(body);
+		expect(shape).toContain('dayVolume?:');
+		expect(shape).toContain('price:');
+	});
+
+	it('accepts a later sample missing an optional key', () => {
+		const recorded = shapeOf({
+			frames: [
+				{ id: 'A', price: 1, dayVolume: 9 },
+				{ id: 'B', price: 2 },
+			],
+		});
+		const later = shapeOf({
+			frames: [
+				{ id: 'C', price: 3 },
+				{ id: 'D', price: 4 },
+			],
+		});
+		expect(diffShape(recorded, later).verdict).toBe('no-signal-flipped');
+	});
+
+	it('still fails when a key present in every element disappears', () => {
+		const recorded = shapeOf({
+			frames: [
+				{ id: 'A', price: 1, dayVolume: 9 },
+				{ id: 'B', price: 2 },
+			],
+		});
+		const broken = shapeOf({ frames: [{ id: 'C' }, { id: 'D' }] });
+		expect(diffShape(recorded, broken).verdict).toBe('unexpected-regression');
+	});
+
+	/**
+	 * A feature-flag blob: hundreds of keys the site adds and removes on its own
+	 * schedule, every value the same shape. Enumerating them pins their release
+	 * process, so the route went red whenever they shipped a flag.
+	 */
+	it('describes a map by its values, so new keys are not a regression', () => {
+		const flags = (names) => Object.fromEntries(names.map((n) => [n, { enabled: true }]));
+		const before = shapeOf(flags(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']));
+		const after = shapeOf(flags(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']));
+		expect(before).toBe('{*:{enabled:boolean}}');
+		expect(diffShape(before, after).verdict).toBe('no-signal-flipped');
+	});
+
+	// A struct is not a map. Its key names *are* the schema, and losing one is
+	// exactly what this check exists to catch.
+	it('does not treat a small struct as a map', () => {
+		const shape = shapeOf({ id: 'x', title: 'y', points: 1 });
+		expect(shape).toBe('{id:string,points:number,title:string}');
+	});
+
+	it('does not treat a mixed-value object as a map however many keys it has', () => {
+		const obj = { a: 1, b: 'x', c: true, d: 1, e: 1, f: 1, g: 1, h: 1, i: 1 };
+		expect(shapeOf(obj)).not.toContain('*');
+	});
+});

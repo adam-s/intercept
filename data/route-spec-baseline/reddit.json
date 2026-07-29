@@ -42,10 +42,12 @@
 		"{hasMore:boolean,name:string,operation:string,returned:number,subreddit:{__typename:string,id:string,prefixedName:string,styles:{icon:string,legacyIcon:{url:string}}}}"
 	],
 	"GET /api/reddit/realtime/t5_2qh1o": [
-		"{endpoint:string,frames:[{id:string,payload:{data:null,errors:[{message:string,path:[…]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}"
+		"{endpoint:string,frames:[{id:string,payload:{data:null,errors:[{message:string,path:[…]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}",
+		"{endpoint:string,frames:[{id:string,payload?:{data:null,errors:[{message:string,path:[string]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}"
 	],
 	"GET /api/reddit/realtime/t5_2qh1i?frames=2": [
-		"{endpoint:string,frames:[{id:string,payload:{data:null,errors:[{message:string,path:[…]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}"
+		"{endpoint:string,frames:[{id:string,payload:{data:null,errors:[{message:string,path:[…]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}",
+		"{endpoint:string,frames:[{id:string,payload?:{data:null,errors:[{message:string,path:[string]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}"
 	],
 	"GET /api/reddit/video/588ej9n4j0gh1": [
 		"{hasMore:boolean,id:string,masterUrl:string,played:{segment:{bytes:number,contentType:string,status:number,url:string},segmentCount:number,variantBandwidth:number,variantUrl:string},returned:number,variants:[{bandwidth:number,codecs:string,resolution:string,uri:string}]}"

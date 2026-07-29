@@ -249,6 +249,16 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/stream/:login/hls',
+		// KNOWN LIMITATION: this example asserts against a live broadcast, so it
+		// answers 404 whenever that channel is not streaming. The route is sound —
+		// resolved against a channel taken live from the directory it returns 200,
+		// six variants, a 200 variant playlist and a real segment URL — but an
+		// assertion that depends on a third party being live right now cannot be
+		// deterministic, and no status code fixes that. Two wrong repairs to avoid:
+		// answering 200 with `live:false` makes the check pass while proving nothing
+		// about the media chain, and widening the accepted statuses does the same.
+		// The fix is a resource that persists — a VOD or a clip — whose chain is
+		// always fetchable, which needs discovery rather than an edit here.
 		examples: ['/stream/t90official/hls'],
 		upstream: [
 			'gql.twitch.tv/gql',
@@ -291,7 +301,28 @@ export const routes: DomainRoute[] = [
 				`https://usher.ttvnw.net/api/v2/channel/hls/${encodeURIComponent(login)}.m3u8?${qs}`,
 			);
 			if (!masterRes.ok) {
-				return c.json({ login, live: false, error: `usher returned ${masterRes.status}` }, 502);
+				// Usher answers 403 for a channel that exists and is not streaming.
+				// That is the site telling us there is no stream, which is a complete
+				// answer to the question asked — so it is reported as "asked and
+				// answered, nothing live", the same way the token step above reports
+				// an absent channel. Calling it 502 claimed an upstream fault that had
+				// not happened, and made every assertion against this route depend on
+				// somebody being live at the moment it ran.
+				//
+				// A 5xx from usher is a different thing and keeps the 502: that is the
+				// upstream genuinely failing rather than answering.
+				const offline = masterRes.status === 403 || masterRes.status === 404;
+				return c.json(
+					{
+						login,
+						live: false,
+						error: offline
+							? 'Channel is not currently streaming'
+							: `usher returned ${masterRes.status}`,
+						upstreamStatus: masterRes.status,
+					},
+					offline ? 404 : 502,
+				);
 			}
 			const masterPlaylist = await masterRes.text();
 			const variants = parseMasterPlaylist(masterPlaylist);

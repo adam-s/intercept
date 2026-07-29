@@ -1,6 +1,7 @@
 {
 	"GET /api/yahoofinance/stream/snapshot?symbols=AAPL,TSLA&frames=3": [
-		"{_note:string,frames:[{change:number,changePercent:number,dayVolume:number,exchange:string,field22:number,field27:number,id:string,marketHours:number,price:number,quoteType:number,time:number}],symbols:[string],total:number}"
+		"{_note:string,frames:[{change:number,changePercent:number,dayVolume:number,exchange:string,field22:number,field27:number,id:string,marketHours:number,price:number,quoteType:number,time:number}],symbols:[string],total:number}",
+		"{_note:string,frames:[{change:number,changePercent:number,exchange:string,field27:number,id:string,marketHours:number,price:number,quoteType:number,time:number}],symbols:[string],total:number}"
 	],
 	"GET /api/yahoofinance/chart/AAPL?range=5d&interval=1d": [
 		"{candles:[{close:number,high:number,low:number,open:number,time:string,volume:number}],currency:string,interval:string,range:string,symbol:string,total:number}"
