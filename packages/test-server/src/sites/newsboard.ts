@@ -60,7 +60,24 @@ function storyElement(s: Story): string {
 
 const PAGE = `<!doctype html>
 <html>
-<head><meta charset="utf-8"><title>newsboard</title></head>
+<head>
+<meta charset="utf-8"><title>newsboard</title>
+
+<!-- Semantic markup: standards rather than framework internals, so a reader can
+     extract this without knowing what built the page. Search engines ask for it,
+     which is why a page with no hydration payload still routinely carries the
+     record you want. -->
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"ItemList","numberOfItems":3,
+ "itemListElement":[
+  {"@type":"NewsArticle","position":1,"headline":"Deck shortage eases","author":{"@type":"Person","name":"ana"},"interactionStatistic":{"@type":"InteractionCounter","userInteractionCount":142}},
+  {"@type":"NewsArticle","position":2,"headline":"Trucks recalled","author":{"@type":"Person","name":"bo"},"interactionStatistic":{"@type":"InteractionCounter","userInteractionCount":97}},
+  {"@type":"NewsArticle","position":3,"headline":"Wheel durometer guide","author":{"@type":"Person","name":"cy"},"interactionStatistic":{"@type":"InteractionCounter","userInteractionCount":61}}]}
+</script>
+<meta property="og:title" content="Newsboard — front page">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+</head>
 <body>
 <main id="feed">
 ${STORIES.map(storyElement).join('\n')}
@@ -160,6 +177,32 @@ export function createNewsboardSite(): Hono {
 	const app = new Hono();
 
 	app.get('/', (c) => c.html(PAGE));
+
+	/**
+	 * The same records with no framework payload and no custom elements — only
+	 * standards. This is the page that answers "the site has no embedded data"
+	 * with "you were looking for the wrong shape".
+	 */
+	app.get('/semantic', (c) =>
+		c.html(`<!doctype html><html><head><meta charset="utf-8">
+<script type="application/ld+json">${JSON.stringify({
+			'@context': 'https://schema.org',
+			'@type': 'ItemList',
+			numberOfItems: STORIES.length,
+			itemListElement: STORIES.map((s, i) => ({
+				'@type': 'NewsArticle',
+				position: i + 1,
+				headline: s.title,
+				author: { '@type': 'Person', name: s.author },
+				interactionStatistic: {
+					'@type': 'InteractionCounter',
+					userInteractionCount: s.points,
+				},
+			})),
+		})}</script>
+<meta property="og:title" content="Newsboard"><meta property="og:site_name" content="newsboard">
+</head><body><p>Nothing here but standards.</p></body></html>`),
+	);
 	app.get('/widget', (c) => c.html(WIDGET));
 
 	// Data in attributes — the same records the page ships, addressable directly.

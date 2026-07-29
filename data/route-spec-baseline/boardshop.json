@@ -1,6 +1,24 @@
 {
+	"GET /api/boardshop/catalog": [
+		"{hasMore:boolean,items:[{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}],page:number,pageSize:number,query:string,remaining:number,returned:number,total:number}"
+	],
+	"GET /api/boardshop/catalog?q=deck": [
+		"{hasMore:boolean,items:[],page:number,pageSize:number,query:string,remaining:number,returned:number,total:number}"
+	],
 	"GET /api/boardshop/product/DECK-001": [
 		"{product:{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number},relatedSkus:[string]}"
+	],
+	"GET /api/boardshop/availability": [
+		"{available:number,items:[{name:string,sku:string,stock:number}],totalProducts:number}"
+	],
+	"GET /api/boardshop/availability?category=decks": [
+		"{available:number,items:[{name:string,sku:string,stock:number}],totalProducts:number}"
+	],
+	"GET /api/boardshop/reviews?limit=5": [
+		"{items:[{author:string,date:string,id:string,rating:number,sku:string,text:string}],pageInfo:{endCursor:string,hasNextPage:boolean}}"
+	],
+	"GET /api/boardshop/products?page=1": [
+		"{currentPage:number,hasMore:boolean,items:[{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}],pageSize:number,remaining:number,returned:number,totalCount:number}"
 	],
 	"GET /api/boardshop/inventory/DECK-001": [
 		"{lastUpdated:string,sku:string,stock:number,warehouses:[{available:number,id:string,name:string}]}"
@@ -10,25 +28,6 @@
 	],
 	"GET /api/boardshop/catalog/page/2": [
 		"{currentPage:number,hasMore:boolean,items:[{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}],remaining:number,returned:number,totalCount:number}"
-	],
-	"GET /api/boardshop/chart/DECK-001": [
-		"{name:string,price:number,priceHistory:[{date:string,price:number}],sku:string}",
-		"{_note:string,_source:string,brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}"
-	],
-	"GET /api/boardshop/captions-example/DECK-001?lang=en": [
-		"{availableLanguages:[string],events:[{end:number,start:number,text:string}],language:string}"
-	],
-	"GET /api/boardshop/collection/COL-001/listings": [
-		"{_note:string,_pattern:string,collectionId:string,listings:[{availableQty:number,collectionId:string,colorway:string,condition:string,currency:string,deckName:string,fees:number,listingId:string,price:number,priceRef:string,sellerTier:string,size:string,total:number,warehouse:string}],totalCollected:number}"
-	],
-	"GET /api/boardshop/availability": [
-		"{available:number,items:[{name:string,sku:string,stock:number}],totalProducts:number}"
-	],
-	"GET /api/boardshop/reviews": [
-		"{items:[{author:string,date:string,id:string,rating:number,sku:string,text:string}],pageInfo:{endCursor:string,hasNextPage:boolean}}"
-	],
-	"GET /api/boardshop/products": [
-		"{currentPage:number,hasMore:boolean,items:[{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}],pageSize:number,remaining:number,returned:number,totalCount:number}"
 	],
 	"GET /api/boardshop/graphql-example": [
 		"{items:[{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}],totalCount:number}"
@@ -42,7 +41,7 @@
 	"GET /api/boardshop/msgpack-example": [
 		"{avgPrice:number,categories:{accessories:number,decks:number,trucks:number,wheels:number},topBrands:[string],totalProducts:number}"
 	],
-	"GET /api/boardshop/crumb-example": [
+	"GET /api/boardshop/crumb-example?symbol=DECK-001": [
 		"{brand:string,category:string,dayHigh:number,dayLow:number,name:string,price:number,symbol:string,volume:number}"
 	],
 	"GET /api/boardshop/ws-json-example": [
@@ -63,14 +62,21 @@
 	"GET /api/boardshop/cursor-example": [
 		"{hasMore:boolean,items:[{brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}],nextCursor:string,pageSize:number,totalCount:number}"
 	],
+	"GET /api/boardshop/chart/DECK-001": [
+		"{name:string,price:number,priceHistory:[{date:string,price:number}],sku:string}",
+		"{_note:string,_source:string,brand:string,category:string,currency:string,description:string,name:string,price:number,rating:number,reviewCount:number,sku:string,stock:number}"
+	],
 	"GET /api/boardshop/hydrated-example": [
 		"{events:[{date:string,id:string,name:string,price:number,venue:string}],pageSize:number,totalCount:number}"
 	],
 	"GET /api/boardshop/sveltekit-example": [
 		"{count:number,fetched:[[{change:number,name:string,price:number,symbol:string,volume:number}]]}"
 	],
-	"GET /api/boardshop/jsonp-example": [
-		"{count:number,query:string,suggestions:[{name:string,sku:string}]}"
+	"GET /api/boardshop/jsonp-example?q=deck": [
+		"{count:number,query:string,suggestions:[]}"
+	],
+	"GET /api/boardshop/captions-example/DECK-001?lang=en": [
+		"{availableLanguages:[string],events:[{end:number,start:number,text:string}],language:string}"
 	],
 	"GET /api/boardshop/notifications-example": [
 		"{count:number,notifications:[{change:number,changePercent:number,previousPrice:number,price:number,sku:string,timestamp:number,volume:number}],source:string}"
@@ -87,14 +93,17 @@
 	"GET /api/boardshop/ssr-example": [
 		"{count:number,nextPage:string,products:[{brand:string,category:string,name:string,price:string,rating:string,sku:string,stock:number}]}"
 	],
-	"GET /api/boardshop/formdata-search-example": [
+	"GET /api/boardshop/formdata-search-example?q=deck": [
 		"{query:string,results:[],totalCount:number}"
 	],
-	"GET /api/boardshop/drops/inventory": [
-		"{_note:string,_pattern:string,deckId:string,items:[{colorway:string,dealerPrice:number,deckId:string,proTeamPrice:number,retailPrice:number,size:string,stockCount:number,warehouse:string}],totalCollected:number}"
+	"GET /api/boardshop/drops/inventory?deckId=DECK-001": [
+		"{_note:string,_pattern:string,deckId:string,items:[],totalCollected:number}"
 	],
 	"GET /api/boardshop/resale/listings": [
 		"{_note:string,_pattern:string,items:[{askingPrice:number,brand:string,condition:string,deckName:string,listingId:string,location:string,photos:[string],sellerRating:number,size:string,year:number}],totalCollected:number}"
+	],
+	"GET /api/boardshop/collection/COL-001/listings": [
+		"{_note:string,_pattern:string,collectionId:string,listings:[{availableQty:number,collectionId:string,colorway:string,condition:string,currency:string,deckName:string,fees:number,listingId:string,price:number,priceRef:string,sellerTier:string,size:string,total:number,warehouse:string}],totalCollected:number}"
 	],
 	"GET /api/boardshop/resale/all": [
 		"{_note:string,_pattern:string,clicksNeeded:number,initialEmbedded:number,paginatedItems:[],serverTotal:number,totalCollected:number}"
@@ -104,5 +113,38 @@
 	],
 	"GET /api/boardshop/captcha-hcaptcha": [
 		"{_note:string,_pattern:string,replay:{body:{ok:boolean,received:{message:string},verified:boolean},status:number},sitekey:string,token:string,tokenPrefix:string}"
+	],
+	"GET /api/boardshop/sse-example": [
+		"{events:[{data:{id:number,points:number},event:string}],total:number}"
+	],
+	"GET /api/boardshop/longpoll-example": [
+		"{_pattern:string,rounds:number,updates:[{id:number,points:number}]}"
+	],
+	"GET /api/boardshop/fragment-example?page=2": [
+		"{hasMore:boolean,items:[{author:string,comment-count:string,data-title:string,points:string,story-id:string}],returned:number,total:number}"
+	],
+	"GET /api/boardshop/attributes-example": [
+		"{_pattern:string,stories:[{author:string,comments:number,id:number,points:number,title:string}],total:number}"
+	],
+	"GET /api/boardshop/worker-example": [
+		"{_pattern:string,endpoints:[string],results:[{data:{total:number,trending:[{author:string,comments:number,id:number,points:number,title:string}]},endpoint:string,status:number}]}"
+	],
+	"GET /api/boardshop/crossframe-example": [
+		"{_pattern:string,data:{total:number,trending:[{author:string,comments:number,id:number,points:number,title:string}]},endpoint:string,frame:string}"
+	],
+	"GET /api/boardshop/beacon-example": [
+		"{_note:string,_pattern:string,telemetry:[{carriesData:boolean,endpoint:string,kind:string,method:string,status:number}]}"
+	],
+	"GET /api/boardshop/peer-example": [
+		"{_note:string,_pattern:string,connected:boolean,constructed:[{api:string,present:boolean,transport:string}]}"
+	],
+	"GET /api/boardshop/webtransport-example": [
+		"{_pattern:string,api:string,connected:boolean,constructed:boolean,reason:string}"
+	],
+	"GET /api/boardshop/serviceworker-example": [
+		"{_note:string,_pattern:string,cachedRoutes:[],handlesFetch:boolean,source:string}"
+	],
+	"GET /api/boardshop/semantic-example": [
+		"{_pattern:string,hasMore:boolean,items:[{author:string,points:number,position:number,title:string}],meta:{og:site_name:string,og:title:string},returned:number,total:number}"
 	]
 }

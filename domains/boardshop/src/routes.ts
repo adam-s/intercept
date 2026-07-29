@@ -2263,4 +2263,72 @@ export const routes: DomainRoute[] = [
 			});
 		},
 	},
+	{
+		method: 'GET',
+		path: '/semantic-example',
+		examples: ['/semantic-example'],
+		upstream: ['localhost:4444/sites/newsboard/semantic'],
+		transport: 'Embedded JSON',
+		description:
+			'Structured data held in standards — JSON-LD, Open Graph — not in a framework payload.',
+		browserRequired: false,
+		handler: async (c) => {
+			// The third shape of data-in-markup, and the one a scan for framework
+			// markers never finds. Hydration payloads are framework internals
+			// (`__NEXT_DATA__`, `__NUXT__`); element attributes are the page's own
+			// convention; this is neither. It is standardised, so it can be read
+			// without knowing what built the page — and it is on a large share of
+			// the web because search engines ask for it. A page reporting "no
+			// embedded data" against framework markers alone routinely carries the
+			// whole record right here.
+			const res = await rateLimitedFetch(`${NEWSBOARD_URL}/semantic`);
+			if (!res.ok) return c.json({ error: `Page returned ${res.status}` }, 502);
+			const html = await res.text();
+
+			// JSON-LD: one or more <script type="application/ld+json"> blocks. A page
+			// may carry several — a breadcrumb list beside the thing you want — so
+			// collect them all rather than taking the first.
+			const jsonLd: unknown[] = [];
+			for (const m of html.matchAll(
+				/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
+			)) {
+				try {
+					jsonLd.push(JSON.parse(m[1]));
+				} catch {
+					// A malformed block is a fact about the page, not a reason to abandon
+					// the rest of them.
+				}
+			}
+
+			// Open Graph and Twitter cards: flat, and often the only place a title or
+			// canonical URL is stated without JavaScript.
+			const meta: Record<string, string> = {};
+			for (const m of html.matchAll(
+				/<meta[^>]+(?:property|name)=["'](og:[^"']+|twitter:[^"']+)["'][^>]+content=["']([^"']*)["']/gi,
+			)) {
+				meta[m[1]] = m[2];
+			}
+
+			// Flatten the item list, which is the shape most listing pages use.
+			const list = jsonLd.find((d) => (d as { '@type'?: string })?.['@type'] === 'ItemList') as
+				| { itemListElement?: Array<Record<string, unknown>>; numberOfItems?: number }
+				| undefined;
+			const items = (list?.itemListElement ?? []).map((el) => ({
+				position: el.position,
+				title: el.headline,
+				author: (el.author as { name?: string } | undefined)?.name,
+				points: (el.interactionStatistic as { userInteractionCount?: number } | undefined)
+					?.userInteractionCount,
+			}));
+
+			return c.json(
+				withCompleteness({
+					items,
+					total: list?.numberOfItems ?? items.length,
+					meta,
+					_pattern: 'semantic-markup',
+				}),
+			);
+		},
+	},
 ];

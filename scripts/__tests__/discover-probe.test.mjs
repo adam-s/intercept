@@ -470,3 +470,43 @@ describe('the scan does not read our own instrument as the target', () => {
 		expect(extractSnippets(`${OURS}\nfetch('/real/api')`).join(' ')).not.toContain('__ic_egress');
 	});
 });
+
+describe('structured data comes in three shapes, not one', () => {
+	// Every framework marker in the signature names a framework — Next, Nuxt,
+	// Remix, Apollo. Semantic markup is a standard, so it reads without knowing
+	// what built the page, and it is on a large share of the web because search
+	// engines ask for it. A page carrying no hydration payload at all routinely
+	// carries the whole record in JSON-LD.
+	it.each([
+		['JSON-LD', '<script type="application/ld+json">{"@type":"Product"}</script>'],
+		['microdata', '<div itemtype="https://schema.org/Product" itemprop="name">'],
+		['Open Graph', '<meta property="og:title" content="x">'],
+		['Twitter cards', '<meta name="twitter:card" content="summary">'],
+	])('detects %s as embedded data', (_name, html) => {
+		expect(Object.keys(transportEvidence(html, 'html'))).toContain('Embedded JSON');
+	});
+
+	it('still detects framework hydration', () => {
+		expect(Object.keys(transportEvidence('<script>__NEXT_DATA__</script>', 'html'))).toContain(
+			'Embedded JSON',
+		);
+	});
+
+	it('does not call an ordinary page embedded data', () => {
+		expect(Object.keys(transportEvidence('<p>hello</p>', 'html'))).not.toContain('Embedded JSON');
+	});
+});
+
+describe('adaptive media is more than one manifest format', () => {
+	// The row is named for the format that dominates it, but DASH answers the
+	// same question and is not rare. A signature that only knew HLS reported
+	// "no adaptive media" for a site streaming over DASH.
+	it.each([
+		['HLS', 'src="/stream/master.m3u8"'],
+		['DASH', 'src="/stream/manifest.mpd"'],
+		['DASH content type', 'application/dash+xml'],
+		['Smooth Streaming', 'application/vnd.ms-sstr+xml'],
+	])('detects %s', (_name, source) => {
+		expect(Object.keys(transportEvidence(source))).toContain('HLS/Media');
+	});
+});

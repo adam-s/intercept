@@ -202,6 +202,17 @@ export const TRANSPORT_SIGNATURES = {
 			/ng-state|TransferState/,
 			/__RELAY_PAYLOADS__/,
 			/data-server-rendered/,
+			// Semantic markup, which is a different affordance from framework
+			// hydration and was missing entirely. Every pattern above names a
+			// framework; these are standards, so they can be read without knowing
+			// what built the page — and they are on a large share of the web
+			// because search engines ask for them. A page carrying no hydration
+			// payload at all routinely carries the record you want right here.
+			/application\/ld\+json/,
+			/itemtype=["'][^"']*schema\.org/,
+			/<meta[^>]+property=["']og:/,
+			/<meta[^>]+name=["']twitter:/,
+			/itemprop=/,
 		],
 		library: [/<script[^>]+type=["']application\/json["']/],
 		wire: [],
@@ -279,6 +290,9 @@ export const TRANSPORT_SIGNATURES = {
 		library: [/simple-peer|peerjs|livekit|mediasoup/],
 		wire: [/application\/sdp/],
 	},
+	// Named for the format that dominates it, but the row is adaptive media in
+	// general: DASH manifests, Smooth Streaming, and SMIL all answer the same
+	// question — is the media delivered as a manifest plus segments, or as a file.
 	'HLS/Media': {
 		scope: 'both',
 		strong: [/\.m3u8/, /\.mpd\b/, /MediaSource/, /SourceBuffer/],
@@ -290,7 +304,11 @@ export const TRANSPORT_SIGNATURES = {
 			/jwplayer/,
 			/bitmovin/,
 		],
-		wire: [/application\/vnd\.apple\.mpegurl|application\/x-mpegurl|application\/dash\+xml/],
+		wire: [
+			/application\/dash\+xml/,
+			/application\/vnd\.ms-sstr\+xml/,
+			/application\/vnd\.apple\.mpegurl|application\/x-mpegurl|application\/dash\+xml/,
+		],
 	},
 	'gRPC-Web': {
 		scope: 'both',
