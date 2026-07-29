@@ -6,6 +6,7 @@
  * - /sites/liveboard/  — Real-time: WebSocket protobuf, SSE, crumb auth
  * - /sites/streamshop/ — Media: GraphQL, HLS streams, IRC chat
  * - /sites/databoard/  — API-heavy: gRPC-Web, encoded APIs, Bearer auth
+ * - /sites/benchmark/  — Calibration: one call per egress primitive, on load
  */
 
 import type { IncomingMessage } from 'node:http';
@@ -14,6 +15,7 @@ import type { Socket } from 'node:net';
 import { Hono } from 'hono';
 import { WebSocketServer } from 'ws';
 
+import { createBenchmarkSite } from './sites/benchmark';
 import { createBoardshopSite } from './sites/boardshop';
 import { createDataboardSite } from './sites/databoard';
 import { createHcaptchaSite } from './sites/hcaptcha';
@@ -33,6 +35,7 @@ export interface TestServerInstance {
 }
 
 const SITES = [
+	'benchmark',
 	'boardshop',
 	'liveboard',
 	'streamshop',
@@ -48,6 +51,7 @@ const WS_ROUTES: WSRoute[] = [
 	{ path: '/sites/boardshop/ws/notifications', mode: 'json' },
 	{ path: '/sites/boardshop/ws/subscriptions', mode: 'graphql-ws' },
 	{ path: '/sites/boardshop/ws/binary', mode: 'binary' },
+	{ path: '/sites/benchmark/ws', mode: 'json' },
 ];
 
 export async function createTestServer(
@@ -69,6 +73,7 @@ export async function createTestServer(
 	);
 
 	// Mount sites
+	app.route('/sites/benchmark', createBenchmarkSite());
 	app.route('/sites/boardshop', createBoardshopSite());
 	app.route('/sites/liveboard', createLiveboardSite());
 	app.route('/sites/streamshop', createStreamshopSite());

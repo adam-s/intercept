@@ -238,6 +238,31 @@ describe('it records what a reader needs to act', () => {
 		expect(h.drain()[0]?.body).toBe('id=7&dir=up');
 	});
 
+	// A hook invoked without its receiver still records an event, just a useless
+	// one: default verb, empty URL. The transport reads present while its
+	// evidence points nowhere, which is worse than no row at all.
+	it('gives a prototype hook its receiver, so XHR carries its verb and URL', () => {
+		const h = install();
+		h.run(`const x = new XMLHttpRequest(); x.open('POST','/api/detail/42'); x.send('{}')`);
+		expect(h.drain()[0]).toMatchObject({
+			kind: 'xhr',
+			method: 'POST',
+			url: '/api/detail/42',
+			body: '{}',
+		});
+	});
+
+	it('reads a form element method and action off its receiver', () => {
+		const h = install();
+		h.run(`
+			const f = Object.create(HTMLFormElement.prototype);
+			f.method = 'post';
+			f.action = '/vote';
+			f.submit();
+		`);
+		expect(h.drain()[0]).toMatchObject({ kind: 'form-submit', method: 'POST', url: '/vote' });
+	});
+
 	it('reads the verb off a Request object, not only off init', () => {
 		const h = install();
 		h.run(`fetch({ url:'https://x.test/r', method:'DELETE' })`);

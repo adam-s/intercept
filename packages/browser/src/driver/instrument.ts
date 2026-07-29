@@ -149,13 +149,22 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 		}
 	};
 
-	/** Wrap `obj[key]`, always calling through even when the hook fails. */
+	/**
+	 * Wrap `obj[key]`, always calling through even when the hook fails.
+	 *
+	 * The hook receives the call's `this`. Prototype methods are where the useful
+	 * detail lives — an XHR's verb and URL are stashed on the instance by `open`
+	 * and read back by `send`, a form's method and action live on the element —
+	 * so a hook invoked without its receiver silently records a default verb and
+	 * an empty URL. That produces a row rather than nothing, which is worse: the
+	 * transport still shows present while its evidence points nowhere.
+	 */
 	const patch = (
 		// biome-ignore lint/suspicious/noExplicitAny: patching foreign globals
 		obj: any,
 		key: string,
 		// biome-ignore lint/suspicious/noExplicitAny: patching foreign globals
-		hook: (args: any[]) => void,
+		hook: (this: any, args: any[]) => void,
 	) => {
 		try {
 			const orig = obj?.[key];
@@ -163,7 +172,7 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 			// biome-ignore lint/suspicious/noExplicitAny: patching foreign globals
 			obj[key] = function (this: unknown, ...args: any[]) {
 				try {
-					hook(args);
+					hook.call(this, args);
 				} catch {
 					/* a bad hook must not break the page */
 				}
@@ -416,12 +425,38 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 }
 
 /**
+ * Helpers a build step injects into transpiled output.
+ *
+ * Authoring the instrument as a function buys type checking and lint over two
+ * hundred lines of delicate patching, but shipping it means `toString()`, and
+ * transpiled output is not self-contained. Under esbuild's `--keep-names` —
+ * which tsx enables by default, and several bundlers do too — every function
+ * expression becomes `__name(fn, "id")` with `__name` defined in module scope.
+ * The stringified body carries the call and leaves the definition behind, so
+ * the page evaluates a reference it cannot resolve and the whole instrument
+ * dies with a ReferenceError before its first statement. Nothing throws on our
+ * side: install reports success, the drain returns an empty buffer, and the run
+ * reads a fully instrumented page as a site that makes no calls.
+ *
+ * Defining the helpers as identities makes the source self-sufficient whatever
+ * the build did. This list covers what is known to appear; a build that injects
+ * a new one fails the same silent way, which is why `scripts/capture-bench.mjs`
+ * exists and why a recall drop is treated as a regression rather than noise.
+ * No unit test can catch this — the test runner's own transpiler decides
+ * whether the helper is there at all.
+ */
+const BUILD_HELPER_PROLOGUE =
+	'var __name=function(f){return f};' +
+	'var __publicField=function(o,k,v){o[k]=v;return v};' +
+	'var __defProp=Object.defineProperty;';
+
+/**
  * The installable source. Wrapped so `addInitScript` can evaluate it directly,
  * and so the same string works in a page, an iframe, and a worker.
  */
-export const INSTRUMENT_SOURCE = `(${instrumentSource.toString()})(${JSON.stringify(
+export const INSTRUMENT_SOURCE = `(function(){${BUILD_HELPER_PROLOGUE}return (${instrumentSource.toString()})(${JSON.stringify(
 	INSTRUMENT_LIMITS,
-)}, ${JSON.stringify(EGRESS_GLOBAL)})`;
+)}, ${JSON.stringify(EGRESS_GLOBAL)})})()`;
 
 /** Reads and clears the buffer. Exported as source so any driver can evaluate it. */
 export const DRAIN_SOURCE = `(() => {
