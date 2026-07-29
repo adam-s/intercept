@@ -301,6 +301,16 @@ an example the checker skips it, and a skipped route reads exactly like a
 passing one. Use real identifiers: an example naming an id the site does not
 have fails the route for a reason that has nothing to do with the route.
 
+**Check recall before declaring done** — `--mode=coverage` diffs the endpoints
+the browser actually called against the routes you built, and prints a floor.
+Every unaccounted endpoint fired in a real browser, so every one exists: build a
+route for it, or write in the elimination table why not. Matching is weak by
+design, so "unaccounted" means unexplained rather than certainly missed — but an
+unexplained endpoint is not a finished discovery.
+
+Treat the number as a floor. Interaction-gated endpoints never fire under
+passive browsing, so the real surface is always larger than it says.
+
 **Test each route before building the next**, then assert the whole set with
 `node scripts/route-spec.mjs`. Its "not probed" line is a coverage report, not a
 footnote — a domain whose routes are mostly unprobed has mostly not been

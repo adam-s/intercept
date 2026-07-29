@@ -494,6 +494,83 @@ export function extractHighValueClues(source) {
 		.slice(0, 20);
 }
 
+/** Third parties whose traffic is telemetry, not the site's own API. */
+const NOISE =
+	/google-analytics|googletagmanager|googlesyndication|doubleclick|googleadservices|facebook\.|fbcdn|scorecardresearch|quantserve|amplitude|segment\.|mixpanel|sentry|bugsnag|newrelic|datadoghq|hotjar|optimizely|branch\.io|adservice|criteo|taboola|outbrain|pubmatic|rubiconproject|casalemedia|openx|ssp\.|adnxs|\.ads?\.|consent|cookielaw|onetrust|gstatic|fonts\.|recaptcha/i;
+
+/** Endpoint identity: host + path with volatile id segments templated. Pure. */
+export function normalizeEndpoint(rawUrl) {
+	let host = '';
+	let path = rawUrl;
+	try {
+		const u = new URL(rawUrl, 'http://placeholder.invalid');
+		host = u.host === 'placeholder.invalid' ? '' : u.host;
+		path = u.pathname;
+	} catch {
+		/* keep the raw string */
+	}
+	const templated = path
+		.split('/')
+		.map((seg) => {
+			if (/^\d{2,}$/.test(seg)) return '{id}';
+			if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(seg)) return '{uuid}';
+			if (/^[0-9a-f]{24,}$/i.test(seg)) return '{hash}';
+			if (/^[A-Z0-9._-]{2,}$/.test(seg) && /\d/.test(seg) && seg.length > 3) return '{id}';
+			return seg;
+		})
+		.join('/');
+	return host ? `${host}${templated}` : templated;
+}
+
+/**
+ * The recall floor: endpoints the browser demonstrably called, against the
+ * routes actually built.
+ *
+ * Captured traffic is the one ground truth available without a manifest — an
+ * endpoint that fired provably exists. It is a FLOOR, not a full answer:
+ * interaction-gated endpoints never fire under passive browsing, so the real
+ * surface is larger than this and the number below is optimistic.
+ *
+ * Correlation is deliberately weak. A built route is `/api/<domain>/games`
+ * while the endpoint it consumes is `gql.twitch.tv/gql` — the names share
+ * nothing, and a handler's upstream call is not declared anywhere. So this
+ * matches only where a route's path or examples visibly mention a fragment of
+ * the endpoint, and reports everything else as unaccounted rather than
+ * guessing. An unaccounted endpoint is a question for the agent, not a verdict.
+ */
+export function coverageDiff(entries = [], routes = [], examples = []) {
+	const haystack = [...routes, ...examples].join(' ').toLowerCase();
+
+	const endpoints = new Map();
+	for (const e of entries) {
+		if (e.method === 'DOCUMENT' || e.method === 'WS-FRAME') continue;
+		if (NOISE.test(e.url)) continue;
+		const key = normalizeEndpoint(e.url);
+		if (!key || key === '/') continue;
+		endpoints.set(key, (endpoints.get(key) ?? 0) + 1);
+	}
+
+	const accounted = [];
+	const unaccounted = [];
+	for (const [endpoint, hits] of endpoints) {
+		const tail =
+			endpoint
+				.split('/')
+				.filter((x) => x && !x.startsWith('{'))
+				.pop() ?? '';
+		const match = tail.length > 3 && haystack.includes(tail.toLowerCase());
+		(match ? accounted : unaccounted).push({ endpoint, hits });
+	}
+
+	const total = accounted.length + unaccounted.length;
+	return {
+		total,
+		accounted: accounted.sort((a, b) => b.hits - a.hits),
+		unaccounted: unaccounted.sort((a, b) => b.hits - a.hits),
+		recallFloor: total === 0 ? null : Math.round((accounted.length / total) * 100),
+	};
+}
+
 /** Group traffic entries into a per-endpoint summary. Pure. */
 export function summarize(entries) {
 	const byEndpoint = new Map();
@@ -557,7 +634,7 @@ export const PAGINATION_SELECTORS = [
 
 const HELP = `discover-probe — the mechanical half of the discovery protocol
 
-  node scripts/discover-probe.mjs --mode=scan|sources|paginate|probe|graphql|bundles
+  node scripts/discover-probe.mjs --mode=scan|sources|coverage|paginate|probe|graphql|bundles
                                   [--url=PATH] [--port=N] [--budget=N]
                                   [--limit=N] [--timeout=MS] [--settle=MS] [--json]
 
@@ -759,6 +836,38 @@ async function main() {
 		} else {
 			console.log(`No schema returned from ${url}. Raw response:`);
 			console.log(JSON.stringify(res.body ?? res.text)?.slice(0, 1500));
+		}
+		return 0;
+	}
+
+	if (opts.mode === 'coverage') {
+		const entries = await getTraffic(base, opts.timeout);
+		const index = await api(base, '/api', undefined, opts.timeout);
+		const doms = (index.body?.domains ?? []).filter((d) => !opts.domain || d.name === opts.domain);
+		const routes = doms.flatMap((d) => d.routes ?? []);
+		const examples = doms.flatMap((d) => d.examples ?? []);
+
+		const diff = coverageDiff(entries, routes, examples);
+		if (diff.total === 0) {
+			console.log(captureVerdict(entries).detail);
+			return 1;
+		}
+
+		console.log(
+			`${routes.length} route(s) built. ${diff.total} endpoint(s) the browser actually called.`,
+		);
+		console.log(`Recall floor: ~${diff.recallFloor}% — a FLOOR, because interaction-gated`);
+		console.log('endpoints never fire under passive browsing. The real surface is larger.\n');
+
+		if (diff.unaccounted.length) {
+			console.log(`${diff.unaccounted.length} endpoint(s) with no visibly matching route:`);
+			for (const u of diff.unaccounted.slice(0, 30)) console.log(`  ${u.hits}×  ${u.endpoint}`);
+			console.log('\nEach of these fired in a real browser, so each exists. Account for');
+			console.log('every one: build a route, or record in the elimination table why not.');
+			console.log('Matching is weak by design — a route may cover one of these without');
+			console.log('naming it. Unaccounted means unexplained, not necessarily missed.');
+		} else {
+			console.log('Every captured endpoint has a plausibly matching route.');
 		}
 		return 0;
 	}

@@ -7,11 +7,13 @@ import { describe, expect, it } from 'vitest';
 import {
 	contentTypeOf,
 	contradictions,
+	coverageDiff,
 	endpointLiterals,
 	extractHighValueClues,
 	extractHosts,
 	extractSnippets,
 	hydrationMarkers,
+	normalizeEndpoint,
 	PAGINATION_KEYS,
 	PAGINATION_SELECTORS,
 	paginationParams,
@@ -305,5 +307,60 @@ describe('clue extraction', () => {
 	it('returns nothing for source with no clues', () => {
 		expect(extractHighValueClues('function add(a,b){return a+b}')).toEqual([]);
 		expect(extractSnippets('const x = 1;')).toEqual([]);
+	});
+});
+
+describe('coverageDiff — the recall floor', () => {
+	const entries = [
+		{ method: 'GET', url: 'https://gql.twitch.tv/gql' },
+		{ method: 'GET', url: 'https://query1.finance.yahoo.com/ws/insights/v3/finance/insights' },
+		{ method: 'GET', url: 'https://www.google-analytics.com/collect' },
+		{ method: 'DOCUMENT', url: 'https://x.test/' },
+	];
+
+	it('drops telemetry and documents, keeping only candidate APIs', () => {
+		const d = coverageDiff(entries, [], []);
+		expect(d.total).toBe(2);
+	});
+
+	// Weak on purpose: a handler's upstream call is declared nowhere, so a
+	// confident auto-match would invent coverage that does not exist.
+	it('accounts for an endpoint a route visibly names, and no more', () => {
+		const d = coverageDiff(entries, ['GET /api/y/insights'], []);
+		expect(d.accounted.map((a) => a.endpoint)).toEqual([
+			'query1.finance.yahoo.com/ws/insights/v3/finance/insights',
+		]);
+		expect(d.unaccounted.map((u) => u.endpoint)).toEqual(['gql.twitch.tv/gql']);
+		expect(d.recallFloor).toBe(50);
+	});
+
+	it('matches via examples as well as route paths', () => {
+		const d = coverageDiff(entries, [], ['GET /api/y/x?q=insights']);
+		expect(d.accounted).toHaveLength(1);
+	});
+
+	it('reports null rather than a misleading 0% when nothing was captured', () => {
+		expect(coverageDiff([], [], []).recallFloor).toBeNull();
+	});
+
+	it('counts repeat calls to one endpoint once', () => {
+		const repeated = [entries[0], entries[0], entries[0]];
+		const d = coverageDiff(repeated, [], []);
+		expect(d.total).toBe(1);
+		expect(d.unaccounted[0].hits).toBe(3);
+	});
+});
+
+describe('normalizeEndpoint', () => {
+	it.each([
+		['https://a.test/v2/users/12345678/tweets', 'a.test/v2/users/{id}/tweets'],
+		['https://a.test/x/550e8400-e29b-41d4-a716-446655440000', 'a.test/x/{uuid}'],
+		['https://a.test/p/DECK-001', 'a.test/p/{id}'],
+	])('templates volatile segments in %s', (url, expected) => {
+		expect(normalizeEndpoint(url)).toBe(expected);
+	});
+
+	it('leaves stable path segments alone', () => {
+		expect(normalizeEndpoint('https://a.test/v1/finance/search')).toBe('a.test/v1/finance/search');
 	});
 });
