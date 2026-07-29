@@ -499,3 +499,43 @@ describe('polling is a cadence, and most cadences are not polling', () => {
 		expect(v.find((r) => r.transport === 'Polling/Long-poll')?.present).toBe(false);
 	});
 });
+
+describe('the reporting cap drops the least informative rows, and says so', () => {
+	// Dropping at insert time was first-come-first-served, so on a page with a
+	// hundred ad hosts the cap filled with whatever loaded first and a transport
+	// appearing only in a later row read as absent. A live pass hit exactly 200
+	// rows across 89 hosts with nothing in the output saying it was partial.
+	const ads = Array.from({ length: 260 }, (_, i) =>
+		ev({ kind: 'fetch', url: `https://pixel${i}.rubiconproject.com/px` }),
+	);
+	const real = ev({ kind: 'websocket', method: 'WS', url: 'wss://api.site.test/live' });
+
+	it('keeps a late first-party row over early ad noise', () => {
+		const rows = buildManifest([...ads, real]);
+		expect(rows.some((r) => r.host === 'api.site.test')).toBe(true);
+	});
+
+	it('still reports the transport that only a late row proves', () => {
+		const v = deriveTransports(buildManifest([...ads, real]));
+		expect(v.find((t) => t.transport === 'WebSocket')?.present).toBe(true);
+	});
+
+	it('marks the result partial rather than presenting it as complete', () => {
+		const rows = buildManifest([...ads, real]);
+		expect(rows).toHaveLength(MANIFEST_LIMITS.maxRows);
+		expect(rows.truncatedFrom).toBeGreaterThan(MANIFEST_LIMITS.maxRows);
+	});
+
+	it('leaves an ordinary page unmarked', () => {
+		const rows = buildManifest([ev({ url: 'https://x.test/a' })]);
+		expect(rows.truncatedFrom).toBeUndefined();
+	});
+
+	it('prefers a row carrying a response shape over one carrying nothing', () => {
+		const bare = Array.from({ length: 260 }, (_, i) => ev({ url: `https://x.test/bare/${i}/p` }));
+		const rows = buildManifest(bare, [
+			{ method: 'GET', url: 'https://x.test/api/items', body: { items: [] } },
+		]);
+		expect(rows.some((r) => r.shape)).toBe(true);
+	});
+});

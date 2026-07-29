@@ -52,8 +52,34 @@ export interface ManifestRow {
 	lastAt?: number;
 }
 
+/**
+ * A manifest, plus a note when the reporting cap dropped rows.
+ *
+ * Carried on the result rather than left implicit: a truncated list presented
+ * as a complete one is the failure this whole layer exists to remove, and a
+ * caller that cannot tell will present it.
+ */
+export type Manifest = ManifestRow[] & { truncatedFrom?: number };
+
 /** Bounds, so a pathological page cannot produce a pathological manifest. */
-export const MANIFEST_LIMITS = { maxRows: 200, maxInitiators: 3, maxShapeKeys: 40 } as const;
+export const MANIFEST_LIMITS = {
+	/** Rows reported. Applied after collection, keeping the most informative. */
+	maxRows: 200,
+	/** Memory guard while collecting. Far above any real page. */
+	hardCeiling: 3_000,
+	maxInitiators: 3,
+	maxShapeKeys: 40,
+} as const;
+
+/**
+ * Hosts whose traffic is telemetry rather than a site's own data.
+ *
+ * Used only to decide what to drop first when a page produces more call shapes
+ * than can be reported — an ad exchange losing its row costs nothing, a site's
+ * own endpoint losing one costs a transport.
+ */
+const LOW_VALUE_HOST =
+	/doubleclick|rubiconproject|adsystem|adnxs|criteo|taboola|outbrain|scorecardresearch|google-analytics|googletagmanager|quantserve|moatads|adsrvr|casalemedia|pubmatic|openx|indexww|3lift|sharethrough|teads|smartadserver|yieldmo|bidswitch|adform|zeta|id5-sync|crwdcntrl|demdex|everesttech|sentry\.io|newrelic|datadoghq/i;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEXISH = /^[0-9a-f]{8,}$/i;
@@ -141,7 +167,7 @@ function keyOf(kind: string, method: string, t: ReturnType<typeof parseTarget>):
 export function buildManifest(
 	events: EgressEvent[],
 	wire: Array<{ method: string; url: string; body?: unknown }> = [],
-): ManifestRow[] {
+): Manifest {
 	const rows = new Map<string, ManifestRow>();
 
 	const add = (
@@ -154,7 +180,13 @@ export function buildManifest(
 		const k = keyOf(kind === 'wire' ? 'wire' : kind, method, t);
 		let row = rows.get(k);
 		if (!row) {
-			if (rows.size >= MANIFEST_LIMITS.maxRows) return;
+			// Bounded, but not by refusing late arrivals. Dropping at insert time is
+			// first-come-first-served, so on a page with a hundred ad hosts the cap
+			// filled with whatever loaded first and a transport appearing only in a
+			// later row read as absent. The hard ceiling here is a memory guard; the
+			// reporting cap is applied at the end, after everything is known and the
+			// least informative rows can be the ones to go.
+			if (rows.size >= MANIFEST_LIMITS.hardCeiling) return;
 			row = {
 				kind,
 				method,
@@ -193,9 +225,21 @@ export function buildManifest(
 
 	// Frequent first, but a shape seen once still has a row — a once-only call is
 	// often the interesting one, so ordering must not become truncation.
-	return [...rows.values()].sort(
+	const all = [...rows.values()].sort(
 		(a, b) => b.count - a.count || a.template.localeCompare(b.template),
 	);
+	if (all.length <= MANIFEST_LIMITS.maxRows) return all as Manifest;
+
+	// Over the reporting cap: drop the rows least likely to carry a transport.
+	// A carried response shape or request body is evidence; an ad exchange's
+	// pixel is not. Marked so the caller can say the manifest is partial rather
+	// than presenting a truncated list as a complete one.
+	const value = (r: ManifestRow) =>
+		(LOW_VALUE_HOST.test(r.host) ? 0 : 2) + (r.shape || r.body ? 1 : 0);
+	const kept = all.sort((a, b) => value(b) - value(a) || b.count - a.count);
+	const out = kept.slice(0, MANIFEST_LIMITS.maxRows) as Manifest;
+	out.truncatedFrom = all.length;
+	return out;
 }
 
 /**

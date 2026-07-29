@@ -1212,6 +1212,16 @@ async function main() {
 		console.log(
 			`${rows.length} call shape(s) from ${result.events ?? 0} JS event(s) + ${result.wireEntries ?? 0} wire entr(ies)`,
 		);
+		// A truncated list presented as a complete one is the failure this whole
+		// layer exists to remove, so it is stated rather than left to be noticed.
+		if (result.truncatedFrom) {
+			console.log(
+				`PARTIAL: ${result.truncatedFrom} shapes seen, ${rows.length} reported. Lowest-value rows dropped first`,
+			);
+			console.log(
+				'  (ad and analytics hosts before anything carrying a body or a response shape).',
+			);
+		}
 		console.log();
 		const manifestLines = (result.manifestText ?? '').split('\n').filter(Boolean);
 		for (const line of manifestLines.slice(0, opts.limit)) console.log(`  ${line}`);

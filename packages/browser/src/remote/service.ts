@@ -1405,6 +1405,7 @@ export class RemoteBrowserService {
 	 */
 	manifestFromWire(wire: Array<{ method: string; url: string; body?: unknown }> = []): {
 		rows: ManifestRow[];
+		truncatedFrom?: number;
 		transports: TransportVerdict[];
 		events: number;
 		challenges: ChallengePresence[];
@@ -1412,6 +1413,7 @@ export class RemoteBrowserService {
 		const rows = buildManifest([], wire);
 		return {
 			rows,
+			truncatedFrom: (rows as { truncatedFrom?: number }).truncatedFrom,
 			transports: deriveTransports(rows),
 			events: 0,
 			challenges: detectChallengePresence(rows),
@@ -1422,6 +1424,7 @@ export class RemoteBrowserService {
 		wire: Array<{ method: string; url: string; body?: unknown }> = [],
 	): Promise<{
 		rows: ManifestRow[];
+		truncatedFrom?: number;
 		transports: TransportVerdict[];
 		events: number;
 		challenges: ChallengePresence[];
@@ -1430,6 +1433,7 @@ export class RemoteBrowserService {
 		const rows = buildManifest(events, wire);
 		return {
 			rows,
+			truncatedFrom: (rows as { truncatedFrom?: number }).truncatedFrom,
 			transports: deriveTransports(rows),
 			events: events.length,
 			// Reported alongside the transports because it changes what the
