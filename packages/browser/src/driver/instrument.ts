@@ -131,9 +131,23 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 			if (typeof FormData !== 'undefined' && v instanceof FormData) {
 				return cut(`[FormData ${[...v.keys()].join(',')}]`);
 			}
+			// A binary payload used to be recorded as its size and nothing else, which
+			// is enough to prove a socket exists and useless for deciding what it
+			// carries. Protobuf, msgpack and length-prefixed envelopes all arrive
+			// this way, and a row saying `[binary 128b]` reads exactly like an empty
+			// stream. A bounded base64 prefix keeps it decodable.
+			const toBase64 = (bytes: Uint8Array): string => {
+				const capped = bytes.subarray(0, Math.floor(limits.maxBodyChars * 0.75));
+				let s = '';
+				for (const b of capped) s += String.fromCharCode(b);
+				const b64 = typeof btoa === 'function' ? btoa(s) : '';
+				return `[base64:${bytes.length}b] ${b64}${bytes.length > capped.length ? '…' : ''}`;
+			};
 			if (typeof ArrayBuffer !== 'undefined') {
-				if (ArrayBuffer.isView(v)) return `[binary ${anyV.byteLength}b]`;
-				if (v instanceof ArrayBuffer) return `[binary ${v.byteLength}b]`;
+				if (ArrayBuffer.isView(v)) {
+					return toBase64(new Uint8Array(anyV.buffer, anyV.byteOffset, anyV.byteLength));
+				}
+				if (v instanceof ArrayBuffer) return toBase64(new Uint8Array(v));
 			}
 			if (typeof Blob !== 'undefined' && v instanceof Blob) {
 				return `[Blob ${anyV.size}b ${anyV.type || 'unknown'}]`;

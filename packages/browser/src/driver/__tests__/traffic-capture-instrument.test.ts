@@ -274,3 +274,54 @@ describe('engine plumbing is not site traffic', () => {
 		expect(isEngineInternal(url)).toBe(false);
 	});
 });
+
+describe('binary WebSocket frames survive the wire path', () => {
+	/** A socket double shaped like Playwright's. */
+	function socketPage() {
+		const captured = [];
+		const handlers = {};
+		const ws = {
+			url: () => 'wss://x.test/stream',
+			on: (event, fn) => {
+				handlers[event] = fn;
+			},
+		};
+		const page = {
+			on: (event, fn) => {
+				if (event === 'websocket') fn(ws);
+			},
+			context: () => null,
+		};
+		startTrafficCapture(page, (req, res) => captured.push({ req, res }));
+		return { captured, frame: (payload) => handlers.framereceived(payload) };
+	}
+
+	// Decoding protobuf as utf8 yields replacement characters and destroys the
+	// payload, so the socket carrying the most interesting data on a site reads
+	// as a socket carrying noise — and the row gets written off as empty.
+	it('keeps a binary frame decodable as base64', () => {
+		const h = socketPage();
+		h.frame(Buffer.from([8, 150, 1]));
+		const body = h.captured.find((c) => c.res.body?.type === 'websocket-frame')?.res.body;
+		expect(body.encoding).toBe('base64');
+		expect(body.data).toBe(Buffer.from([8, 150, 1]).toString('base64'));
+		expect(body.size).toBe(3);
+	});
+
+	it('leaves a text frame as text', () => {
+		const h = socketPage();
+		h.frame('{"tick":1}');
+		const body = h.captured.find((c) => c.res.body?.type === 'websocket-frame')?.res.body;
+		expect(body.encoding).toBe('utf8');
+		expect(body.data).toEqual({ tick: 1 });
+	});
+
+	// A reader cannot tell base64 from text by looking, and guessing wrong either
+	// mangles a payload or decodes one that was never encoded.
+	it('states the encoding rather than leaving it to be inferred', () => {
+		const h = socketPage();
+		h.frame(Buffer.from('not really text', 'binary'));
+		const body = h.captured.find((c) => c.res.body?.type === 'websocket-frame')?.res.body;
+		expect(body).toHaveProperty('encoding');
+	});
+});

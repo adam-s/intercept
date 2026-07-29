@@ -112,6 +112,9 @@ function fakeGlobal(over: Record<string, unknown> = {}) {
 		// the instrument branches on have to be supplied deliberately. Reusing the
 		// host's keeps `instanceof` meaningful across the boundary.
 		URLSearchParams,
+		// The base64 path is the whole point of the binary handling, so the fake
+		// global has to carry the encoder a browser would.
+		btoa: (str) => Buffer.from(str, 'binary').toString('base64'),
 		FormData,
 		Blob,
 		ReadableStream,
@@ -260,12 +263,36 @@ describe('it records what a reader needs to act', () => {
 	// A typed array survives JSON.stringify as `{"0":0,"1":0,…}`, so a clip that
 	// relies on a throw spends the whole preview budget on zeros and loses the
 	// single fact worth keeping: the payload was binary.
-	it('labels a binary body by size instead of expanding it', () => {
+	// Superseded: this used to require a binary body to be recorded as its size
+	// and nothing else. Size alone proves a socket exists and is useless for
+	// deciding what it carries — protobuf, msgpack and length-prefixed envelopes
+	// all arrive this way, and `[binary 128b]` reads exactly like an empty stream.
+	it('keeps a binary body decodable rather than reducing it to a size', () => {
 		const h = install();
-		h.run(`fetch('/upload', { method:'POST', body: new Uint8Array(8) })`);
-		const e = h.drain()[0];
-		expect(e.kind).toBe('fetch');
-		expect(e.body).toBe('[binary 8b]');
+		h.run(`fetch('/upload', { method:'POST', body: new Uint8Array([1,2,3]) })`);
+		const body = h.drain()[0]?.body as string;
+		expect(body).toContain('[base64:3b]');
+		expect(body).toContain('AQID');
+	});
+
+	it('bounds a large binary body instead of carrying it whole', () => {
+		const h = install();
+		h.run(`fetch('/upload', { method:'POST', body: new Uint8Array(9000) })`);
+		const body = h.drain()[0]?.body as string;
+		expect(body).toContain('[base64:9000b]');
+		expect(body.length).toBeLessThan(INSTRUMENT_LIMITS.maxBodyChars * 2);
+		expect(body.endsWith('…')).toBe(true);
+	});
+
+	// The case this exists for: a socket whose frames are protobuf.
+	it('keeps a binary WebSocket frame decodable', () => {
+		const h = install();
+		h.run(`
+			const ws = new WebSocket('wss://x.test/stream');
+			ws.emit('message', { data: new Uint8Array([8, 150, 1]).buffer });
+		`);
+		const frame = h.drain().find((e) => e.kind === 'websocket-frame');
+		expect(String(frame?.body)).toContain('[base64:3b]');
 	});
 
 	it('reads a form-encoded body out, because the encoded text is the request', () => {

@@ -186,7 +186,16 @@ export function startTrafficCapture(
 
 		const frame = (direction: 'received' | 'sent') => (payload: string | Buffer) => {
 			if (stopped) return;
-			const text = typeof payload === 'string' ? payload : payload.toString('utf8');
+			// A binary frame is not text. Decoding protobuf, msgpack or a length-
+			// prefixed envelope as utf8 yields replacement characters and destroys
+			// the payload, so a socket carrying the most interesting data on the
+			// site reads as a socket carrying noise — and the row gets written off
+			// as an empty stream. Base64 keeps it decodable by whoever reads the
+			// capture, and the encoding is stated because a reader cannot tell
+			// base64 from text by looking: guessing wrong either mangles a payload
+			// or decodes one that was never encoded.
+			const binary = typeof payload !== 'string';
+			const text = binary ? (payload as Buffer).toString('base64') : (payload as string);
 			onCapture(
 				{ method: 'WS-FRAME', url, headers: {}, body: null },
 				{
@@ -196,8 +205,9 @@ export function startTrafficCapture(
 					body: {
 						type: 'websocket-frame',
 						direction,
-						data: parseBody(text),
-						size: text.length,
+						encoding: binary ? 'base64' : 'utf8',
+						data: binary ? text : parseBody(text),
+						size: binary ? (payload as Buffer).length : text.length,
 					},
 				},
 			);

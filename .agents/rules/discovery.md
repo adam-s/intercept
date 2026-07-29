@@ -202,10 +202,13 @@ honest result. "Complete" without that qualifier is a claim about both.
 - **Traffic resets on navigation.** Capture before navigating away; re-capture
   after the new page settles.
 - **A socket is captured, and its frames are the finding.** The handshake alone
-  says a socket exists; one frame says what rides inside it, and a text protocol
-  or an encrypted envelope looks like an empty result to a reader expecting
-  JSON. A page may also open several sockets for different jobs, so one is not
-  the answer.
+  says a socket exists; one frame says what rides inside it. A text protocol, an
+  encrypted envelope, or a binary encoding all look like an empty result to a
+  reader expecting JSON — so read a frame before deciding a socket carries
+  nothing. Binary frames are captured base64-encoded with the encoding stated,
+  which means they are decodable rather than decoded: identifying the schema is
+  still yours to do. A page may also open several sockets for different jobs, so
+  one is not the answer.
 - If the browser connection drops, reconnect once. If that fails, continue with
   what you have and say so — a give-up is a reported outcome.
 - **A rate limit you caused is not a property of the target.** Probing hammers
