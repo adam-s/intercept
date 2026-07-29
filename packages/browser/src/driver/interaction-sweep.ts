@@ -143,10 +143,27 @@ export const DESTRUCTIVE = [
 	'confirm',
 ];
 
-/** True when a control's label or attributes read as state-changing. */
+/**
+ * True when a control's label or attributes read as state-changing.
+ *
+ * Matched on whole words, not substrings. As substrings these words are far too
+ * common to mean anything: on a site about posts, `post` matches
+ * `post-thumbnail`, `postId`, and "Show 3 posts", and `report` matches
+ * `reporting`. Measured on a live run, that made the backstop the primary guard
+ * and refused ordinary read-only hovers — the opposite of the intent, since a
+ * check that refuses everything stops discriminating.
+ *
+ * Multi-word entries still match as phrases; the boundary is applied at each
+ * end rather than inside.
+ */
 export function isDestructive(label: string): boolean {
 	const l = label.toLowerCase();
-	return DESTRUCTIVE.some((w) => l.includes(w));
+	// Hyphen and underscore count as *inside* a word, not as boundaries, because
+	// the strings this has to survive are identifiers: `post-thumbnail` and
+	// `post_id` are one word each, and treating `-` as a break put `post` back in
+	// both. A space or punctuation is a real boundary.
+	const EDGE = '[^a-z0-9_-]';
+	return DESTRUCTIVE.some((w) => new RegExp(`(^|${EDGE})${w}(${EDGE}|$)`).test(l));
 }
 
 /**
@@ -254,8 +271,14 @@ export function elementMeta(el: Element): ElementMeta {
 	// uninspectable, and it reports the dwells and scrolls it managed as though
 	// it had run. A one-line `attr` helper cost six of seven provocations
 	// exactly this way. `assertPageFunctionIsPortable` in the tests is the gate.
+	// A <style> or <script> is not a control, and reading its text as a label
+	// judged a stylesheet's own class names as a caption — `.post-thumbnail`
+	// vetoed a read-only hover. Its text is code, so it carries no label at all.
+	const tag = el.tagName.toLowerCase();
+	const textual = tag === 'style' || tag === 'script' || tag === 'template' ? '' : undefined;
+
 	const label = [
-		(el as HTMLElement).innerText,
+		textual ?? (el as HTMLElement).innerText,
 		el.getAttribute('aria-label') || '',
 		el.getAttribute('title') || '',
 		el.getAttribute('name') || '',

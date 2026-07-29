@@ -326,11 +326,22 @@ export function undeclared(routes = []) {
 
 export function probeTargets(routes = [], examples = []) {
 	const exampleTargets = examples.filter((e) => e.startsWith('GET ')).map((e) => e.slice(4));
+
+	// Coverage is a claim about a specific route, so it is matched on method AND
+	// path. Stripping the method first made every example cover every same-stem
+	// route regardless of verb: a `GET /api/x/post/aww/1v96p9o` example marked
+	// `POST /api/x/post/:sub/:id/comments/more` covered, because their stems
+	// agree. The POST route then dropped out of `skipped` — it is only listed
+	// when *not* covered — so `skippedUnprobeable` stayed zero, the "not probed"
+	// line never printed, and the run reported `✓ 17 route(s) passed` over a
+	// route nothing had called. That is exactly the silence the docblock above
+	// exists to prevent, reintroduced one line lower down.
 	const covered = new Set();
 	for (const target of exampleTargets) {
 		const base = target.split('?')[0];
 		for (const route of routes) {
-			const path = route.replace(/^[A-Z]+ /, '');
+			if (!route.startsWith('GET ')) continue;
+			const path = route.slice(4);
 			const stem = path.split('/:')[0].split('/*')[0];
 			if (base === path || base.startsWith(`${stem}/`) || base === stem) covered.add(route);
 		}

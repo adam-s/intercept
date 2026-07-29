@@ -310,3 +310,35 @@ describe('a streaming route is asserted on its own terms', () => {
 		expect(f.map((x) => x.check)).toContain('content-type');
 	});
 });
+
+describe('coverage is a claim about one route, not one path', () => {
+	/**
+	 * Found on a live run: `✓ 17 route(s) passed` printed over a POST route that
+	 * nothing had called. Matching stripped the method first, so a GET example
+	 * covered a same-stem POST route; the POST route then dropped out of
+	 * `skipped` — it is listed only when *not* covered — so the "not probed"
+	 * line never printed and the run reported a clean pass over a gap.
+	 */
+	it('a GET example does not mark a same-stem POST route covered', () => {
+		const routes = ['GET /api/x/post/:sub/:id', 'POST /api/x/post/:sub/:id/comments/more'];
+		const examples = ['GET /api/x/post/aww/1v96p9o'];
+		const { skipped } = probeTargets(routes, examples);
+		expect(skipped).toContain('POST /api/x/post/:sub/:id/comments/more');
+	});
+
+	it('still covers the GET route its example names', () => {
+		const routes = ['GET /api/x/post/:sub/:id'];
+		const examples = ['GET /api/x/post/aww/1v96p9o'];
+		const { targets, skipped } = probeTargets(routes, examples);
+		expect(targets).toEqual(['/api/x/post/aww/1v96p9o']);
+		expect(skipped).toEqual([]);
+	});
+
+	// An unprobeable route must be counted so the runner can say so. Silence here
+	// is the whole defect: nothing failed, so nothing was reported.
+	it('reports every non-GET route as skipped so the runner can announce it', () => {
+		const routes = ['POST /api/x/a', 'DELETE /api/x/b', 'GET /api/x/c'];
+		const { skipped } = probeTargets(routes, []);
+		expect(skipped.sort()).toEqual(['DELETE /api/x/b', 'POST /api/x/a']);
+	});
+});

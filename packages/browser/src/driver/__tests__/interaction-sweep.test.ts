@@ -412,3 +412,37 @@ describe('page-bound functions survive the build', () => {
 		);
 	});
 });
+
+describe('the caption backstop discriminates', () => {
+	/**
+	 * Found on a live run against a site about posts. `post` and `report` as bare
+	 * substrings matched `post-thumbnail`, `postId`, "Show 3 posts" and
+	 * `reporting`, so the backstop became the primary guard and refused ordinary
+	 * read-only hovers. A check that refuses everything has stopped checking.
+	 */
+	it.each([
+		'post-thumbnail',
+		'postId',
+		'Show 3 posts',
+		'reporting',
+		'#blocking-modal-contents::part(panel)',
+		'Posted by u/spez',
+	])('allows the read-only label %s', (label) => {
+		expect(isDestructive(label)).toBe(false);
+	});
+
+	it.each([
+		'Post',
+		'Post comment',
+		'Report',
+		'Delete',
+		'Log out',
+		'Submit',
+	])('still refuses %s', (label) => {
+		expect(isDestructive(label)).toBe(true);
+	});
+
+	it('matches a multi-word entry as a phrase', () => {
+		expect(isDestructive('Sign out of your account')).toBe(true);
+	});
+});
