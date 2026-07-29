@@ -201,6 +201,18 @@ honest result. "Complete" without that qualifier is a claim about both.
   concluding the site is empty.
 - **Traffic resets on navigation.** Capture before navigating away; re-capture
   after the new page settles.
+- **Follow the script chain to its end.** A worker is often a bootstrap rather
+  than the code: a blob that pulls the real script in, which pulls a WASM module
+  in after that. Stopping at the first hop stops short of where the work
+  happens. A blob has no fetchable URL, so its text is captured at the moment it
+  becomes one; the script it names usually *is* fetchable, and if the browser is
+  refused by CORS then direct HTTP is the right rung — a public static asset
+  needs no session, and elimination has just shown the browser cannot reach it.
+- **A marker in source is not an observed call.** Reading a bundle tells you
+  what the code can do, not what it did. A capability referenced in a media
+  worker may be a fallback path that never runs. Say which you have: observed
+  firing, or named in source — they justify different claims and only one of
+  them is evidence the transport is in use.
 - **A worker's scope is not captured, and a worker is where realtime hides.** A
   worker has its own globals, so nothing patched in the page sees its requests
   and a socket opened inside one appears in no capture at all. Its source is

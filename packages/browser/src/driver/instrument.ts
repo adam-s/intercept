@@ -62,6 +62,7 @@ export type EgressKind =
 	| 'websocket-frame'
 	| 'eventsource'
 	| 'stream-response'
+	| 'blob-script'
 	| 'beacon'
 	| 'webrtc'
 	| 'webtransport'
@@ -76,14 +77,24 @@ export type EgressKind =
 	| 'broadcast';
 
 /** Hard caps. A page left open for an hour must not grow this without bound. */
-export const INSTRUMENT_LIMITS = { maxEvents: 2000, maxBodyChars: 512 } as const;
+export const INSTRUMENT_LIMITS = {
+	maxEvents: 2000,
+	maxBodyChars: 512,
+	/**
+	 * Blob-backed script sources get their own, far larger allowance. A payload
+	 * preview exists to identify a call; a worker's source exists to be scanned
+	 * for what it reaches out to, and 512 characters of a bundled worker says
+	 * nothing. This is the only place the whole text is ever readable.
+	 */
+	maxBlobScriptChars: 200_000,
+} as const;
 
 /**
  * Runs inside the page. Self-contained by construction: `toString()` is what
  * ships, so a reference to anything in module scope would arrive undefined.
  */
 function instrumentSource(
-	limits: { maxEvents: number; maxBodyChars: number },
+	limits: { maxEvents: number; maxBodyChars: number; maxBlobScriptChars: number },
 	globalName: string,
 	/** This function's own text, so a worker bootstrap can install it in worker scope. */
 	_selfSource: string,
@@ -536,6 +547,31 @@ function instrumentSource(
 	} catch {
 		/* no service worker in this scope */
 	}
+
+	// ─── Blob-backed scripts ────────────────────────────────────────────
+	// A worker built from a blob has no fetchable URL: `blob:` resolves only
+	// inside the page that made it, so the fallback of reading a worker's source
+	// from outside fails exactly where it is needed most. A large video site
+	// builds every one of its workers this way, and that is where it fetches
+	// media. Capturing the text at the moment the blob becomes a URL is the only
+	// point where it is still readable.
+	patch(g.URL, 'createObjectURL', (args) => {
+		try {
+			const blob = args[0] as { type?: string; text?: () => Promise<string> };
+			if (!blob?.text) return;
+			const type = String(blob.type ?? '');
+			if (type && !/javascript|ecmascript|worker|text\/plain/i.test(type)) return;
+			// Asynchronous by necessity — a blob cannot be read synchronously — so
+			// the source arrives shortly after the URL it describes.
+			blob.text().then(
+				(text) =>
+					rec({ kind: 'blob-script', method: 'DATA', url: 'blob:script', body: clip(text) }),
+				() => undefined,
+			);
+		} catch {
+			/* an unreadable blob is a gap, not a failure */
+		}
+	});
 
 	// ─── BroadcastChannel / postMessage ─────────────────────────────────
 	// Cross-frame RPC hides real work behind an iframe that does the fetching.

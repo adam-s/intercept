@@ -95,5 +95,14 @@
 		"transports": 8,
 		"shapes": 27,
 		"challenge": "Kasada"
+	},
+	"workerChain": {
+		"note": "Media is handled by a WASM worker reached through two hops: a blob-backed bootstrap whose text is only readable at creation time, which importScripts the real worker from a CDN that CORS refuses to the page but plain HTTP serves. Its source names JSON API, WebTransport, HLS/Media, Encoded/Binary, Cross-frame RPC, Beacon, Polling and Streaming response.",
+		"caveat": "These are source markers, not observed calls. A bundled worker may reference a capability it never uses \u2014 WebTransport in particular is plausibly a fallback path. Named in source justifies looking; it does not justify recording the transport as in use.",
+		"chain": [
+			"blob: bootstrap (page)",
+			"assets.twitch.tv/assets/amazon-ivs-wasmworker.min-*.js",
+			".wasm module"
+		]
 	}
 }

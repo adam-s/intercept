@@ -893,6 +893,42 @@ export function renderTransportTable(verdicts) {
 	return ['| Transport | Present | Evidence |', '|---|---|---|', ...rows].join('\n');
 }
 
+/**
+ * Fetch a script the browser cannot reach, and say which rung was used.
+ *
+ * The browser goes first because it carries the session. A worker script is a
+ * static public asset on a CDN, though, and a cross-origin request for one is
+ * refused by CORS from inside the page — the browser is the wrong instrument
+ * for it, not a blocked one. Falling back to direct HTTP here is the transport
+ * ladder working rather than being skipped: elimination showed the browser
+ * cannot reach it and nothing about the asset needs a session.
+ */
+async function fetchScriptSource(base, url, timeout) {
+	const viaBrowser = await api(
+		base,
+		'/browser/mcp/fetch',
+		{
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ url }),
+		},
+		timeout,
+	).catch(() => null);
+	if (typeof viaBrowser?.body?.data === 'string' && viaBrowser.body.data.length) {
+		return { text: viaBrowser.body.data, via: 'browser' };
+	}
+	try {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeout);
+		const res = await fetch(url, { signal: controller.signal });
+		clearTimeout(timer);
+		if (!res.ok) return { text: '', via: `direct HTTP ${res.status}` };
+		return { text: await res.text(), via: 'direct' };
+	} catch (err) {
+		return { text: '', via: `unreachable: ${String(err).slice(0, 60)}` };
+	}
+}
+
 // ─── Runner ──────────────────────────────────────────────────────────
 
 const HELP = `discover-probe — the mechanical half of the discovery protocol
@@ -1258,18 +1294,52 @@ async function main() {
 		if (workers.length) {
 			console.log();
 			console.log(`${workers.length} worker script(s) — their scope is not instrumented:`);
+			// A blob-backed worker has no fetchable URL, so its source comes from the
+			// capture instead: the instrument reads the blob at the moment it becomes
+			// a URL, which is the last point it is readable from outside the page.
+			const blobSources = rows
+				.filter((r) => r.kind === 'blob-script' && r.body)
+				.map((r) => r.body)
+				.join('\n');
+			if (workers.some((w) => /^blob:/.test(w.example)) && blobSources) {
+				const found = Object.keys(transportEvidence(blobSources));
+				console.log(
+					found.length
+						? `  (blob-backed worker sources) -> ${found.join(', ')}`
+						: '  (blob-backed worker sources) -> no transport markers',
+				);
+				for (const h of extractHosts(blobSources, 6)) console.log(`      ${h.host} (${h.n}x)`);
+
+				// A blob worker is usually a bootstrap, not the code. It pulls the real
+				// worker in with importScripts, and that URL *is* fetchable — so the
+				// chain is blob, then the script it names, and stopping at the blob
+				// stops one hop short of where the work happens.
+				const hops = [
+					...new Set(
+						[...blobSources.matchAll(/(?:importScripts|import)\s*\(\s*["']([^"']+)["']/g)].map(
+							(m) => m[1],
+						),
+					),
+				].slice(0, 3);
+				for (const hop of hops) {
+					const { text: hopText, via } = await fetchScriptSource(base, hop, opts.timeout);
+					if (!hopText) {
+						console.log(`  ${hop} — named by a blob worker, ${via}`);
+						continue;
+					}
+					const hopFound = Object.keys(transportEvidence(hopText));
+					console.log(
+						hopFound.length
+							? `  ${hop} [${via}] -> ${hopFound.join(', ')}`
+							: `  ${hop} [${via}] -> no transport markers`,
+					);
+					for (const h of extractHosts(hopText, 6)) console.log(`      ${h.host} (${h.n}x)`);
+				}
+			}
+
 			for (const w of workers.slice(0, 5)) {
-				const src = await api(
-					base,
-					'/browser/mcp/fetch',
-					{
-						method: 'POST',
-						headers: { 'content-type': 'application/json' },
-						body: JSON.stringify({ url: w.example }),
-					},
-					opts.timeout,
-				).catch(() => null);
-				const text = typeof src?.body?.data === 'string' ? src.body.data : '';
+				if (/^blob:/.test(w.example)) continue;
+				const { text } = await fetchScriptSource(base, w.example, opts.timeout);
 				if (!text) {
 					console.log(`  ${w.example} — source unreadable; read it before ruling its scope out`);
 					continue;
@@ -1280,7 +1350,7 @@ async function main() {
 						? `  ${w.example} -> ${found.join(', ')}`
 						: `  ${w.example} -> no transport markers in its source`,
 				);
-				for (const host of extractHosts(text, 5)) console.log(`      ${host}`);
+				for (const h of extractHosts(text, 5)) console.log(`      ${h.host} (${h.n}x)`);
 			}
 			console.log('  A transport named here fired where no capture reaches. Treat it as present.');
 		}
