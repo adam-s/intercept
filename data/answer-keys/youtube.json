@@ -1,0 +1,45 @@
+{
+	"target": "youtube.com",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://tyrrrz.me/blog/reverse-engineering-youtube-revisited",
+		"https://github.com/zerodytrash/YouTube-Internal-Clients",
+		"https://pypi.org/project/innertube/"
+	],
+	"transports": [
+		{
+			"transport": "JSON API (XHR)",
+			"endpoints": [
+				"www.youtube.com/youtubei/v1/search",
+				"www.youtube.com/youtubei/v1/next",
+				"www.youtube.com/youtubei/v1/browse",
+				"www.youtube.com/youtubei/v1/player",
+				"www.youtube.com/youtubei/v1/guide",
+				"www.youtube.com/youtubei/v1/updated_metadata",
+				"www.youtube.com/youtubei/v1/live_chat/get_live_chat"
+			],
+			"note": "updated_metadata polls and live_chat long-polls. Both are ordinary POSTs, so a table with no long-poll row records them as plain endpoints and reports the site as having no realtime transport."
+		},
+		{
+			"transport": "Embedded JSON",
+			"endpoints": ["ytInitialPlayerResponse", "ytInitialData"],
+			"note": "Byte-identical to the /player payload, so the page alone answers what an API call would."
+		},
+		{
+			"transport": "HLS/Media",
+			"endpoints": ["streamingData.adaptiveFormats"],
+			"note": "Gated on a visitorData minted by a browser that navigated the specific watch page; a bare POST's token returns UNPLAYABLE."
+		},
+		{
+			"transport": "Encoded/Binary",
+			"endpoints": ["www.youtube.com/api/timedtext"],
+			"note": "Caption tracks behind a signed URL sourced from /player."
+		}
+	],
+	"axes": [
+		{
+			"axis": "client identity",
+			"note": "The same endpoint returns different data for different context.client values. Varying the client is a discovery dimension distinct from varying the URL, and no amount of endpoint enumeration finds it."
+		}
+	]
+}

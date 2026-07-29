@@ -243,7 +243,7 @@ function readTurnstile() {
 	return {
 		apiScriptLoaded,
 		widgetRendered,
-		token: field && field.value ? field.value : null,
+		token: field?.value ? field.value : null,
 	};
 }
 

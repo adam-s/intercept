@@ -1,0 +1,26 @@
+{
+	"target": "news.ycombinator.com",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://firebase.blog/posts/2014/10/hacker-news-now-has-api-its-firebase/",
+		"https://cotera.co/articles/hacker-news-api-guide"
+	],
+	"purpose": "Negative control. The site itself is server-rendered HTML with no client-side data transport at all, so a correct elimination table here is almost entirely absent rows. It also tests the public-API gate at its hardest: two fully documented APIs sit beside a site that uses neither.",
+	"transports": [
+		{
+			"transport": "Embedded JSON",
+			"endpoints": [],
+			"note": "Absent. Data is in the markup as ordinary table rows, not as a payload."
+		}
+	],
+	"publicApis": [
+		{
+			"endpoint": "hacker-news.firebaseio.com/v0/",
+			"note": "Official, documented, and NOT what the site's front end calls. Wrapping it is the public-API gate failure."
+		},
+		{
+			"endpoint": "hn.algolia.com/api/v1/",
+			"note": "Third-party search index over the same content. Same caveat."
+		}
+	]
+}

@@ -1,0 +1,37 @@
+{
+	"target": "reddit.com",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://pypi.org/project/gatered/1.1.0",
+		"https://roundproxies.com/blog/reddit/"
+	],
+	"transports": [
+		{
+			"transport": "GraphQL",
+			"endpoints": ["www.reddit.com/svc/shreddit/graphql", "gql.reddit.com"],
+			"note": "The front end's own path. Two distinct hosts."
+		},
+		{
+			"transport": "JSON API (XHR)",
+			"endpoints": ["gateway.reddit.com/desktopapi/v1/", "www.reddit.com/{path}.json"],
+			"note": "The .json suffix is a documented public API, so wrapping it satisfies the letter of a discovery task while learning nothing about the front end. The gateway host is the internal one."
+		},
+		{
+			"transport": "Embedded JSON",
+			"endpoints": ["<shreddit-post> element attributes"],
+			"note": "Records live in HTML attributes on custom elements — no script tag, no hydration payload. A scan looking for a JSON blob reports the page as carrying no data while every field is present."
+		}
+	],
+	"variants": [
+		{
+			"host": "old.reddit.com",
+			"note": "Same data, disjoint transports: server-rendered HTML, form-encoded XHR for voting and more-comments, .json suffix. No GraphQL, no WebSocket. Elimination tables for the two hosts must differ; if they come out similar, the run pattern-matched on the domain name instead of observing."
+		}
+	],
+	"gates": [
+		{
+			"name": "loid cookie",
+			"note": "Issued only by a JS bot-check, so it cannot be learned from API documentation."
+		}
+	]
+}

@@ -22,7 +22,10 @@ describe('parseArgs', () => {
 			record: false,
 			domain: null,
 			label: 'latest',
-			budget: 40,
+			// Raised past the reference domain's own route count: a lower default
+			// made a full run silently partial, and "not probed" reads a lot like
+			// "passed" at a glance.
+			budget: 100,
 			port: 3001,
 		});
 	});

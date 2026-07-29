@@ -1,0 +1,27 @@
+{
+	"target": "finance.yahoo.com",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://jonpalmisc.com/2020/08/10/yahoo-finance-websockets",
+		"https://github.com/yahoofinancelive/yliveticker",
+		"https://pypi.org/project/yahooquery/2.2.14/"
+	],
+	"transports": [
+		{
+			"transport": "JSON API (XHR)",
+			"endpoints": [
+				"query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+				"query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}",
+				"query1.finance.yahoo.com/v7/finance/quote",
+				"query1.finance.yahoo.com/v1/finance/search",
+				"query1.finance.yahoo.com/v1/finance/screener"
+			],
+			"note": "Behind a crumb plus cookie pair; the crumb has to be harvested from a page first."
+		},
+		{
+			"transport": "WebSocket",
+			"endpoints": ["wss://streamer.finance.yahoo.com/"],
+			"note": "Frames are base64-wrapped protobuf. Reading them as text yields noise, so a reader who does not decode concludes the socket carries nothing."
+		}
+	]
+}

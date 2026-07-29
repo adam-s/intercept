@@ -74,7 +74,11 @@ export function parseArgs(argv) {
 		record: flags.record === true,
 		domain: typeof flags.domain === 'string' ? flags.domain : null,
 		label: typeof flags.label === 'string' ? flags.label : 'latest',
-		budget: Number(flags.budget ?? 40),
+		// The reference domain alone exceeds 40 routes, so a lower default made a
+		// full run silently partial — and "8 not probed" reads a lot like "8
+		// passed" at a glance.
+		budget: Number(flags.budget ?? 100),
+		allowInstrumented: flags['allow-instrumented'] === true,
 		port: Number(flags.port ?? 3001),
 		timeout: Number(flags.timeout ?? 45_000),
 		wallClock: Number(flags['wall-clock'] ?? 300) * 1000,
@@ -256,6 +260,45 @@ export function isProbeable(route) {
  * Examples are matched to their route by path prefix so a route that declares
  * one is never also probed bare.
  */
+/**
+ * Routes that failed to declare what the checker needs from them.
+ *
+ * `examples` and `upstream` are both obligations the discovery rule states, and
+ * only one of them was ever enforced here. The other was demonstrated in the
+ * reference domain, stated in the rule, and dropped — by an agent that declared
+ * `examples` seven times in the same run. An obligation nothing checks is a
+ * suggestion, so both are checked.
+ *
+ * A `targetUrl` route is exempt from `upstream`: its target *is* the upstream,
+ * so declaring it again would be a second copy to drift.
+ */
+export function undeclared(routes = []) {
+	const missing = [];
+	for (const r of routes) {
+		const path = typeof r === 'string' ? r : r.path;
+		const rec = typeof r === 'string' ? {} : r;
+		const needsExample = /[:*]/.test(String(path));
+		if (needsExample && !(rec.examples ?? []).length) {
+			missing.push({
+				route: path,
+				field: 'examples',
+				why: 'has a path parameter, so it cannot be called from its declaration alone',
+			});
+		}
+		// The index sends `hasTargetUrl`; a plugin object would carry `targetUrl`.
+		// Accept either, so this works against the wire shape and the source shape.
+		const proxies = Boolean(rec.hasTargetUrl ?? rec.targetUrl);
+		if (!proxies && !(rec.upstream ?? []).length) {
+			missing.push({
+				route: path,
+				field: 'upstream',
+				why: 'the coverage check cannot recover what a route calls from its own path',
+			});
+		}
+	}
+	return missing;
+}
+
 export function probeTargets(routes = [], examples = []) {
 	const exampleTargets = examples.filter((e) => e.startsWith('GET ')).map((e) => e.slice(4));
 	const covered = new Set();
@@ -342,16 +385,54 @@ async function main() {
 		return 1;
 	}
 
+	// GATE: an assertion run against an instrumented session measures a page no
+	// ordinary visitor sees — patched primitives, aids installed — so a pass here
+	// says nothing about what a clean session would get, and a block during one
+	// says nothing about the site. Refuse rather than produce a number that reads
+	// like a verdict. See the two-pass rule in .agents/rules/discovery.md.
+	if (!opts.allowInstrumented) {
+		// fetchJson returns { status, body } — reading `state.instrumented` here
+		// silently yields undefined and the gate never fires, which is exactly the
+		// unfalsifiable green this gate exists to prevent.
+		const state = await fetchJson(`${base}/browser/instrument`, opts.timeout).catch(() => null);
+		if (state?.body?.instrumented === true) {
+			console.error(
+				'✗ This session is instrumented — discovery aids are still installed.\n' +
+					'  route-spec asserts what a clean session gets, and an instrumented page is not that.\n' +
+					'  Run: node scripts/discover-probe.mjs --mode=uninstall\n' +
+					'  Then re-run. Use --allow-instrumented only to debug the checker itself.',
+			);
+			return 1;
+		}
+	}
+
 	const results = [];
 	const baselines = {};
 	let probed = 0;
 	let skippedForBudget = 0;
 	let skippedUnprobeable = 0;
+	let declarationFailures = 0;
 
 	outer: for (const domain of domains) {
 		baselines[domain.name] = opts.record ? {} : readBaseline(domain.name);
 		const recorded = opts.record ? baselines[domain.name] : null;
 		const existing = opts.record ? readBaseline(domain.name) : baselines[domain.name];
+
+		// GATE: a route that did not declare what the checker needs is a route the
+		// checker cannot honestly assert. Failing here rather than skipping is the
+		// point — a silently skipped route reads exactly like a passing one.
+		const missing = undeclared(domain.routeDetail ?? []);
+		if (missing.length) {
+			console.error(
+				`\n✗ ${domain.name}: ${missing.length} route(s) missing a required declaration:`,
+			);
+			for (const m of missing.slice(0, 20)) {
+				console.error(`    ${m.route} — no ${m.field}: ${m.why}`);
+			}
+			if (missing.length > 20) console.error(`    … ${missing.length - 20} more`);
+			declarationFailures += missing.length;
+			continue;
+		}
 
 		const { targets, skipped } = probeTargets(domain.routes ?? [], domain.examples ?? []);
 		skippedUnprobeable += skipped.length;
@@ -465,6 +546,15 @@ async function main() {
 	}
 
 	const secs = ((Date.now() - started) / 1000).toFixed(1);
+	// A missing declaration is a failure of the suite, not of a route that ran —
+	// counting it among the passes would let a domain go green while whole routes
+	// were never asserted at all.
+	if (declarationFailures > 0) {
+		console.log(
+			`\n✗ ${declarationFailures} undeclared route(s). Every route declares \`upstream\`, and any route with a path or required query parameter declares \`examples\`.`,
+		);
+		return 1;
+	}
 	if (failed.length === 0) {
 		console.log(`\n✓ ${probed} route(s) passed in ${secs}s.`);
 		rmSync(artifactDir, { recursive: true, force: true });

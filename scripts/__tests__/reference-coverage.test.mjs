@@ -21,7 +21,7 @@
  * transport. Adding a row to the table without adding material fails here.
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -131,6 +131,70 @@ describe('a transport claimed in a docblock is really served', () => {
 			if (!/\bSSE\b/i.test(claims)) continue;
 			const src = readFileSync(resolve(ROOT, `packages/test-server/src/sites/${site}.ts`), 'utf8');
 			expect(src, `index claims ${site} serves SSE`).toMatch(/text\/event-stream/);
+		}
+	});
+});
+
+describe('the answer keys stay out of the exam paper', () => {
+	// Naming the expected finding in front of the thing being measured destroys
+	// the measurement — the whole value of a discovery run is that it was
+	// independent. Instructions, rules, prompts and agent definitions are what an
+	// agent reads, so none of them may point at the keys.
+	const READ_BY_AGENTS = ['AGENTS.md', 'CLAUDE.md', '.agents', 'prompts'];
+
+	const walk = (rel) => {
+		const abs = resolve(ROOT, rel);
+		let entries = [];
+		try {
+			entries = readdirSync(abs, { withFileTypes: true });
+		} catch {
+			return [];
+		}
+		return entries.flatMap((e) =>
+			e.isDirectory()
+				? walk(`${rel}/${e.name}`)
+				: e.name.endsWith('.md')
+					? [`${rel}/${e.name}`]
+					: [],
+		);
+	};
+
+	const files = READ_BY_AGENTS.flatMap((p) => (p.endsWith('.md') ? [p] : walk(p))).filter(Boolean);
+
+	it('finds the files agents read, so this cannot pass vacuously', () => {
+		expect(files.length).toBeGreaterThan(5);
+	});
+
+	it.each(files)('%s does not point at the keys', (file) => {
+		let src = '';
+		try {
+			src = readFileSync(resolve(ROOT, file), 'utf8');
+		} catch {
+			return;
+		}
+		expect(src).not.toContain('data/answer-keys');
+	});
+
+	// A key that names no source is an assertion, and an undated one is a fact
+	// claim about a moving target.
+	it('every key cites sources and a date', () => {
+		for (const f of readdirSync(resolve(ROOT, 'data/answer-keys'))) {
+			if (!f.endsWith('.json')) continue;
+			const key = JSON.parse(readFileSync(resolve(ROOT, 'data/answer-keys', f), 'utf8'));
+			expect(key.asOf, `${f} has no asOf`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+			expect(key.sources?.length, `${f} cites no sources`).toBeGreaterThan(0);
+		}
+	});
+
+	// A key naming a transport the table cannot express would score against a row
+	// that does not exist.
+	it('every key names transports the elimination table knows', () => {
+		for (const f of readdirSync(resolve(ROOT, 'data/answer-keys'))) {
+			if (!f.endsWith('.json')) continue;
+			const key = JSON.parse(readFileSync(resolve(ROOT, 'data/answer-keys', f), 'utf8'));
+			for (const t of key.transports ?? []) {
+				expect(CANONICAL, `${f} names unknown transport ${t.transport}`).toContain(t.transport);
+			}
 		}
 	});
 });

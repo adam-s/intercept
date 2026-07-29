@@ -26,6 +26,14 @@
  *                      --url defaults to the site's /graphql.
  *   --mode=bundles     Fetch the page's largest scripts and report which
  *                      real-time transports they reference.
+ *   --mode=manifest    Install the egress instrument if needed, drain what the
+ *                      page's own JS reached for, reduce it to one row per call
+ *                      shape, and print the elimination table derived from it.
+ *                      This is the instrumented pass — see the two-pass rule in
+ *                      .agents/rules/discovery.md before running it against a
+ *                      session you intend to keep.
+ *   --mode=uninstall   Remove the instrument, handing the page back unmodified.
+ *                      Run before any collection pass.
  *
  * USAGE
  *   node scripts/discover-probe.mjs --mode=scan
@@ -33,6 +41,8 @@
  *   node scripts/discover-probe.mjs --mode=probe --url=/api/items?page=2
  *   node scripts/discover-probe.mjs --mode=graphql --url=/api/graphql
  *   node scripts/discover-probe.mjs --mode=bundles --budget=3
+ *   node scripts/discover-probe.mjs --mode=manifest
+ *   node scripts/discover-probe.mjs --mode=uninstall
  *   node scripts/discover-probe.mjs --mode=scan --json    # machine-readable
  *
  * PRECONDITION
@@ -773,6 +783,20 @@ export const PAGINATION_SELECTORS = [
 	'a[rel=next]',
 ];
 
+/**
+ * The derived elimination table, ready to paste into a compliance matrix.
+ *
+ * Present/absent comes from observation rather than recollection, so each ✓
+ * carries the call shape that produced it.
+ */
+export function renderTransportTable(verdicts) {
+	const rows = verdicts.map(
+		(v) =>
+			`| ${v.transport} | ${v.present ? '✓' : '✗'} | ${(v.evidence ?? []).join('; ') || '(not observed)'} |`,
+	);
+	return ['| Transport | Present | Evidence |', '|---|---|---|', ...rows].join('\n');
+}
+
 // ─── Runner ──────────────────────────────────────────────────────────
 
 const HELP = `discover-probe — the mechanical half of the discovery protocol
@@ -1014,6 +1038,77 @@ async function main() {
 			console.log('Every captured endpoint has a plausibly matching route.');
 		}
 		return 0;
+	}
+
+	if (opts.mode === 'manifest') {
+		// Installing is idempotent, so a second call on an already-instrumented
+		// page is free — and asking first would be one more round trip for an
+		// answer that changes nothing.
+		const install = await api(base, '/browser/instrument', { method: 'POST' }, opts.timeout);
+		if (install.status !== 200) {
+			console.error(`Instrument failed: ${install.body?.error ?? install.status}`);
+			return 1;
+		}
+
+		const res = await api(base, '/browser/manifest', undefined, opts.timeout);
+		if (res.status !== 200) {
+			console.error(`Manifest failed: ${res.body?.error ?? res.status}`);
+			return 1;
+		}
+		const result = res.body ?? {};
+		const rows = result.rows ?? [];
+		const transports = result.transports ?? [];
+
+		if (opts.json) {
+			console.log(JSON.stringify(result, null, 2));
+			return 0;
+		}
+
+		console.log(renderTransportTable(transports));
+		console.log();
+		console.log(
+			`${rows.length} call shape(s) from ${result.events ?? 0} JS event(s) + ${result.wireEntries ?? 0} wire entr(ies)`,
+		);
+		console.log();
+		for (const row of rows.slice(0, opts.limit)) {
+			const q = row.params?.length ? `?${row.params.join('&')}` : '';
+			const n = row.count > 1 ? ` x${row.count}` : '';
+			const shape = row.shape ? ` -> ${row.shape}` : '';
+			console.log(`  ${row.kind} ${row.method} ${row.host}${row.template}${q}${n}${shape}`);
+		}
+		if (rows.length > opts.limit) {
+			console.log(`  … ${rows.length - opts.limit} more (raise --limit)`);
+		}
+
+		// An absent row means "not observed", which is weaker than "not present".
+		// Saying so here keeps the distinction attached to the output rather than
+		// leaving it to be remembered.
+		const absent = transports.filter((t) => !t.present).map((t) => t.transport);
+		if (absent.length) {
+			console.log();
+			console.log(`Not observed (weaker than absent): ${absent.join(', ')}`);
+			console.log('Exercise the page, then re-run, before treating any of these as a verdict.');
+		}
+		console.log();
+		console.log(
+			'This session is now instrumented. Run --mode=uninstall before any collection pass.',
+		);
+		return 0;
+	}
+
+	if (opts.mode === 'uninstall') {
+		const res = await api(base, '/browser/instrument', { method: 'DELETE' }, opts.timeout);
+		if (res.status !== 200) {
+			console.error(`Uninstall failed: ${res.body?.error ?? res.status}`);
+			return 1;
+		}
+		const result = res.body ?? {};
+		console.log(
+			result.clean
+				? `Instrument removed from ${result.framesRestored} frame(s). The page carries no discovery aids.`
+				: `INCOMPLETE: ${result.framesRefused} frame(s) still instrumented. A collection pass from here is not clean.`,
+		);
+		return result.clean ? 0 : 1;
 	}
 
 	if (opts.mode === 'sources') {

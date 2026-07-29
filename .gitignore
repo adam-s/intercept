@@ -49,3 +49,7 @@ apps/api/data/
 
 # Route-spec baselines are shape fingerprints only — no captured data.
 !/data/route-spec-baseline/
+# Grader-held transport keys. Version-controlled because they are durable
+# knowledge, not session material — and because a scoring record that lives
+# only on one machine cannot be re-verified or corrected.
+!/data/answer-keys/

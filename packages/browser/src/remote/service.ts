@@ -20,6 +20,18 @@ import { join } from 'node:path';
 import type { BrowserContext, CDPSession, Page, Route } from 'patchright';
 import { chromium } from 'patchright';
 import { BlockerManager } from '../blocker';
+import type { EgressEvent } from '../driver/instrument';
+import {
+	buildManifest,
+	deriveTransports,
+	type ManifestRow,
+	type TransportVerdict,
+} from '../driver/manifest';
+import {
+	drainEgressEvents,
+	installEgressInstrument,
+	removeEgressInstrument,
+} from '../driver/traffic-capture';
 import { CdpScriptControl } from './cdp-script-control';
 import type {
 	CDPLoadingFailed,
@@ -109,6 +121,8 @@ export class RemoteBrowserService {
 	private config: FullConfig;
 	private context: BrowserContext | null = null;
 	private page: Page | null = null;
+	/** Whether egress instrumentation is currently installed on this session. */
+	private instrumented = false;
 	private cdp: CDPSession | null = null;
 	private frameCallback: FrameCallback | null = null;
 	private urlChangeCallback: ((url: string) => void) | null = null;
@@ -1246,6 +1260,65 @@ export class RemoteBrowserService {
 	async evaluate<T>(fn: () => T | Promise<T>): Promise<T> {
 		if (!this.page) throw new Error('Browser not started');
 		return this.page.evaluate(fn);
+	}
+
+	// ─── Egress instrumentation ──────────────────────────────────────
+	// The capture layer is only useful if a workflow can reach it, so it is
+	// exposed here rather than left as a library a caller has to assemble.
+
+	/**
+	 * Patch the page's egress primitives. Discovery aids are detectable, so this
+	 * belongs to the instrumented pass only — see the two-pass rule in
+	 * .agents/rules/discovery.md.
+	 */
+	async installInstrument(): Promise<boolean> {
+		if (!this.page) throw new Error('Browser not started');
+		this.instrumented = await installEgressInstrument(this.page as never);
+		return this.instrumented;
+	}
+
+	/** Read and clear buffered egress events from every frame. */
+	async drainEgress(): Promise<EgressEvent[]> {
+		if (!this.page) throw new Error('Browser not started');
+		return drainEgressEvents(this.page as never);
+	}
+
+	/** Restore the page, so the session carries no evidence it was instrumented. */
+	async removeInstrument(): Promise<{
+		clean: boolean;
+		framesRestored: number;
+		framesRefused: number;
+	}> {
+		if (!this.page) throw new Error('Browser not started');
+		const result = await removeEgressInstrument(this.page as never);
+		if (result.clean) this.instrumented = false;
+		return result;
+	}
+
+	/**
+	 * Whether this session is currently carrying discovery aids.
+	 *
+	 * Load-bearing for the gate that keeps a collection pass clean: an assertion
+	 * run against an instrumented session measures a page that no ordinary
+	 * visitor sees, and a block during one says nothing about the site.
+	 */
+	isInstrumented(): boolean {
+		return this.instrumented;
+	}
+
+	/**
+	 * Drain, reduce, and derive — the whole capture pipeline in one call.
+	 *
+	 * Returns the manifest and the elimination table together because they are
+	 * read together: the table says which transports fired, the manifest says
+	 * which call shapes proved it.
+	 */
+	async captureManifest(
+		wire: Array<{ method: string; url: string; body?: unknown }> = [],
+	): Promise<{ rows: ManifestRow[]; transports: TransportVerdict[]; events: number }> {
+		const events = await this.drainEgress();
+		const rows = buildManifest(events, wire);
+		return { rows, transports: deriveTransports(rows), events: events.length };
 	}
 
 	/**

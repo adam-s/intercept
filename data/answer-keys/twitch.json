@@ -1,0 +1,36 @@
+{
+	"target": "twitch.tv",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://wundergraph.com/blog/graphql_in_production_analyzing_public_graphql_apis_1_twitch_tv",
+		"https://dev.twitch.tv/docs/eventsub/handling-websocket-events",
+		"https://dev.twitch.tv/docs/pubsub/",
+		"https://github.com/PhilippHeuer/twitch4j"
+	],
+	"transports": [
+		{
+			"transport": "GraphQL",
+			"endpoints": ["gql.twitch.tv/gql"],
+			"note": "Carries most of the site's data; persisted queries by hash."
+		},
+		{
+			"transport": "WebSocket",
+			"endpoints": [
+				"wss://irc-ws.chat.twitch.tv/",
+				"wss://pubsub-edge.twitch.tv/v1",
+				"wss://eventsub.wss.twitch.tv/ws"
+			],
+			"note": "Three distinct sockets, not one. The chat socket tunnels IRC — a text protocol inside the frames — so a reader expecting JSON concludes the socket carries nothing useful."
+		},
+		{
+			"transport": "HLS/Media",
+			"endpoints": ["usher.ttvnw.net/api/channel/hls/{channel}.m3u8", "usher.ttvnw.net/api/vod/{id}.m3u8"],
+			"note": "Playlist needs an access token minted by a GraphQL call first, so the media URL alone looks unauthenticated and fails."
+		},
+		{
+			"transport": "Encoded/Binary",
+			"endpoints": ["hermes"],
+			"note": "Newer pubsub replacement carrying an encrypted envelope."
+		}
+	]
+}

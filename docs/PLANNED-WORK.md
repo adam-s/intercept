@@ -57,3 +57,34 @@ discovered APIs rather than read from reference frames, so "the description" has
 a different source here — a route's response shape rather than a screenshot.
 Whether the method survives that substitution is the first thing to test, and it
 is cheap to test on one page before committing to the port.
+
+## Deferred before the next tuning round — watch for instruction-induced regressions
+
+Items 1–4 of the pre-tuning list landed. These six were deliberately left, and
+each is written here rather than carried in anyone's head. The reason to record
+them together is that the next tuning round is also the first test of a large
+batch of new instructions, and a regression caused by our own guidance looks
+exactly like a regression caused by a target.
+
+**Watch specifically for the instructions making things worse.** Every rule
+added this round narrows what an agent may do: a two-pass split, a derived
+elimination table, two new route-spec gates, a reference domain that now
+demonstrates seventeen transports. Each is a hypothesis. If breadth drops, or
+runs get slower without finding more, or agents start reporting confusion, the
+new guidance is a suspect and not merely an innocent bystander. Suppress one
+rule at a time to find out, the same way aids come off one at a time — the first
+removal that restores the old behaviour names the cause.
+
+| # | Item | Why it was deferred |
+|---|---|---|
+| 5 | The interaction sweep has never run against a real site | Its safety refusals are tested only against mocks written by the same author as the sweep. Needs one attended run before it runs unattended against five targets. |
+| 6 | `--record` replaces a baseline instead of merging | A route with two legitimate shapes loses one. Hit once already on a rate-limit-fallback route; the data was repaired by hand and the tool still has the defect. |
+| 7 | Challenge detection does not invalidate an instrumented run | The detector exists and the two-pass rule says a block during instrumentation proves nothing about the site, but nothing connects them. Should be mechanical, not remembered. |
+| 8 | Worker-scoped traffic is a half-answer | Construction is recorded; the worker's own requests are not. Either capture them or scope the row out explicitly — the present state lets a reader believe it is covered. |
+| 9 | Domains are still ephemeral by rule | Folding them in retires three records that must move together: the ignore rule, the base-branch rule, and the product invariant. A superseded rule left standing gets obeyed. |
+| 10 | `transport` is typed as a bare string | Reconciled only by a repo test against the reference domain. A domain could declare a name nothing knows. |
+
+Also known and accepted for now: the camoufox capture path cannot be benchmarked
+unattended, because that driver refuses true headless by design. Its recall was
+verified headed at 13/13; any future claim about it needs the same attended run.
+
