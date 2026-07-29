@@ -57,6 +57,7 @@ const WS_ROUTES: WSRoute[] = [
 	{ path: '/sites/boardshop/ws/subscriptions', mode: 'graphql-ws' },
 	{ path: '/sites/boardshop/ws/binary', mode: 'binary' },
 	{ path: '/sites/benchmark/ws', mode: 'json' },
+	{ path: '/sites/newsboard/chat', mode: 'json' },
 ];
 
 export async function createTestServer(

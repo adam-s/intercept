@@ -71,6 +71,13 @@ ${STORIES.map(storyElement).join('\n')}
 	Load more
 </button>
 
+<!-- Nothing below fires on load. These exist so a capture taken from a merely
+     loaded page can be compared against one taken after the page was exercised. -->
+<input id="q" type="search" placeholder="Search stories" autocomplete="off">
+<button id="chat" aria-expanded="false" aria-controls="chatpanel">Show chat</button>
+<div id="chatpanel" hidden></div>
+<div id="sentinel" style="height:1400px"></div>
+
 <!-- Cross-frame RPC: the frame does the fetching and answers over postMessage. -->
 <iframe id="widget" src="/sites/newsboard/widget" style="width:0;height:0;border:0"></iframe>
 
@@ -105,6 +112,34 @@ attempt('webrtc', () => new RTCPeerConnection().createDataChannel('live'));
 attempt('webtransport', () => new WebTransport('https://localhost:1/wt'));
 
 attempt('broadcast', () => new BroadcastChannel('newsboard').postMessage({ ready: true }));
+
+// ─── Interaction-gated. None of this runs unless the page is exercised. ───
+
+// Typeahead: fires on the first keystroke and never before.
+attempt('typeahead', () => {
+	document.getElementById('q').addEventListener('input', (e) => {
+		fetch('/sites/newsboard/suggest?q=' + encodeURIComponent(e.target.value));
+	});
+});
+
+// A chat socket that only opens when its panel is mounted — the shape that made
+// a real site's three sockets read as one.
+attempt('chat', () => {
+	document.getElementById('chat').addEventListener('click', () => {
+		try {
+			new WebSocket(location.origin.replace('http', 'ws') + '/sites/newsboard/chat');
+		} catch (e) { console.warn('chat', String(e)); }
+	});
+});
+
+// Infinite scroll: a page fetch at the scroll boundary.
+attempt('scroll', () => {
+	let page = 1;
+	window.addEventListener('scroll', () => {
+		if (window.scrollY + window.innerHeight < document.body.scrollHeight - 200) return;
+		fetch('/sites/newsboard/page/' + ++page);
+	}, { passive: true });
+});
 window.addEventListener('message', (e) => { if (e.data?.widget) console.log('widget said', e.data); });
 </script>
 </body>
@@ -190,6 +225,15 @@ export function createNewsboardSite(): Hono {
 		c.body("self.addEventListener('fetch', () => {});", 200, {
 			'content-type': 'application/javascript',
 		}),
+	);
+
+	// ─── Interaction-gated endpoints ─────────────────────────────────────
+	// Reachable directly, but never requested unless the page is exercised.
+	app.get('/suggest', (c) =>
+		c.json({ query: c.req.query('q') ?? '', suggestions: STORIES.map((s) => s.title).slice(0, 2) }),
+	);
+	app.get('/page/:n', (c) =>
+		c.json({ page: Number(c.req.param('n')), stories: STORIES.slice(0, 1), total: 3 }),
 	);
 
 	app.post('/collect', (c) => c.body(null, 204));

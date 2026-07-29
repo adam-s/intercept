@@ -124,13 +124,34 @@ export function sweepPlan(): SweepAction[] {
 	];
 }
 
-/** Selector for an element the sweep may safely activate. */
-function safeClickFilter(): string {
-	return `(el) => {
-		const label = [el.innerText, el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('name'), el.type]
-			.filter(Boolean).join(' ').slice(0, 120);
-		return { label, href: el.getAttribute('href') || '' };
-	}`;
+/**
+ * Read the label and link off an element, in the page.
+ *
+ * Passed as a function, never as a string. A string handed to `evaluate` is
+ * treated as an *expression*, so a stringified arrow function evaluates to a
+ * function object rather than being called — and a function is not
+ * serializable, so the result comes back `undefined`. That failure is silent
+ * and total: every element inspection returned nothing, so every click and
+ * every keystroke was skipped on every site, while the sweep reported the
+ * dwells and scrolls it did manage and looked like it had run.
+ */
+function elementMeta(el: Element): { label: string; href: string } {
+	const label = [
+		(el as HTMLElement).innerText,
+		el.getAttribute('aria-label'),
+		el.getAttribute('title'),
+		el.getAttribute('name'),
+		// The attribute, not the property. A <button> with no type attribute
+		// reports the property as "submit" by spec, so reading the property put
+		// the word "submit" in the label of every plain button on every page and
+		// the destructive check skipped all of them. An explicit type="submit" is
+		// still read, which is the case worth catching.
+		el.getAttribute('type'),
+	]
+		.filter(Boolean)
+		.join(' ')
+		.slice(0, 120);
+	return { label, href: el.getAttribute('href') || '' };
 }
 
 /**
@@ -183,8 +204,19 @@ export async function runSweep(
 				let used = 0;
 				for (const h of handles) {
 					if (used >= cfg.maxPerSelector || !budgetLeft()) break;
-					const meta = await h.evaluate(safeClickFilter()).catch(() => null);
-					if (!meta) continue;
+					const meta = await h
+						.evaluate(elementMeta)
+						.catch((err: unknown) => ({ __error: String(err).slice(0, 120) }) as never);
+					// A handle that cannot be inspected used to produce neither a
+					// performed entry nor a skipped one: the provocation silently did
+					// nothing and the report showed nothing, which is the failure this
+					// whole module exists to remove one level down.
+					if (!meta || (meta as { __error?: string }).__error) {
+						skipped.push(
+							`${action.kind} ${action.selector}: could not inspect element — ${(meta as { __error?: string })?.__error ?? 'no result'}`,
+						);
+						continue;
+					}
 
 					// The guards apply to every element interaction, not just `click`.
 					// Typing reaches a control the same way clicking does — it focuses

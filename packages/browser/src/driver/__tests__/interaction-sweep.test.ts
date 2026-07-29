@@ -210,3 +210,27 @@ describe('runSweep', () => {
 		expect(Date.now() - started).toBeLessThan(5_000);
 	});
 });
+
+describe('label reading does not manufacture a refusal', () => {
+	// A <button> with no type attribute reports `.type === 'submit'` by spec.
+	// Reading the property put "submit" into the label of every plain button, so
+	// the destructive check skipped all of them — the sweep refused to click
+	// anything anywhere while reporting only that it had swept.
+	it('does not treat a plain button as state-changing', () => {
+		expect(isDestructive('Show chat')).toBe(false);
+		expect(isDestructive('Load more')).toBe(false);
+	});
+
+	it('still refuses a button whose label really says submit', () => {
+		expect(isDestructive('Submit review')).toBe(true);
+	});
+
+	// The label is built in the page, so this pins the contract the page function
+	// must satisfy rather than the function itself.
+	it('builds a label from attributes a plain button would not carry', () => {
+		const plain = ['Show chat', null, null, null, null].filter(Boolean).join(' ');
+		expect(isDestructive(plain)).toBe(false);
+		const explicit = ['Save', null, null, null, 'submit'].filter(Boolean).join(' ');
+		expect(isDestructive(explicit)).toBe(true);
+	});
+});
