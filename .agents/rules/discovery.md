@@ -201,6 +201,13 @@ honest result. "Complete" without that qualifier is a claim about both.
   concluding the site is empty.
 - **Traffic resets on navigation.** Capture before navigating away; re-capture
   after the new page settles.
+- **A worker's scope is not captured, and a worker is where realtime hides.** A
+  worker has its own globals, so nothing patched in the page sees its requests
+  and a socket opened inside one appears in no capture at all. Its source is
+  readable, though, and reading it is how that scope gets covered — the manifest
+  fetches and scans each worker script for you and names what it finds. A
+  transport named there fired somewhere no capture reaches: treat it as present,
+  not as unobserved.
 - **A socket is captured, and its frames are the finding.** The handshake alone
   says a socket exists; one frame says what rides inside it. A text protocol, an
   encrypted envelope, or a binary encoding all look like an empty result to a

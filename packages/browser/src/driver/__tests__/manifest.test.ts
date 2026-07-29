@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { digestLargeBody } from '../capture-filter.js';
 import type { EgressEvent } from '../instrument.js';
 import {
 	buildManifest,
@@ -209,6 +210,31 @@ describe('deriveTransports', () => {
 		expect(v.find((r) => r.transport === 'GraphQL')?.present).toBe(true);
 	});
 
+	// A REST endpoint taking a filter DSL carries a `query` key too. A live run
+	// had to disprove the resulting false ✓ by introspecting the endpoint, which
+	// answered with a REST error shape rather than a GraphQL envelope — work the
+	// classifier should not have caused. The value is the discriminator: a
+	// GraphQL query is a string holding a selection set.
+	it.each([
+		'{"query":{"operator":"and","operands":[]}}',
+		'{"query":"most_actives"}',
+		'{"query":"","region":"US"}',
+	])('does not call %s GraphQL', (body) => {
+		const v = deriveTransports(
+			buildManifest([ev({ method: 'POST', url: 'https://x.test/v1/finance/visualization', body })]),
+		);
+		expect(v.find((r) => r.transport === 'GraphQL')?.present).toBe(false);
+	});
+
+	it('still detects an anonymous shorthand query', () => {
+		const v = deriveTransports(
+			buildManifest([
+				ev({ method: 'POST', url: 'https://x.test/api', body: '{"query":"{me{id}}"}' }),
+			]),
+		);
+		expect(v.find((r) => r.transport === 'GraphQL')?.present).toBe(true);
+	});
+
 	it('detects GraphQL on a /gql path with an unreadable body', () => {
 		const v = deriveTransports(
 			buildManifest([ev({ method: 'POST', url: 'https://gql.x.test/gql' })]),
@@ -366,5 +392,55 @@ describe('some rows are payload questions wearing a primitive costume', () => {
 			buildManifest([ev({ kind: 'fetch', method: 'POST', url: 'https://x.test/a', body })]),
 		);
 		expect(v.find((t) => t.transport === 'Form-encoded POST')?.present).toBe(false);
+	});
+});
+
+describe('digestLargeBody keeps signal, not position', () => {
+	// A head-preview is the obvious reduction and the wrong one: it keeps the part
+	// of a page that is always the same and drops the part that differs. A live
+	// run reported a site as having no embedded data while its whole payload sat
+	// in a script tag past the cutoff of a 1.2MB page.
+	const bulk = 'x'.repeat(80_000);
+
+	it('keeps a hydration payload that sits past the preview', () => {
+		const d = digestLargeBody(`<head>t</head>${bulk}<script>__NEXT_DATA__={"a":1}</script>`);
+		expect(d._embedded?.join(' ')).toContain('__NEXT_DATA__');
+	});
+
+	it.each([
+		'data-sveltekit-fetched',
+		'__NUXT_DATA__',
+		'__APOLLO_STATE__',
+		'self.__next_f',
+	])('keeps a %s region', (marker) => {
+		const d = digestLargeBody(`${bulk}<script>${marker}</script>`);
+		expect(d._embedded?.join(' ')).toContain(marker);
+	});
+
+	it('keeps a semantic-markup block', () => {
+		const d = digestLargeBody(`${bulk}<script type="application/ld+json">{"@type":"X"}</script>`);
+		expect(d._embedded?.join(' ')).toContain('"@type"');
+	});
+
+	it('still reports the real size and a head preview', () => {
+		const d = digestLargeBody(`<head>title</head>${bulk}`);
+		expect(d._truncated).toBe(true);
+		expect(d._size).toBeGreaterThan(80_000);
+		expect(d._preview).toContain('title');
+	});
+
+	// The cap is the reason truncation exists; keeping regions must not defeat it.
+	it('stays bounded on a page that is nothing but markers', () => {
+		const many = Array.from(
+			{ length: 400 },
+			() => '<script type="application/json">{}</script>',
+		).join('y'.repeat(500));
+		const d = digestLargeBody(many);
+		expect(d._embedded?.length).toBeLessThanOrEqual(6);
+		expect(JSON.stringify(d).length).toBeLessThan(60_000);
+	});
+
+	it('omits the field entirely when there is nothing embedded to keep', () => {
+		expect(digestLargeBody(bulk)._embedded).toBeUndefined();
 	});
 });

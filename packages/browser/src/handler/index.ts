@@ -11,6 +11,7 @@
  */
 
 import type { WebSocket } from 'ws';
+import { digestLargeBody } from '../driver/capture-filter.js';
 import {
 	BrowserLifecycleManager,
 	browserLogger,
@@ -196,11 +197,12 @@ function addTrafficEntry(req: InterceptedRequest, res: InterceptedResponse): voi
 	try {
 		const bodyStr = JSON.stringify(responseBody);
 		if (bodyStr.length > MAX_BODY_SIZE) {
-			responseBody = {
-				_truncated: true,
-				_size: bodyStr.length,
-				_preview: bodyStr.slice(0, 2000),
-			};
+			// Keeps the embedded-data regions rather than only the first two
+			// thousand characters. A head-slice drops exactly what a document is
+			// captured for: hydration payloads and semantic markup sit deep in a
+			// page, so a large server-rendered site reported no embedded data while
+			// the data sat in the part that was discarded.
+			responseBody = digestLargeBody(bodyStr);
 		}
 	} catch {
 		/* not serializable */

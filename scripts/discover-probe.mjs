@@ -1210,6 +1210,43 @@ async function main() {
 			);
 		}
 
+		// A worker has its own global scope, so nothing patched in the page sees
+		// what it does — and a socket opened inside one never appears in any
+		// capture. That is not a rare corner: a live run found a site's entire
+		// realtime feed behind a worker, invisible across four instrumented
+		// passes, and only reading the worker's source by hand found it. Reading
+		// that source is mechanical, so it happens here.
+		const workers = rows.filter((r) => r.kind === 'worker' || r.kind === 'importscripts');
+		if (workers.length) {
+			console.log();
+			console.log(`${workers.length} worker script(s) — their scope is not instrumented:`);
+			for (const w of workers.slice(0, 5)) {
+				const src = await api(
+					base,
+					'/browser/mcp/fetch',
+					{
+						method: 'POST',
+						headers: { 'content-type': 'application/json' },
+						body: JSON.stringify({ url: w.example }),
+					},
+					opts.timeout,
+				).catch(() => null);
+				const text = typeof src?.body?.data === 'string' ? src.body.data : '';
+				if (!text) {
+					console.log(`  ${w.example} — source unreadable; read it before ruling its scope out`);
+					continue;
+				}
+				const found = Object.keys(transportEvidence(text));
+				console.log(
+					found.length
+						? `  ${w.example} -> ${found.join(', ')}`
+						: `  ${w.example} -> no transport markers in its source`,
+				);
+				for (const host of extractHosts(text, 5)) console.log(`      ${host}`);
+			}
+			console.log('  A transport named here fired where no capture reaches. Treat it as present.');
+		}
+
 		if (sweep) {
 			console.log();
 			console.log(

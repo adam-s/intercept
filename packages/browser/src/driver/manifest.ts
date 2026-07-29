@@ -279,9 +279,25 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 
 	// GraphQL rides on fetch/XHR, so it is a body-shape question, not a
 	// primitive question — the only verdict here that reads payloads.
+	// A bare `"query":` key is not enough. A REST endpoint taking a filter DSL
+	// carries one too, and a live run had to disprove the resulting false ✓ by
+	// introspecting an endpoint that answered with a REST error shape rather than
+	// a GraphQL envelope — work the classifier should not have caused.
+	//
+	// The discriminator is the value, not the key. A GraphQL `query` is always a
+	// string holding a selection set, so it contains braces; a filter DSL passes
+	// an object, and a named-screener parameter passes a bare word. Companion
+	// keys settle the rest.
 	const graphql = rows.filter(
-		(r) => /graphql|\/gql/i.test(r.template) || (r.body ? /"query"\s*:/.test(r.body) : false),
+		(r) =>
+			/graphql|\/gql\b/i.test(r.template) ||
+			(r.body
+				? /"query"\s*:\s*"[^"]*\{[^"]*\}/.test(r.body) ||
+					(/"query"\s*:\s*"/.test(r.body) &&
+						/"(?:variables|operationName|extensions)"\s*:/.test(r.body))
+				: false),
 	);
+
 	const out: TransportVerdict[] = [...seen.entries()].map(([transport, evidence]) => ({
 		transport,
 		present: evidence.length > 0,

@@ -111,3 +111,69 @@ export function parseBody(raw: string | null | undefined): unknown {
 		return raw;
 	}
 }
+
+/** What a large body is reduced to when it will not be kept whole. */
+export interface BodyDigest {
+	_truncated: true;
+	_size: number;
+	_preview: string;
+	/** Embedded-data regions found past the preview, kept because they are the point. */
+	_embedded?: string[];
+}
+
+/**
+ * Markers whose surrounding region is worth keeping out of an oversized body.
+ *
+ * Framework hydration and semantic markup both sit deep in a document — after
+ * the head, often after the visible content — so a head-slice discards exactly
+ * the thing a document is captured for.
+ */
+const EMBEDDED_MARKERS = [
+	/<script[^>]+type=["']application\/(?:ld\+)?json["'][^>]*>/gi,
+	/__NEXT_DATA__|__NUXT_DATA__|__NUXT__|__PRELOADED_STATE__|__INITIAL_STATE__/g,
+	/__APOLLO_STATE__|__remixContext|__staticRouterHydrationData|__RELAY_PAYLOADS__/g,
+	/data-sveltekit-fetched|self\.__next_f/g,
+];
+
+/**
+ * Reduce an oversized body, keeping signal rather than position.
+ *
+ * A head-preview is the obvious reduction and the wrong one: it keeps the part
+ * of a page that is always the same and drops the part that differs. A
+ * server-rendered page routinely carries its whole payload in a script tag past
+ * the cutoff, so a preview-only digest reported the site as having no embedded
+ * data while the data sat in the body that was thrown away.
+ *
+ * Bounded on both sides: a fixed preview plus a fixed number of fixed-size
+ * regions, so a pathological page cannot defeat the cap it exists to enforce.
+ */
+export function digestLargeBody(
+	bodyStr: string,
+	limits: { preview?: number; region?: number; maxRegions?: number } = {},
+): BodyDigest {
+	const preview = limits.preview ?? 2_000;
+	const region = limits.region ?? 4_000;
+	const maxRegions = limits.maxRegions ?? 6;
+
+	const embedded: string[] = [];
+	const seen = new Set<number>();
+	for (const re of EMBEDDED_MARKERS) {
+		re.lastIndex = 0;
+		for (const m of bodyStr.matchAll(re)) {
+			if (embedded.length >= maxRegions) break;
+			const at = m.index ?? 0;
+			// One marker per neighbourhood: several markers inside one payload would
+			// otherwise spend the whole budget re-copying the same region.
+			if ([...seen].some((prev) => Math.abs(prev - at) < region)) continue;
+			seen.add(at);
+			embedded.push(bodyStr.slice(at, at + region));
+		}
+	}
+
+	return {
+		_truncated: true,
+		_size: bodyStr.length,
+		_preview: bodyStr.slice(0, preview),
+		...(embedded.length ? { _embedded: embedded } : {}),
+	};
+}
