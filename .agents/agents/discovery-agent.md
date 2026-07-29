@@ -161,12 +161,25 @@ is not a domain that works.
 node scripts/discover-probe.mjs --mode=coverage --domain=yourdomain --port=XXXX
 ```
 
-**Run this before the restart that loads your domain, not after.** Capture is
-cleared when the server restarts, so a coverage run afterwards scores your
-routes against the handful of calls the checker itself just made — which is
-close to scoring them against themselves, reports high coverage, and means
-nothing. The tool says so when the sample is thinner than your route count;
-heed it rather than pasting the number.
+**Coverage needs two things that a restart gives and takes away.** It compares
+captured traffic against *registered* routes, so the domain has to be loaded —
+which needs a restart — and the restart clears the capture and drops the browser
+connection. "Run it before the restart" cannot be followed literally, because
+before the restart there are no routes to compare against.
+
+The order that works:
+
+1. Restart once to register the domain.
+2. Reconnect the browser.
+3. Re-navigate the same page types you used during GATHER, to regenerate
+   comparable traffic.
+4. Run coverage immediately, and treat that as the last restart before
+   `route-spec`.
+
+A coverage run against whatever traffic happens to be lying around scores your
+routes against the handful of calls the checker itself just made, which is close
+to scoring them against themselves. The tool says so when the sample is thinner
+than your route count — heed that rather than pasting the number.
 
 route-spec grades the routes you built. It has no opinion about the ones you
 didn't. This diffs the call shapes the browser actually made — read off the same

@@ -30,6 +30,7 @@ domains/*/
 !domains/boardshop/
 !domains/youtube/
 !domains/reddit/
+!domains/twitch/
 !domains/hackernews/
 !domains/yahoofinance/
 !domains/chatgpt/

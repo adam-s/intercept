@@ -66,6 +66,9 @@ importers:
       '@interceptor/domain-reddit':
         specifier: workspace:*
         version: link:../../domains/reddit
+      '@interceptor/domain-twitch':
+        specifier: workspace:*
+        version: link:../../domains/twitch
       '@interceptor/domain-yahoofinance':
         specifier: workspace:*
         version: link:../../domains/yahoofinance
@@ -239,6 +242,28 @@ importers:
       '@types/node':
         specifier: 25.5.0
         version: 25.5.0
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
+  domains/twitch:
+    dependencies:
+      '@interceptor/browser':
+        specifier: workspace:*
+        version: link:../../packages/browser
+      '@interceptor/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      ws:
+        specifier: ^8.19.0
+        version: 8.19.0
+    devDependencies:
+      '@types/node':
+        specifier: 25.5.0
+        version: 25.5.0
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
       typescript:
         specifier: 5.9.3
         version: 5.9.3

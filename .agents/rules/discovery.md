@@ -489,6 +489,13 @@ says nothing about what it calls, and the coverage check cannot recover that by
 name similarity — the names genuinely have nothing in common. Without it, real
 coverage reads as zero and a genuine gap hides in the false alarms.
 
+**A transient `TypeError: Failed to fetch` on the first cross-origin call is not
+a finding.** The same request shape can throw bare, with no status and no CORS
+detail, on the first attempt or two and then succeed unchanged. Chasing it —
+reshaping the body, adding headers — spends budget on a problem that was never
+there. Repeat the identical request once before treating the failure as real;
+if it persists, then it is a finding and the shape is worth examining.
+
 **Check recall before declaring done** — `--mode=coverage` diffs the endpoints
 the browser actually called against the routes you built, and prints a floor.
 Every unaccounted endpoint fired in a real browser, so every one exists: build a

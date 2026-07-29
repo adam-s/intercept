@@ -18,7 +18,8 @@
 		"@interceptor/domain-youtube": "workspace:*",
 		"@interceptor/domain-yahoofinance": "workspace:*",
 		"@interceptor/domain-reddit": "workspace:*",
-		"@interceptor/domain-hackernews": "workspace:*"
+		"@interceptor/domain-hackernews": "workspace:*",
+		"@interceptor/domain-twitch": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "25.5.0",

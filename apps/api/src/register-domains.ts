@@ -14,6 +14,7 @@ import { registerDomain } from '@interceptor/browser/handler/domain-loader';
 import { plugin as boardshop } from '@interceptor/domain-boardshop';
 import { plugin as hackernews } from '@interceptor/domain-hackernews';
 import { plugin as reddit } from '@interceptor/domain-reddit';
+import { plugin as twitch } from '@interceptor/domain-twitch';
 import { plugin as yahoofinance } from '@interceptor/domain-yahoofinance';
 import { plugin as youtube } from '@interceptor/domain-youtube';
 import { registerRateLimit } from '@interceptor/shared';
@@ -22,6 +23,7 @@ import { registerRateLimit } from '@interceptor/shared';
 
 registerDomain(boardshop);
 registerDomain(reddit);
+registerDomain(twitch);
 registerDomain(hackernews);
 registerDomain(youtube);
 registerDomain(yahoofinance);
