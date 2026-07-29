@@ -6,11 +6,16 @@
 import { describe, expect, it } from 'vitest';
 import {
 	contentTypeOf,
+	contradictions,
+	endpointLiterals,
+	hydrationMarkers,
 	PAGINATION_KEYS,
 	PAGINATION_SELECTORS,
 	paginationParams,
 	parseArgs,
 	summarize,
+	TRANSPORT_SIGNATURES,
+	transportEvidence,
 	transportMarkers,
 } from '../discover-probe.mjs';
 
@@ -84,14 +89,15 @@ describe('contentTypeOf', () => {
 });
 
 describe('transportMarkers', () => {
+	// Names are the elimination-table row names, not a second vocabulary — the
+	// scanner and the table must agree or a wrong verdict cannot be contradicted.
 	it.each([
-		['new WebSocket("wss://x")', 'websocket'],
-		['const s = new EventSource("/stream")', 'sse'],
-		['fetch("/graphql")', 'graphql'],
-		['application/grpc-web+proto', 'grpc-web'],
-		['src="/v/master.m3u8"', 'hls-dash'],
-		['protobuf.decode(b)', 'protobuf'],
-		['new RTCPeerConnection()', 'webrtc'],
+		['new WebSocket("wss://x")', 'WebSocket'],
+		['const s = new EventSource("/stream")', 'SSE'],
+		['fetch("/graphql")', 'GraphQL'],
+		['application/grpc-web+proto', 'gRPC-Web'],
+		['src="/v/master.m3u8"', 'HLS/Media'],
+		['protobuf.decode(b)', 'Encoded/Binary'],
 	])('flags %s as %s', (source, expected) => {
 		expect(transportMarkers(source)).toContain(expected);
 	});
@@ -102,7 +108,7 @@ describe('transportMarkers', () => {
 
 	it('reports every transport a bundle references', () => {
 		const markers = transportMarkers('new WebSocket("wss://a"); fetch("/graphql"); v.src=".m3u8"');
-		expect(markers.sort()).toEqual(['graphql', 'hls-dash', 'websocket']);
+		expect(markers).toEqual(expect.arrayContaining(['GraphQL', 'HLS/Media', 'WebSocket']));
 	});
 });
 
@@ -164,5 +170,81 @@ describe('PAGINATION_SELECTORS', () => {
 			expect(s).not.toContain(',');
 			expect(s).not.toContain('"');
 		}
+	});
+});
+
+describe('transport signature table', () => {
+	it('keys every signature to an elimination-table row name', () => {
+		// One table, two consumers. Drift between them is what let a wrong ✗ on
+		// "Embedded JSON" survive twice.
+		for (const row of [
+			'Embedded JSON',
+			'JSON API (XHR)',
+			'GraphQL',
+			'WebSocket',
+			'HLS/Media',
+			'gRPC-Web',
+			'SSE',
+			'Encoded/Binary',
+		]) {
+			expect(Object.keys(TRANSPORT_SIGNATURES)).toContain(row);
+		}
+	});
+
+	it.each([
+		['new WebSocket("wss://x")', 'WebSocket'],
+		['new EventSource("/s")', 'SSE'],
+		['fetch("/graphql")', 'GraphQL'],
+		['v.src = "a.m3u8"', 'HLS/Media'],
+		['application/grpc-web+proto', 'gRPC-Web'],
+		['<script id="__NEXT_DATA__">', 'Embedded JSON'],
+		['<script data-sveltekit-fetched>', 'Embedded JSON'],
+	])('finds strong evidence for %s → %s', (src, transport) => {
+		expect(transportEvidence(src)[transport].strong.length).toBeGreaterThan(0);
+	});
+
+	// The measured failure: probing three framework names and concluding absent.
+	it('detects hydration markers no single framework check would find', () => {
+		const found = hydrationMarkers('<script data-sveltekit-fetched data-url="/x">{}</script>');
+		expect(found.map((f) => f.marker)).toContain('sveltekit');
+		expect(hydrationMarkers('<div>nothing</div>')).toEqual([]);
+	});
+
+	it('separates library evidence from strong evidence', () => {
+		const ev = transportEvidence('import Hls from "hls.js"');
+		expect(ev['HLS/Media'].library.length).toBeGreaterThan(0);
+		expect(ev['HLS/Media'].strong).toEqual([]);
+	});
+});
+
+describe('contradictions', () => {
+	// A ✗ is a judgment; a strong signature is a fact about the code.
+	it('flags a transport marked absent that the source proves present', () => {
+		const ev = transportEvidence('new WebSocket("wss://x")');
+		expect(contradictions({ WebSocket: false }, ev)).toHaveLength(1);
+	});
+
+	it('stays silent when the mark agrees with the evidence', () => {
+		const ev = transportEvidence('new WebSocket("wss://x")');
+		expect(contradictions({ WebSocket: true }, ev)).toEqual([]);
+		expect(contradictions({ SSE: false }, ev)).toEqual([]);
+	});
+
+	// Library evidence alone is not proof — a bundled dep can be dead code.
+	it('does not contradict on library evidence alone', () => {
+		const ev = transportEvidence('import Hls from "hls.js"');
+		expect(contradictions({ 'HLS/Media': false }, ev)).toEqual([]);
+	});
+});
+
+describe('endpointLiterals', () => {
+	it('finds API-shaped paths a bundle can reach but traffic never showed', () => {
+		const found = endpointLiterals('fetch("/v1/finance/quote");w("/ws/insights/v3")');
+		expect(found).toContain('/v1/finance/quote');
+		expect(found).toContain('/ws/insights/v3');
+	});
+
+	it('ignores ordinary strings', () => {
+		expect(endpointLiterals('const msg = "hello world"; x("/")')).toEqual([]);
 	});
 });

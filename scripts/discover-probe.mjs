@@ -135,52 +135,212 @@ export function contentTypeOf(entry) {
 }
 
 /**
- * Real-time transport markers in a script bundle.
+ * Signatures per transport, keyed by the EXACT elimination-table row name.
  *
- * Returns the transports named, never a verdict — a marker means "look here",
- * not "this site uses WebSocket." The elimination table needs the agent to
- * confirm each one against captured traffic.
+ * One table, two consumers: the source scanner and the classifier. Keeping the
+ * transport list in two places is how the previous version drifted — the
+ * elimination table had an "Embedded JSON" row and the scanner had no embedded
+ * detection at all, so nothing could contradict a wrong ✗ on it.
+ *
+ * Evidence is layered by strength, because the layers mean different things:
+ *
+ *  - `strong`  — the API itself. `new WebSocket(` in a bundle means WebSocket
+ *                code exists. A ✗ against a strong hit is a contradiction, and
+ *                the tool should say so rather than leave it to judgment.
+ *  - `library` — a dependency that implies the transport. Weaker: a bundled
+ *                library may be dead code, so this raises suspicion rather
+ *                than settling the row.
+ *  - `wire`    — content types and URL shapes seen on the network.
+ *
+ * Add a transport by adding a row here. Nowhere else.
  */
-export function transportMarkers(source) {
-	const checks = [
-		['websocket', /\bnew WebSocket\(|wss:\/\//],
-		['sse', /\bEventSource\b|text\/event-stream/],
-		['graphql', /\/graphql\b|\/gql\b|__schema/],
-		['grpc-web', /application\/grpc|grpc-web/],
-		['hls-dash', /\.m3u8|\.mpd\b|MediaSource/],
-		['protobuf', /protobuf|\.proto\b/],
-		['webrtc', /RTCPeerConnection|webrtc/i],
-	];
-	return checks.filter(([, re]) => re.test(source)).map(([name]) => name);
+export const TRANSPORT_SIGNATURES = {
+	'Embedded JSON': {
+		scope: 'html',
+		strong: [
+			/__NEXT_DATA__/,
+			/data-sveltekit-fetched/,
+			/__NUXT_DATA__|__NUXT__/,
+			/__remixContext/,
+			/__PRELOADED_STATE__|__INITIAL_STATE__/,
+			/__APOLLO_STATE__/,
+			/astro-island/,
+			/ng-state|TransferState/,
+			/__RELAY_PAYLOADS__/,
+			/data-server-rendered/,
+		],
+		library: [/<script[^>]+type=["']application\/json["']/],
+		wire: [],
+	},
+	'JSON API (XHR)': {
+		scope: 'both',
+		strong: [/\bfetch\s*\(/, /XMLHttpRequest/, /\.ajax\s*\(/],
+		library: [/axios/, /superagent/, /ky\b/, /got\b/, /swr\b/, /react-query|tanstack/],
+		wire: [/application\/json/],
+	},
+	GraphQL: {
+		scope: 'both',
+		strong: [/\/graphql\b/, /\/gql\b/, /__schema/, /operationName/],
+		library: [
+			/@apollo|apollo-client/,
+			/urql/,
+			/relay-runtime/,
+			/graphql-request/,
+			/graphql-ws|subscriptions-transport-ws/,
+		],
+		wire: [/application\/graphql/],
+	},
+	WebSocket: {
+		scope: 'both',
+		strong: [/new WebSocket\s*\(/, /wss:\/\//],
+		library: [
+			/socket\.io/,
+			/sockjs/,
+			/signalr/,
+			/pusher/,
+			/ably/,
+			/pubnub/,
+			/centrifuge/,
+			/phoenix\.js|phoenix_html/,
+			/reconnecting-websocket/,
+		],
+		wire: [/upgrade:\s*websocket/i],
+	},
+	'HLS/Media': {
+		scope: 'both',
+		strong: [/\.m3u8/, /\.mpd\b/, /MediaSource/, /SourceBuffer/],
+		library: [
+			/hls\.js|hlsjs/,
+			/dash\.js|dashjs/,
+			/shaka-player|shaka/,
+			/video\.js|videojs/,
+			/jwplayer/,
+			/bitmovin/,
+		],
+		wire: [/application\/vnd\.apple\.mpegurl|application\/x-mpegurl|application\/dash\+xml/],
+	},
+	'gRPC-Web': {
+		scope: 'both',
+		strong: [/grpc-web/, /application\/grpc/],
+		library: [/@improbable-eng/, /grpc-web-client/, /connectrpc|@connectrpc/],
+		wire: [/application\/grpc-web(\+proto|-text)?/],
+	},
+	SSE: {
+		scope: 'both',
+		strong: [/new EventSource\s*\(/, /text\/event-stream/],
+		library: [/eventsource-parser|@microsoft\/fetch-event-source/, /sse\.js/],
+		wire: [/text\/event-stream/],
+	},
+	'Encoded/Binary': {
+		scope: 'both',
+		library: [
+			/protobufjs|google-protobuf/,
+			/flatbuffers/,
+			/msgpack|@msgpack/,
+			/avsc|avro/,
+			/cbor/,
+			/base64-js/,
+		],
+		strong: [/protobuf/, /\.proto\b/, /ArrayBuffer|Uint8Array/, /atob\s*\(/],
+		wire: [/application\/octet-stream|application\/x-protobuf/],
+	},
+};
+
+/**
+ * Evidence for each transport found in a source, by strength.
+ *
+ * Returns one entry per transport that matched anything, so a caller can see
+ * WHY a transport is suspected and weigh it — a `strong` hit is a claim about
+ * the code, a `library` hit is a claim about its dependencies.
+ */
+export function transportEvidence(source, kind = 'both') {
+	const out = {};
+	for (const [name, sig] of Object.entries(TRANSPORT_SIGNATURES)) {
+		if (sig.scope !== 'both' && kind !== 'both' && sig.scope !== kind) continue;
+		const strong = (sig.strong ?? []).filter((re) => re.test(source)).map((re) => re.source);
+		const library = (sig.library ?? []).filter((re) => re.test(source)).map((re) => re.source);
+		const wire = (sig.wire ?? []).filter((re) => re.test(source)).map((re) => re.source);
+		if (strong.length || library.length || wire.length) out[name] = { strong, library, wire };
+	}
+	return out;
 }
 
 /**
- * What a traffic capture says about the site, as a verdict.
+ * Rows the agent marked absent that the source contradicts.
  *
- * "Nothing found" and "nothing captured" look identical in a bare listing and
- * mean opposite things — one is a finding about the site, the other a broken
- * setup. Naming them apart is the difference between recording a site as static
- * and noticing the browser was never connected.
+ * This is the point of the table: a ✗ is a judgment, and a strong signature is
+ * a fact about the code. Where they disagree, the fact wins and the tool says
+ * so — rather than leaving a wrong ✗ to survive into a committed domain, which
+ * is what happened twice on finance.yahoo.com.
  */
-export function captureVerdict(entries) {
-	if (entries.length === 0) {
-		return {
-			verdict: 'no-capture',
-			detail:
-				'Zero entries. Only WS-connected browsers capture traffic — this usually means no ' +
-				'browser is connected, not that the site is quiet. Connect one and navigate before scanning.',
-		};
+export function contradictions(marks, evidence) {
+	return Object.entries(marks)
+		.filter(([name, present]) => present === false && (evidence[name]?.strong?.length ?? 0) > 0)
+		.map(([name]) => ({ transport: name, strongMatches: evidence[name].strong }));
+}
+
+/** Back-compat: transport names with any evidence in a script bundle. */
+export function transportMarkers(source) {
+	return Object.keys(transportEvidence(source));
+}
+
+/**
+ * Framework hydration markers — how embedded JSON actually appears in the wild.
+ *
+ * Checking three framework names and concluding "no embedded JSON" is how a
+ * present transport gets recorded absent: measured twice on finance.yahoo.com,
+ * where agents probed for `__NEXT_DATA__` and missed SvelteKit's
+ * `data-sveltekit-fetched`. A fixed list cannot forget a framework, which is
+ * the whole reason this is a table and not a judgment.
+ */
+export const HYDRATION_MARKERS = [
+	['next.js', /__NEXT_DATA__/],
+	['sveltekit', /data-sveltekit-fetched|__sveltekit_/],
+	['nuxt', /__NUXT_DATA__|__NUXT__/],
+	['remix', /__remixContext/],
+	['astro', /astro-island/],
+	['angular', /ng-state|TransferState/],
+	['redux', /__PRELOADED_STATE__|__INITIAL_STATE__|window\.__STATE__/],
+	['apollo', /__APOLLO_STATE__/],
+	['gatsby', /window\.___chunkMapping|page-data\.json/],
+	['vue-ssr', /__VUE_SSR_CONTEXT__|data-server-rendered/],
+	['relay', /__RELAY_PAYLOADS__/],
+	['generic-json-script', /<script[^>]+type=["']application\/json["']/],
+	['generic-window-assign', /window\.__[A-Z_]{4,}__\s*=/],
+];
+
+/** Which hydration markers a document carries, with occurrence counts. Pure. */
+export function hydrationMarkers(html) {
+	const found = [];
+	for (const [name, re] of HYDRATION_MARKERS) {
+		const g = new RegExp(re.source, `${re.flags.replace('g', '')}g`);
+		const n = (html.match(g) ?? []).length;
+		if (n > 0) found.push({ marker: name, count: n });
 	}
-	const dataEntries = entries.filter((e) => e.method !== 'DOCUMENT' && e.method !== 'WS-FRAME');
-	if (dataEntries.length === 0) {
-		return {
-			verdict: 'document-only',
-			detail:
-				'Only document responses. The page fetched no data of its own, so the data is either ' +
-				'embedded in the HTML or arrives on a page this session has not visited. Run --mode=embedded next.',
-		};
+	return found;
+}
+
+/**
+ * API-shaped path literals in a script bundle.
+ *
+ * Traffic capture records what fired; a bundle records what *can* fire. An
+ * endpoint present here and absent from traffic is interaction-gated — the
+ * thing passive browsing structurally cannot find. Minified bundles build many
+ * URLs by concatenation, so this finds a floor, never the full set.
+ */
+export function endpointLiterals(source, limit = 40) {
+	const out = new Set();
+	for (const m of source.matchAll(
+		/["'`](\/(?:api|v\d+|ws|xhr|graphql|rest|_next\/data)\/[A-Za-z0-9_\-/.{}$:]{2,80})["'`]/g,
+	)) {
+		out.add(m[1]);
 	}
-	return { verdict: 'has-data-traffic', detail: `${dataEntries.length} data request(s) captured` };
+	for (const m of source.matchAll(
+		/["'`](https?:\/\/[a-z0-9.-]*(?:api|query|gateway|graph)[a-z0-9.-]*\.[a-z]{2,}\/[A-Za-z0-9_\-/.]{0,60})["'`]/gi,
+	)) {
+		out.add(m[1]);
+	}
+	return [...out].slice(0, limit);
 }
 
 /** Group traffic entries into a per-endpoint summary. Pure. */
@@ -246,7 +406,7 @@ export const PAGINATION_SELECTORS = [
 
 const HELP = `discover-probe — the mechanical half of the discovery protocol
 
-  node scripts/discover-probe.mjs --mode=scan|paginate|probe|graphql|bundles
+  node scripts/discover-probe.mjs --mode=scan|sources|paginate|probe|graphql|bundles
                                   [--url=PATH] [--port=N] [--budget=N]
                                   [--limit=N] [--timeout=MS] [--settle=MS] [--json]
 
@@ -452,6 +612,65 @@ async function main() {
 		return 0;
 	}
 
+	if (opts.mode === 'sources') {
+		const entries = await getTraffic(base, opts.timeout);
+		const docs = entries.filter(
+			(e) => e.method === 'DOCUMENT' && typeof e.responseBody === 'string',
+		);
+		const scripts = entries
+			.filter((e) => /javascript|ecmascript/.test(contentTypeOf(e)) || /\.js(\?|$)/.test(e.url))
+			.slice(0, opts.budget);
+
+		if (docs.length === 0 && scripts.length === 0) {
+			console.log(captureVerdict(entries).detail);
+			return 1;
+		}
+
+		let corpus = docs.map((d) => d.responseBody).join('\n');
+		console.log(`Scanned ${docs.length} document(s) for hydration markers:`);
+		const markers = hydrationMarkers(corpus);
+		if (markers.length === 0)
+			console.log('  none — embedded JSON is genuinely absent from these documents');
+		for (const m of markers) console.log(`  ${m.marker} ×${m.count}`);
+
+		const endpoints = new Set();
+		for (const sc of scripts) {
+			const res = await api(
+				base,
+				'/browser/mcp/fetch',
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ url: sc.url }),
+				},
+				opts.timeout,
+			);
+			const src = typeof res.body?.data === 'string' ? res.body.data : (res.text ?? '');
+			corpus += `\n${src}`;
+			for (const e of endpointLiterals(src)) endpoints.add(e);
+		}
+		console.log(`\nScanned ${scripts.length} script(s).`);
+
+		const evidence = transportEvidence(corpus);
+		console.log('\nTransport evidence in source:');
+		for (const [name, ev] of Object.entries(evidence)) {
+			const bits = [];
+			if (ev.strong.length) bits.push(`STRONG(${ev.strong.length})`);
+			if (ev.library.length) bits.push(`library(${ev.library.length})`);
+			if (ev.wire.length) bits.push(`wire(${ev.wire.length})`);
+			console.log(`  ${name.padEnd(18)} ${bits.join(' ')}`);
+		}
+		console.log('\nA STRONG hit is a fact about the code. Marking that row ✗ is a');
+		console.log('contradiction — probe it properly before writing the verdict.');
+
+		if (endpoints.size) {
+			console.log(`\n${endpoints.size} API-shaped path(s) in source. Any absent from captured`);
+			console.log('traffic is interaction-gated — drive the page to reach it:');
+			for (const e of [...endpoints].slice(0, 25)) console.log(`  ${e}`);
+		}
+		return 0;
+	}
+
 	if (opts.mode === 'bundles') {
 		const entries = await getTraffic(base, opts.timeout);
 		const scripts = entries
@@ -467,7 +686,7 @@ async function main() {
 				'This page loaded no scripts of its own — that is a finding, not a setup problem.',
 			);
 			console.log('A site that ships no JavaScript has no client-side transport to find: its data');
-			console.log('is in the HTML. Run --mode=embedded.');
+			console.log('is in the HTML. Run --mode=sources.');
 			return 0;
 		}
 		for (const s of scripts) {

@@ -165,9 +165,21 @@ mark it in the elimination table now, with the output as evidence.
 **Embedded data.** Fetch the HTML of two page types and look for the framework's
 state container, JSON script blocks, hidden inputs, and meta tags.
 
-**Script bundles** — `--mode=bundles` reports which real-time transports the
-page's scripts reference. A marker means "look here," not "confirmed." Confirm
-each against captured traffic before marking it present.
+**Source scan** — `--mode=sources` is the check that keeps a ✗ honest. It scans
+every captured document and script against the transport signature table and
+reports, per transport, whether the evidence is *strong* (the API itself, like
+`new WebSocket(`), *library* (a dependency that implies it), or *wire* (a
+content type).
+
+**A strong hit against a row you want to mark ✗ is a contradiction.** The mark
+is a judgment; the signature is a fact about the code. Probe that transport
+properly before writing the verdict — twice on one target, agents checked three
+framework names, missed a fourth, and recorded a present transport as absent.
+
+It also lists API-shaped paths found in source. **Any path in source that never
+appears in captured traffic is interaction-gated** — it exists, and passive
+browsing structurally cannot reach it. Those are the endpoints to go drive the
+page for, and they are where a second pass earns its cost.
 
 **GraphQL.** If traffic, HTML, or a bundle shows a GraphQL endpoint, introspect
 it with `--mode=graphql`: one call lists every root query, which is the whole
