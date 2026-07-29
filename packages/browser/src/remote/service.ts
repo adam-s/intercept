@@ -21,6 +21,7 @@ import type { BrowserContext, CDPSession, Page, Route } from 'patchright';
 import { chromium } from 'patchright';
 import { BlockerManager } from '../blocker';
 import type { EgressEvent } from '../driver/instrument';
+import { runSweep, type SweepAction, type SweepLimits } from '../driver/interaction-sweep';
 import {
 	buildManifest,
 	deriveTransports,
@@ -1304,6 +1305,22 @@ export class RemoteBrowserService {
 	 */
 	isInstrumented(): boolean {
 		return this.instrumented;
+	}
+
+	/**
+	 * Exercise the page so interaction-gated transports fire.
+	 *
+	 * A capture from a page that was only loaded reports every transport that
+	 * opens behind a click, a keystroke, or a scroll boundary as absent — which
+	 * is indistinguishable from the site not having it. This is the loudest of
+	 * the discovery aids, because synthetic interaction has no human trajectory,
+	 * so it belongs to the instrumented pass and to no other.
+	 */
+	async sweepPage(
+		limits: Partial<SweepLimits> = {},
+	): Promise<{ performed: SweepAction[]; skipped: string[] }> {
+		if (!this.page) throw new Error('Browser not started');
+		return runSweep(this.page as never, limits);
 	}
 
 	/**

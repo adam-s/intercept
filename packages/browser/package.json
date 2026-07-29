@@ -15,6 +15,8 @@
 		"./shared/interceptor": "./src/shared/interceptor.ts",
 		"./shared/session-manager": "./src/shared/session-manager.ts",
 		"./shared/main-world": "./src/shared/main-world.ts",
+		"./driver": "./src/driver/index.ts",
+		"./driver/manifest": "./src/driver/manifest.ts",
 		"./handler": "./src/handler/index.ts",
 		"./handler/api-proxy": "./src/handler/api-proxy.ts",
 		"./handler/domain-loader": "./src/handler/domain-loader.ts",

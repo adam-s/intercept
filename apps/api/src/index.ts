@@ -14,6 +14,7 @@ process.on('uncaughtException', (err) => {
 });
 
 import { analyzeDiscovery } from '@interceptor/browser/analysis/discovery';
+import { renderManifest, renderTransports } from '@interceptor/browser/driver/manifest';
 import {
 	autoStartHeadlessBrowser,
 	clearTrafficBuffer,
@@ -161,6 +162,25 @@ app.delete('/browser/instrument', async (c) => {
 	}
 });
 
+app.post('/browser/sweep', async (c) => {
+	const browser = getActiveBrowser();
+	if (!browser) return c.json({ error: 'No active browser' }, 503);
+	// Synthetic interaction is the loudest discovery aid there is, so it refuses
+	// to run on a session that is not already admitting to being instrumented.
+	if (!browser.isInstrumented()) {
+		return c.json(
+			{ error: 'Sweep belongs to the instrumented pass. POST /browser/instrument first.' },
+			409,
+		);
+	}
+	try {
+		const body = await c.req.json().catch(() => ({}));
+		return c.json(await browser.sweepPage(body?.limits ?? {}));
+	} catch (err) {
+		return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+	}
+});
+
 app.get('/browser/manifest', async (c) => {
 	const browser = getActiveBrowser();
 	if (!browser) return c.json({ error: 'No active browser' }, 503);
@@ -173,6 +193,11 @@ app.get('/browser/manifest', async (c) => {
 		const result = await browser.captureManifest(wire);
 		return c.json({
 			...result,
+			// Rendered here with the shared renderer rather than re-implemented by
+			// each caller. A second copy of the table format is a second thing to
+			// drift, and the elimination table is what the whole protocol gates on.
+			table: renderTransports(result.transports),
+			manifestText: renderManifest(result.rows),
 			instrumented: browser.isInstrumented(),
 			wireEntries: wire.length,
 		});

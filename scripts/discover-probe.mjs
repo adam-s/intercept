@@ -35,6 +35,14 @@
  *   --mode=uninstall   Remove the instrument, handing the page back unmodified.
  *                      Run before any collection pass.
  *
+ * FLAGS FOR manifest
+ *   --sweep            Exercise the page before draining: dwell, scroll, type,
+ *                      hover, expand. Without it a capture reports every
+ *                      transport that opens behind an interaction as absent,
+ *                      which is indistinguishable from the site not having one.
+ *                      It is also the loudest aid there is — synthetic
+ *                      interaction has no human trajectory — so it is opt-in.
+ *
  * USAGE
  *   node scripts/discover-probe.mjs --mode=scan
  *   node scripts/discover-probe.mjs --mode=paginate
@@ -93,6 +101,7 @@ export function parseArgs(argv) {
 		timeout: Number(flags.timeout ?? 20_000),
 		settle: Number(flags.settle ?? 5_000),
 		json: flags.json === true,
+		sweep: flags.sweep === true,
 		help: flags.help === true || flags.h === true,
 	};
 }
@@ -784,10 +793,12 @@ export const PAGINATION_SELECTORS = [
 ];
 
 /**
- * The derived elimination table, ready to paste into a compliance matrix.
+ * Fallback renderer for a server that predates `table` in the manifest response.
  *
- * Present/absent comes from observation rather than recollection, so each ✓
- * carries the call shape that produced it.
+ * The live path prints what the API rendered with the shared renderer, so this
+ * exists only so an older server degrades to a readable table rather than to
+ * nothing. Two copies of a format drift; one copy plus a stated fallback does
+ * not.
  */
 export function renderTransportTable(verdicts) {
 	const rows = verdicts.map(
@@ -1050,6 +1061,18 @@ async function main() {
 			return 1;
 		}
 
+		// Exercise before draining: a transport that never fired cannot appear in
+		// the manifest, and "not observed" would then read as a verdict.
+		let sweep = null;
+		if (opts.sweep) {
+			const swept = await api(base, '/browser/sweep', { method: 'POST' }, opts.timeout + 60_000);
+			if (swept.status !== 200) {
+				console.error(`Sweep failed: ${swept.body?.error ?? swept.status}`);
+				return 1;
+			}
+			sweep = swept.body;
+		}
+
 		const res = await api(base, '/browser/manifest', undefined, opts.timeout);
 		if (res.status !== 200) {
 			console.error(`Manifest failed: ${res.body?.error ?? res.status}`);
@@ -1060,34 +1083,45 @@ async function main() {
 		const transports = result.transports ?? [];
 
 		if (opts.json) {
-			console.log(JSON.stringify(result, null, 2));
+			console.log(JSON.stringify({ ...result, sweep }, null, 2));
 			return 0;
 		}
 
-		console.log(renderTransportTable(transports));
+		// Rendered upstream by the shared renderer. Re-formatting here would be a
+		// second copy of the elimination table's format, and that table is what
+		// the whole protocol gates on.
+		console.log(result.table ?? renderTransportTable(transports));
 		console.log();
 		console.log(
 			`${rows.length} call shape(s) from ${result.events ?? 0} JS event(s) + ${result.wireEntries ?? 0} wire entr(ies)`,
 		);
 		console.log();
-		for (const row of rows.slice(0, opts.limit)) {
-			const q = row.params?.length ? `?${row.params.join('&')}` : '';
-			const n = row.count > 1 ? ` x${row.count}` : '';
-			const shape = row.shape ? ` -> ${row.shape}` : '';
-			console.log(`  ${row.kind} ${row.method} ${row.host}${row.template}${q}${n}${shape}`);
-		}
-		if (rows.length > opts.limit) {
-			console.log(`  … ${rows.length - opts.limit} more (raise --limit)`);
+		const manifestLines = (result.manifestText ?? '').split('\n').filter(Boolean);
+		for (const line of manifestLines.slice(0, opts.limit)) console.log(`  ${line}`);
+		if (manifestLines.length > opts.limit) {
+			console.log(`  … ${manifestLines.length - opts.limit} more (raise --limit)`);
 		}
 
 		// An absent row means "not observed", which is weaker than "not present".
 		// Saying so here keeps the distinction attached to the output rather than
 		// leaving it to be remembered.
+		if (sweep) {
+			console.log();
+			console.log(
+				`Sweep: ${sweep.performed?.length ?? 0} provocation(s), ${sweep.skipped?.length ?? 0} skipped`,
+			);
+			for (const s of (sweep.skipped ?? []).slice(0, 5)) console.log(`  skipped: ${s}`);
+		}
+
 		const absent = transports.filter((t) => !t.present).map((t) => t.transport);
 		if (absent.length) {
 			console.log();
 			console.log(`Not observed (weaker than absent): ${absent.join(', ')}`);
-			console.log('Exercise the page, then re-run, before treating any of these as a verdict.');
+			console.log(
+				opts.sweep
+					? 'The page was exercised, so these are better evidence — but still not proof of absence.'
+					: 'The page was NOT exercised. Re-run with --sweep before treating any of these as a verdict.',
+			);
 		}
 		console.log();
 		console.log(

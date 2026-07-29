@@ -242,7 +242,12 @@ break-it review exists to catch.
   the repo rather than to a package; those get their own run, and it is part of
   the gate.
 - **Prove a new check fails.** A test that has never been red is a claim, not a
-  check. Break the thing it guards, watch it go red, restore.
+  check.
+- **Read the suite count, not just the failure count.** A test file that fails
+  to load reports no failures, because it reported no tests — so a run can be
+  green while an entire gate never executed. Confirm the number of suites and
+  tests moved in the direction the change implies; a new check that added no
+  tests did not run. Break the thing it guards, watch it go red, restore.
 - **Dynamic scripts are bounded** — a hard cap on requests, wall time, output
   size, or scenarios, stated in the header docblock and enforced in the code. No
   model judgment inside a script. Importing a script runs nothing, so a unit
