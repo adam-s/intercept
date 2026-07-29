@@ -221,6 +221,14 @@ honest result. "Complete" without that qualifier is a claim about both.
   a challenge page.
 - Low traffic after one page load is normal. Navigate more pages rather than
   concluding the site is empty.
+- **The two capture halves have different memories, and the difference shows up
+  as a table that changes under you.** Wire entries accumulate across
+  navigations; the instrument's JS-level buffer is drained destructively, so
+  each manifest read covers only the window since the last read. A transport
+  can therefore read ✓ on one pass and ✗ on the next with nothing in the world
+  having changed. Neither reading is a correction of the other — a ✓ once
+  observed stays true — so carry findings forward rather than trusting the
+  latest table to be cumulative.
 - **Traffic resets on navigation.** Capture before navigating away; re-capture
   after the new page settles.
 - **Follow the script chain to its end.** A worker is often a bootstrap rather

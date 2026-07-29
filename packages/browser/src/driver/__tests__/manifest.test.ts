@@ -15,11 +15,13 @@ import {
 	buildManifest,
 	deriveTransports,
 	detectChallengePresence,
+	isFormEncodedPost,
 	MANIFEST_LIMITS,
 	parseTarget,
 	renderTransports,
 	shapeOfBody,
 	templateSegment,
+	wireTransport,
 } from '../manifest.js';
 
 const ev = (over: Partial<EgressEvent>): EgressEvent => ({
@@ -567,5 +569,86 @@ describe('transports that do not announce themselves conventionally', () => {
 	it.each(['/videoplayback', '/v1/segment/abc'])('recognises adaptive media at %s', (t) => {
 		const v = deriveTransports([row(t)]);
 		expect(v.find((x) => x.transport === 'HLS/Media')?.present).toBe(true);
+	});
+});
+
+describe('a wire row is classified by what it carried', () => {
+	/**
+	 * The negative control caught this. Hacker News is server-rendered and its
+	 * honest answer is one transport, but the table came back with
+	 * `JSON API (XHR) ✓` evidenced by `news.css`, `y18.svg`, and the site's only
+	 * script — because every non-navigation wire entry mapped to the JSON row
+	 * with no content-type check. The row most likely to be believed was the one
+	 * that came free, on a site with no JSON anywhere.
+	 */
+	it('does not call a stylesheet, a script, or an icon a JSON API', () => {
+		for (const ct of ['text/css', 'application/javascript', 'image/svg+xml', 'font/woff2']) {
+			expect(wireTransport('GET', ct)).toBeNull();
+		}
+	});
+
+	it('recognises the data it does carry', () => {
+		expect(wireTransport('GET', 'application/json; charset=utf-8')).toBe('JSON API (XHR)');
+		expect(wireTransport('GET', 'application/vnd.api+json')).toBe('JSON API (XHR)');
+		expect(wireTransport('GET', 'text/event-stream')).toBe('SSE');
+		expect(wireTransport('GET', 'text/html')).toBe('HTML-over-the-wire');
+		expect(wireTransport('DOCUMENT', undefined)).toBe('HTML-over-the-wire');
+	});
+
+	// Silence beats a guess: an unlabelled response reaching the table as a ✓ is
+	// indistinguishable from evidence once a reader sees it.
+	it('claims nothing when the response declared nothing', () => {
+		expect(wireTransport('GET', undefined)).toBeNull();
+		expect(wireTransport('GET', '')).toBeNull();
+	});
+
+	it('end to end: a page of assets produces no JSON API row', () => {
+		const rows = buildManifest(
+			[],
+			[
+				{ method: 'DOCUMENT', url: 'https://news.ycombinator.com/', contentType: 'text/html' },
+				{ method: 'GET', url: 'https://news.ycombinator.com/news.css', contentType: 'text/css' },
+				{
+					method: 'GET',
+					url: 'https://news.ycombinator.com/y18.svg',
+					contentType: 'image/svg+xml',
+				},
+			],
+		);
+		const verdicts = deriveTransports(rows);
+		const present = verdicts.filter((v) => v.present).map((v) => v.transport);
+		expect(present).toEqual(['HTML-over-the-wire']);
+	});
+});
+
+describe('a GET form is not evidence of a form-encoded POST', () => {
+	/**
+	 * The sweep submits GET forms by design — that is how a search endpoint names
+	 * its parameters. Counting that submission on the form-encoded row meant the
+	 * sweep manufactured a transport by doing its job, and the evidence line read
+	 * literally `GET hn.algolia.com/`.
+	 */
+	it('counts POST and refuses GET', () => {
+		expect(isFormEncodedPost('POST')).toBe(true);
+		expect(isFormEncodedPost('get')).toBe(false);
+		expect(isFormEncodedPost('')).toBe(false);
+	});
+
+	it('end to end: a submitted search form adds no Form-encoded POST row', () => {
+		const rows = buildManifest(
+			[{ kind: 'form-submit', method: 'GET', url: 'https://x.test/search?q=a', t: 1 }],
+			[],
+		);
+		const verdicts = deriveTransports(rows);
+		expect(verdicts.find((v) => v.transport === 'Form-encoded POST')?.present).toBe(false);
+	});
+
+	it('still reports a real form POST', () => {
+		const rows = buildManifest(
+			[{ kind: 'form-submit', method: 'POST', url: 'https://x.test/comment', t: 1 }],
+			[],
+		);
+		const verdicts = deriveTransports(rows);
+		expect(verdicts.find((v) => v.transport === 'Form-encoded POST')?.present).toBe(true);
 	});
 });

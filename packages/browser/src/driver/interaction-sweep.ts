@@ -232,6 +232,12 @@ export interface ElementMeta {
 	href: string;
 	/** The form's method, or the control's own override. Empty outside a form. */
 	formMethod: string;
+	/**
+	 * Where the owning form would send this, resolved absolute. Empty outside a
+	 * form. A field carries no `href`, so this is the only thing that says where
+	 * pressing Enter in it would go.
+	 */
+	formAction: string;
 	/** The field announces itself as a query input, so Enter is safe to press. */
 	isSearch: boolean;
 	/** Free text. Enter in one of these can post to somebody's account. */
@@ -266,6 +272,9 @@ export function elementMeta(el: Element): ElementMeta {
 	// A control's own override wins over its form's, the way the browser reads it.
 	const owner = el.closest('form') as HTMLFormElement | null;
 	const formMethod = el.getAttribute('formmethod') || (owner ? owner.method || 'get' : '');
+	// `action` resolves to an absolute URL, and an empty attribute resolves to the
+	// current document — so a form with no action reads as same-origin, correctly.
+	const formAction = el.getAttribute('formaction') || (owner ? owner.action || '' : '');
 
 	const hay = [
 		el.getAttribute('type') || '',
@@ -281,6 +290,7 @@ export function elementMeta(el: Element): ElementMeta {
 		label,
 		href: el.getAttribute('href') || '',
 		formMethod,
+		formAction,
 		// A field that announces itself as a query input. Enter is safe to press
 		// in one of these and unsafe in a free-text box, which is the whole reason
 		// the distinction is drawn.
@@ -337,6 +347,7 @@ function uninspectable(reason: string): ElementMeta & { __error: string } {
 		label: '',
 		href: '',
 		formMethod: '',
+		formAction: '',
 		isSearch: false,
 		isEditable: true,
 		__error: reason,
@@ -473,8 +484,23 @@ export async function runSweep(
 					}
 					// Off-origin navigation leaves the target entirely; the capture
 					// after it would describe a different site.
-					if (meta.href && origin && /^https?:/i.test(meta.href) && !meta.href.startsWith(origin)) {
-						skipped.push(`${action.kind} "${meta.label.slice(0, 40)}": off-origin`);
+					//
+					// Both doors, checked in one place. A link announces its destination
+					// in `href`; a field announces nothing at all, and the place it would
+					// send you is its form's action. Guarding only the first let a search
+					// field pass — the sweep pressed Enter, the browser left the target,
+					// a query string reached a third party, and that third party's own
+					// document then entered the manifest as evidence about the site we
+					// were measuring. `submit` had this check and `query` reached the
+					// same form by a different door, which is exactly why it belongs on
+					// the element rather than inside one action.
+					const leavesOrigin = [meta.href, meta.formAction].some(
+						(u) => u && origin && /^https?:/i.test(u) && !u.startsWith(origin),
+					);
+					if (leavesOrigin) {
+						skipped.push(
+							`${action.kind} "${meta.label.slice(0, 40) || '(unlabelled)'}": off-origin`,
+						);
 						continue;
 					}
 
@@ -547,15 +573,10 @@ export async function runSweep(
 						).catch(() => {});
 						await p.waitForTimeout(2_500);
 					} else if (action.kind === 'submit') {
-						const sameOrigin = await bounded(
-							h.evaluate((f: HTMLFormElement) => !f.action || f.action.startsWith(location.origin)),
-							CALL_TIMEOUT_MS,
-							'read form action',
-						).catch(() => false);
-						if (!sameOrigin) {
-							skipped.push(`submit "${meta.label.slice(0, 30)}": off-origin action`);
-							continue;
-						}
+						// The off-origin check used to live here and nowhere else, which is
+						// how pressing Enter in a field reached a form that this refused.
+						// `meta.formAction` carries it for every interaction now.
+						//
 						// `requestSubmit` is the button's path, not the script's: it runs
 						// validation and fires the submit event, so a required-but-empty
 						// field silently cancels it. Filling the empties first is what

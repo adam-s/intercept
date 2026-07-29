@@ -194,7 +194,15 @@ app.get('/browser/manifest', async (c) => {
 		// both becomes one row that says so, and a call only the wire saw — a
 		// service worker, a redirect — still gets a row.
 		const { entries } = getTrafficEntries();
-		const wire = entries.map((e) => ({ method: e.method, url: e.url, body: e.responseBody }));
+		// The declared content type rides along. Without it a wire row says only
+		// "something crossed the network", and every stylesheet and favicon was
+		// being counted as evidence for the JSON API row.
+		const wire = entries.map((e) => ({
+			method: e.method,
+			url: e.url,
+			body: e.responseBody,
+			contentType: e.responseHeaders?.['content-type'] ?? e.responseHeaders?.['Content-Type'],
+		}));
 		const result = drain ? await browser.captureManifest(wire) : browser.manifestFromWire(wire);
 		return c.json({
 			...result,

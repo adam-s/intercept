@@ -37,7 +37,14 @@ sleep 8 && curl -s http://localhost:XXXX/health
 - Do NOT `sleep` longer than 15 seconds.
 - The only rules file is `discovery.md`. Do not look for other rules files.
 - **Browser drops:** If a browser command fails with "context closed" or connection error, reconnect ONCE. If it fails again, proceed without the browser — use what you already captured.
-- **Traffic resets on navigation.** Capture `/browser/traffic` BEFORE navigating to new pages. After `page.goto()`, previous entries may be gone.
+- **Traffic survives navigation; the JS-level buffer is what needs care.** Wire
+  entries accumulate across `page.goto()`, so there is no need to capture
+  defensively before every navigation. The instrument's own buffer is separate:
+  it is drained destructively, so each manifest read reports what happened since
+  the last one. That asymmetry is why a re-run can turn a ✓ into a ✗ — the wire
+  half remembers and the JS half does not. Read a manifest as a statement about
+  the window since the previous read, and do not treat a later, thinner table as
+  a correction of an earlier one.
 
 ## Discovery Protocol
 
@@ -157,6 +164,11 @@ Curling routes by hand proves the ones you remembered to curl. Finish with:
 ```bash
 node scripts/route-spec.mjs --record --port=XXXX   # first run, writes the baseline
 node scripts/route-spec.mjs --port=XXXX            # asserts against it
+
+# A politely rate-limited host needs more than the defaults. Each route waits
+# its turn, so per-request time is spacing rather than slowness, and the default
+# per-request timeout will abort work that was merely queued:
+node scripts/route-spec.mjs --port=XXXX --timeout=120000 --wall-clock=600
 ```
 
 Paste its output. It must end `✓ N route(s) passed`.
@@ -198,6 +210,12 @@ The order that works:
    comparable traffic.
 4. Run coverage immediately, and treat that as the last restart before
    `route-spec`.
+
+**Coverage reads the wire, not the instrument**, so step 3 is genuinely enough
+and you do not need a third instrumented pass to satisfy it. If it comes back
+empty after re-navigating, the traffic listener is not attached — reconnect and
+navigate again rather than reinstalling the instrument, which puts aids back on
+a session that was about to do the clean pass.
 
 A coverage run against whatever traffic happens to be lying around scores your
 routes against the handful of calls the checker itself just made, which is close

@@ -159,11 +159,19 @@ function fakePage(over: Record<string, unknown> = {}) {
 }
 
 /** An element double whose label decides whether the sweep should touch it. */
-function fakeEl(label: string, href = '') {
+function fakeEl(label: string, href = '', over: Record<string, unknown> = {}) {
 	const clicked = { count: 0 };
 	return {
 		handle: {
-			evaluate: async () => ({ label, href }),
+			evaluate: async () => ({
+				label,
+				href,
+				formMethod: '',
+				formAction: '',
+				isSearch: false,
+				isEditable: false,
+				...over,
+			}),
 			click: async () => {
 				clicked.count += 1;
 			},
@@ -280,6 +288,42 @@ describe('label reading does not manufacture a refusal', () => {
 		expect(isDestructive(plain)).toBe(false);
 		const explicit = ['Save', null, null, null, 'submit'].filter(Boolean).join(' ');
 		expect(isDestructive(explicit)).toBe(true);
+	});
+});
+
+describe('leaving the target site', () => {
+	/**
+	 * The case that got through on a real run.
+	 *
+	 * Hacker News's search box is an `<input>` inside a GET form whose action is
+	 * on another origin. It carries no `href`, so the link check saw nothing; its
+	 * method is GET, so the safety check was satisfied. `submit` refused the form
+	 * correctly and `query` then reached the same form by pressing Enter, because
+	 * the origin check lived inside `submit` alone. The browser left the target,
+	 * a query string went to a third party, and that third party's own document
+	 * entered the manifest as evidence about the site being measured.
+	 */
+	it('refuses a field whose form posts off-origin, even with no href', async () => {
+		const away = fakeEl('Search', '', {
+			formMethod: 'get',
+			formAction: 'https://elsewhere.test/?q=',
+			isSearch: true,
+		});
+		const page = fakePage({ $$: vi.fn(async () => [away.handle]) });
+		const result = await runSweep(page, { dwellMs: 1 });
+		expect(away.clicked.count).toBe(0);
+		expect(result.skipped.some((s) => s.includes('off-origin'))).toBe(true);
+	});
+
+	it('still allows a same-origin GET form, which is the whole point of the row', async () => {
+		const ok = fakeEl('Search', '', {
+			formMethod: 'get',
+			formAction: 'https://x.test/search',
+			isSearch: true,
+		});
+		const page = fakePage({ $$: vi.fn(async () => [ok.handle]) });
+		const result = await runSweep(page, { dwellMs: 1 });
+		expect(result.skipped.some((s) => s.includes('off-origin'))).toBe(false);
 	});
 });
 

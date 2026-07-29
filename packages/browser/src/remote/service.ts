@@ -1403,7 +1403,9 @@ export class RemoteBrowserService {
 	 * merely wants to look. The coverage diff is exactly that: it reads what has
 	 * been seen so far and must not consume it.
 	 */
-	manifestFromWire(wire: Array<{ method: string; url: string; body?: unknown }> = []): {
+	manifestFromWire(
+		wire: Array<{ method: string; url: string; body?: unknown; contentType?: string }> = [],
+	): {
 		rows: ManifestRow[];
 		truncatedFrom?: number;
 		transports: TransportVerdict[];
@@ -1421,7 +1423,7 @@ export class RemoteBrowserService {
 	}
 
 	async captureManifest(
-		wire: Array<{ method: string; url: string; body?: unknown }> = [],
+		wire: Array<{ method: string; url: string; body?: unknown; contentType?: string }> = [],
 	): Promise<{
 		rows: ManifestRow[];
 		truncatedFrom?: number;

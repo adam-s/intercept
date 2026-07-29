@@ -1,6 +1,13 @@
 export type { CompletenessSignal } from './completeness';
 export { deriveCompleteness, withCompleteness } from './completeness';
 export { appendDebugLog, DEBUG, DEBUG_DIR } from './debug';
+export type { DerivedStreamOptions } from './derived-stream';
+export {
+	DERIVED_STREAM_LIMITS,
+	derivedItemStream,
+	diffNewItems,
+	UpstreamStatusError,
+} from './derived-stream';
 export type { RetryOptions } from './fetch-retry';
 export { fetchWithRetry, friendlyHttpError } from './fetch-retry';
 export type {

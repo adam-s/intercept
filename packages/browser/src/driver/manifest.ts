@@ -30,6 +30,8 @@ import type { EgressEvent, EgressKind } from './instrument.js';
 /** One distinct call shape, however many times it occurred. */
 export interface ManifestRow {
 	kind: EgressKind | 'wire';
+	/** Declared content type, for wire rows. What the response said it was. */
+	contentType?: string;
 	method: string;
 	host: string;
 	/** Path with volatile segments replaced by `{id}` — the grouping key. */
@@ -166,7 +168,7 @@ function keyOf(kind: string, method: string, t: ReturnType<typeof parseTarget>):
  */
 export function buildManifest(
 	events: EgressEvent[],
-	wire: Array<{ method: string; url: string; body?: unknown }> = [],
+	wire: Array<{ method: string; url: string; body?: unknown; contentType?: string }> = [],
 ): Manifest {
 	const rows = new Map<string, ManifestRow>();
 
@@ -174,7 +176,13 @@ export function buildManifest(
 		kind: ManifestRow['kind'],
 		method: string,
 		url: string,
-		extra: { body?: string; shape?: string; initiator?: string; at?: number },
+		extra: {
+			body?: string;
+			shape?: string;
+			initiator?: string;
+			at?: number;
+			contentType?: string;
+		},
 	) => {
 		const t = parseTarget(url);
 		const k = keyOf(kind === 'wire' ? 'wire' : kind, method, t);
@@ -205,6 +213,7 @@ export function buildManifest(
 		}
 		if (!row.body && extra.body) row.body = extra.body;
 		if (!row.shape && extra.shape) row.shape = extra.shape;
+		if (!row.contentType && extra.contentType) row.contentType = extra.contentType;
 		if (extra.initiator) {
 			row.initiators ??= [];
 			if (
@@ -228,7 +237,7 @@ export function buildManifest(
 				: typeof w.body === 'string'
 					? w.body.slice(0, 120)
 					: shapeOfBody(w.body);
-		add('wire', w.method, w.url, { shape });
+		add('wire', w.method, w.url, { shape, contentType: w.contentType });
 	}
 
 	// Frequent first, but a shape seen once still has a row — a once-only call is
@@ -266,7 +275,12 @@ export function buildManifest(
 const KIND_TO_TRANSPORT: Record<string, string> = {
 	fetch: 'JSON API (XHR)',
 	xhr: 'JSON API (XHR)',
-	wire: 'JSON API (XHR)',
+	// `wire` is deliberately absent. A wire row's kind says only that something
+	// crossed the network, and mapping that to the JSON row put a ✓ on the most
+	// believed transport in the table for a stylesheet, a favicon, and the site's
+	// only script. Measured on a server-rendered site whose honest answer is one
+	// transport: `JSON API (XHR) ✓`, evidenced by `news.css` and `y18.svg`. What a
+	// wire row carried is a content-type question, settled in `wireTransport`.
 	websocket: 'WebSocket',
 	'websocket-frame': 'WebSocket',
 	eventsource: 'SSE',
@@ -284,6 +298,50 @@ const KIND_TO_TRANSPORT: Record<string, string> = {
 	postmessage: 'Cross-frame RPC',
 	broadcast: 'Cross-frame RPC',
 };
+
+/**
+ * What a wire row actually carried, from its content type.
+ *
+ * The row's `kind` says it crossed the network and nothing more, so this is the
+ * only thing that can tell a JSON endpoint from a stylesheet. It reads the
+ * content type the response declared rather than guessing from the URL, because
+ * an extension is a convention and a header is the server's own answer — and
+ * plenty of real API paths carry no extension at all.
+ *
+ * Returns null for anything that is not a transport in its own right. That is
+ * the important half: a run reporting nothing for a static asset is right, and
+ * a run reporting a JSON API for it poisons the row everything else is measured
+ * against. When the content type is missing the answer is also null, because a
+ * guess here is indistinguishable from evidence once it reaches the table.
+ */
+/**
+ * Whether a form submission is evidence for the form-encoded row.
+ *
+ * A GET form puts its fields in the query string and gets a document back, so
+ * it demonstrates the document transport the wire already recorded — not a
+ * form-encoded body. Counting it produced `Form-encoded POST ✓` on a site that
+ * posts nothing anywhere, evidenced by the sweep's own search submission.
+ */
+export function isFormEncodedPost(method: string): boolean {
+	return (
+		String(method || 'GET')
+			.trim()
+			.toUpperCase() !== 'GET'
+	);
+}
+
+export function wireTransport(method: string, contentType?: string): string | null {
+	if (method === 'DOCUMENT') return 'HTML-over-the-wire';
+	const ct = (contentType ?? '').toLowerCase().split(';')[0].trim();
+	if (!ct) return null;
+	if (ct.includes('json')) return 'JSON API (XHR)';
+	if (ct.includes('event-stream')) return 'SSE';
+	if (ct === 'text/html' || ct === 'application/xhtml+xml') return 'HTML-over-the-wire';
+	// Media, styles, scripts, fonts, images and feeds are all real responses and
+	// none of them is a transport class this table has a row for. Saying nothing
+	// is the honest output; the row a reader wants for a feed does not exist yet.
+	return null;
+}
 
 /**
  * Every transport name an observation can produce, including the one derived
@@ -333,10 +391,19 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 		// navigation response is markup: filing it under the JSON row put a false
 		// ✓ on the row most likely to be believed, while the row it actually
 		// belongs to read absent on a site whose entire transport is that markup.
-		const name =
-			row.kind === 'wire' && row.method === 'DOCUMENT'
-				? 'HTML-over-the-wire'
-				: KIND_TO_TRANSPORT[row.kind];
+		let name: string | null;
+		if (row.kind === 'wire') {
+			name = wireTransport(row.method, row.contentType);
+		} else if (row.kind === 'form-submit') {
+			// A form submission is only evidence for the form-encoded row when it
+			// actually posts one. A GET form puts its fields in the query string and
+			// gets a document back — which the document row already records — so
+			// counting it here manufactured `Form-encoded POST ✓` on a site with no
+			// POST anywhere, from the sweep's own search submission.
+			name = isFormEncodedPost(row.method) ? KIND_TO_TRANSPORT[row.kind] : null;
+		} else {
+			name = KIND_TO_TRANSPORT[row.kind];
+		}
 		if (!name) continue;
 		const ev = seen.get(name);
 		if (ev && ev.length < 3) ev.push(`${row.method} ${row.host}${row.template}`);
@@ -423,9 +490,15 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 	// map to the JSON row because that is the common case, so a form-encoded POST
 	// sent through `fetch` was filed as a JSON API and its own row printed absent
 	// — while the request body sat in the manifest saying otherwise.
+	//
+	// The method test appears here as well as in the loop above, and it has to:
+	// this rule sets `present` directly, so without it the loop's refusal was
+	// silently overridden and a GET form still produced a ✓. Two writers to one
+	// row is the shape that let a wrong verdict survive — they now apply the same
+	// test, and the pin below covers this path specifically.
 	const formEncoded = rows.filter(
 		(r) =>
-			r.kind === 'form-submit' ||
+			(r.kind === 'form-submit' && isFormEncodedPost(r.method)) ||
 			(r.body
 				? /^[\w.[\]%+-]+=[^&\s]*(&[\w.[\]%+-]+=[^&\s]*)+$/.test(r.body.slice(0, 300))
 				: false),

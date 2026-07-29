@@ -48,6 +48,21 @@ export interface RateLimitConfig {
 	maxConcurrent?: number;
 	/** Retry up to this many times on 429 with exponential backoff. Default: 2. */
 	retryOn429?: number;
+	/**
+	 * Minimum gap between two requests to this host. Default: none.
+	 *
+	 * `maxPerMinute` is a sliding-window *count*, so on its own it permits the
+	 * whole minute's budget as one instantaneous burst and only then starts
+	 * queueing. That is the shape a small origin refuses: measured against a
+	 * single-server site registered at 8/min, an assertion run issuing 14 calls
+	 * sent the first 8 back to back, collected refusals on five of them, and
+	 * then queued politely for the rest — a pace no reader has and a limit this
+	 * side caused.
+	 *
+	 * Set this where the host is small enough that arrival *rate* matters as
+	 * much as volume. It composes with the window rather than replacing it.
+	 */
+	minSpacingMs?: number;
 }
 
 interface HostState {
@@ -116,13 +131,31 @@ function pruneWindow(state: HostState): void {
 	}
 }
 
+/**
+ * Whether the host's most recent request is far enough behind us.
+ *
+ * Read off the window's last timestamp rather than a separate clock, so a
+ * request recorded by any caller — `rateLimitedFetch` or a hand-rolled
+ * `waitForRateLimitSlot` pair — counts the same.
+ */
+function spacingSatisfied(state: HostState): boolean {
+	const gap = state.config.minSpacingMs ?? 0;
+	if (gap <= 0) return true;
+	const last = state.timestamps.at(-1);
+	return last === undefined || Date.now() - last >= gap;
+}
+
 /** Wait until the host's rate limit allows a new request. */
 async function waitForSlot(state: HostState): Promise<void> {
 	const { maxPerMinute, maxConcurrent = maxPerMinute } = state.config;
 
-	// Fast path: both slots available
+	// Fast path: every constraint satisfied
 	pruneWindow(state);
-	if (state.timestamps.length < maxPerMinute && state.inflight < maxConcurrent) {
+	if (
+		state.timestamps.length < maxPerMinute &&
+		state.inflight < maxConcurrent &&
+		spacingSatisfied(state)
+	) {
 		return;
 	}
 
@@ -130,13 +163,25 @@ async function waitForSlot(state: HostState): Promise<void> {
 	return new Promise<void>((resolve) => {
 		const check = () => {
 			pruneWindow(state);
-			if (state.timestamps.length < maxPerMinute && state.inflight < maxConcurrent) {
+			if (
+				state.timestamps.length < maxPerMinute &&
+				state.inflight < maxConcurrent &&
+				spacingSatisfied(state)
+			) {
 				resolve();
 			} else {
 				// Calculate delay until the oldest request exits the window
 				const oldestAge =
 					state.timestamps.length > 0 ? 60_000 - (Date.now() - state.timestamps[0]) : 1000;
-				const delay = Math.max(100, Math.min(oldestAge, 5000));
+				// When spacing is the only unmet constraint the window is nowhere
+				// near full, so polling on the window's schedule would sleep whole
+				// seconds past the moment the gap closes.
+				const last = state.timestamps.at(-1);
+				const spacingWait =
+					state.config.minSpacingMs && last !== undefined
+						? state.config.minSpacingMs - (Date.now() - last)
+						: Number.POSITIVE_INFINITY;
+				const delay = Math.max(100, Math.min(oldestAge, spacingWait, 5000));
 				setTimeout(check, delay);
 			}
 		};
