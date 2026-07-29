@@ -106,6 +106,23 @@ an `examples` entry with real identifiers so nothing is invisible.
 **You are not done until this passes.** A domain whose routes were never called
 is not a domain that works.
 
+### Then check recall — route-spec cannot
+
+```bash
+node scripts/discover-probe.mjs --mode=coverage --domain=yourdomain --port=XXXX
+```
+
+route-spec grades the routes you built. It has no opinion about the ones you
+didn't. This diffs the endpoints the browser actually called against your
+routes and prints a floor.
+
+Paste its output and **account for every unaccounted endpoint** — a route, or a
+line in the elimination table saying why not. Each one fired in a real browser,
+so each one exists. Matching is weak by design, so unaccounted means unexplained
+rather than certainly missed; an unexplained endpoint is still an unfinished
+discovery. Treat the number as a floor: interaction-gated endpoints never fire
+under passive browsing, so the real surface is larger than it reports.
+
 ## CI Must Be Clean
 
 Before finishing, run `pnpm biome check --write --unsafe .` in your worktree. Fix any remaining lint, type, or build errors. You are responsible for leaving the worktree in a state where `pnpm build` succeeds and `pnpm biome check` returns zero errors. Do not leave broken code for the orchestrator to fix.
