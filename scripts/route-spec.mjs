@@ -406,6 +406,21 @@ async function main() {
 		}
 	}
 
+	// GATE: recording is destructive and domain-wide. Without a domain it rewrites
+	// every baseline in the repo from whatever happens to be reachable right now —
+	// including reference material whose test server may not even be running, whose
+	// routes then record as failures or as error shapes. That has happened more
+	// than once and each time it was noticed by accident.
+	if (opts.record && !opts.domain) {
+		console.error(
+			'✗ --record needs --domain=NAME.\n' +
+				'  Recording rewrites baselines for every domain it can reach, and a domain\n' +
+				'  whose server is down records its failures as the expected shape.\n' +
+				'  Name the one you mean.',
+		);
+		return 1;
+	}
+
 	const results = [];
 	const baselines = {};
 	let probed = 0;

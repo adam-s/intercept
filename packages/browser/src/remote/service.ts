@@ -1198,8 +1198,13 @@ export class RemoteBrowserService {
 						credentials: 'include', // Include cookies
 					};
 
-					if (options.body) {
-						fetchOptions.body = JSON.stringify(options.body);
+					if (options.body !== undefined && options.body !== null) {
+						// A string body is already encoded — form-encoded, XML, NDJSON,
+						// a signed blob. Stringifying it again wraps it in quotes and
+						// the server rejects a body that was correct when handed over.
+						// Only a structured value needs encoding here.
+						fetchOptions.body =
+							typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
 					}
 
 					const response = await fetch(url, fetchOptions);

@@ -78,3 +78,29 @@ describe('the instrumented-session gate', () => {
 		expect(parseArgs([]).budget).toBeGreaterThan(48);
 	});
 });
+
+describe('the record gate', () => {
+	// Recording is destructive and domain-wide. Without a domain it rewrites every
+	// baseline it can reach — including reference material whose test server may
+	// not be running, whose routes then record their failures as the expected
+	// shape. That has happened more than once, and each time it was caught by
+	// accident rather than by a check.
+	it('is not satisfied by --record alone', () => {
+		const o = parseArgs(['--record']);
+		expect(o.record).toBe(true);
+		expect(o.domain).toBe(null);
+	});
+
+	it('is satisfied when a domain is named', () => {
+		expect(parseArgs(['--record', '--domain=twitch'])).toMatchObject({
+			record: true,
+			domain: 'twitch',
+		});
+	});
+
+	// Asserting without --domain stays allowed: reading every baseline is safe,
+	// writing every baseline is not.
+	it('does not restrict an assert-only run', () => {
+		expect(parseArgs([])).toMatchObject({ record: false, domain: null });
+	});
+});

@@ -259,11 +259,6 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 		if (ev && ev.length < 3) ev.push(`${row.method} ${row.host}${row.template}`);
 	}
 
-	// Adaptive media is provable two ways and the primitive is the weaker one.
-	// `appendBuffer` fires only when the page itself demuxes; a player that does
-	// its fetching and appending inside a worker leaves no MSE event in the page,
-	// so a site streaming video reported this row absent while its playlist sat
-	// in the captured traffic. A manifest request settles it whoever made it.
 	// GraphQL rides on fetch/XHR, so it is a body-shape question, not a
 	// primitive question — the only verdict here that reads payloads.
 	const graphql = rows.filter(
@@ -288,6 +283,28 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 			row.present = true;
 			for (const m of media.slice(0, 3)) {
 				const ev = `${m.method} ${m.host}${m.template}`;
+				if (!row.evidence.includes(ev)) row.evidence.push(ev);
+			}
+		}
+	}
+
+	// A primitive says how a call was made, not what it carried. `fetch` and XHR
+	// map to the JSON row because that is the common case, so a form-encoded POST
+	// sent through `fetch` was filed as a JSON API and its own row printed absent
+	// — while the request body sat in the manifest saying otherwise.
+	const formEncoded = rows.filter(
+		(r) =>
+			r.kind === 'form-submit' ||
+			(r.body
+				? /^[\w.[\]%+-]+=[^&\s]*(&[\w.[\]%+-]+=[^&\s]*)+$/.test(r.body.slice(0, 300))
+				: false),
+	);
+	if (formEncoded.length) {
+		const row = out.find((v) => v.transport === 'Form-encoded POST');
+		if (row) {
+			row.present = true;
+			for (const f of formEncoded.slice(0, 3)) {
+				const ev = `${f.method} ${f.host}${f.template}`;
 				if (!row.evidence.includes(ev)) row.evidence.push(ev);
 			}
 		}

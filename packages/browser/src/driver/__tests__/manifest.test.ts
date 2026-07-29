@@ -329,3 +329,42 @@ describe('adaptive media is provable without an MSE append', () => {
 		expect(v.find((t) => t.transport === 'HLS/Media')?.present).toBe(false);
 	});
 });
+
+describe('some rows are payload questions wearing a primitive costume', () => {
+	// `fetch` and XHR map to the JSON row because that is the common case. A
+	// form-encoded POST sent through `fetch` was therefore filed as a JSON API
+	// and its own row printed absent — while the request body sat in the
+	// manifest saying otherwise. A live run had to correct this by hand.
+	it('recognises a form-encoded body sent through fetch', () => {
+		const v = deriveTransports(
+			buildManifest([
+				ev({
+					kind: 'fetch',
+					method: 'POST',
+					url: 'https://x.test/more',
+					body: 'cursor=abc&csrf_token=xyz',
+				}),
+			]),
+		);
+		expect(v.find((t) => t.transport === 'Form-encoded POST')?.present).toBe(true);
+	});
+
+	it('still recognises a native form submission', () => {
+		const v = deriveTransports(buildManifest([ev({ kind: 'form-submit', method: 'POST' })]));
+		expect(v.find((t) => t.transport === 'Form-encoded POST')?.present).toBe(true);
+	});
+
+	// A JSON body and a single bare token are not form encoding; treating them as
+	// such would mark the row present on almost every site and make it useless.
+	it.each([
+		'{"a":1}',
+		'plain text',
+		'justonetoken',
+		'[binary 8b]',
+	])('does not read %s as form-encoded', (body) => {
+		const v = deriveTransports(
+			buildManifest([ev({ kind: 'fetch', method: 'POST', url: 'https://x.test/a', body })]),
+		);
+		expect(v.find((t) => t.transport === 'Form-encoded POST')?.present).toBe(false);
+	});
+});
