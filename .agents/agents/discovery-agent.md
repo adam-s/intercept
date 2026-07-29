@@ -49,6 +49,13 @@ In GATHER: navigate to that page, intercept pagination 2-3 times to capture the 
 
 Read `domains/boardshop/ROUTES.md` first — it indexes all 33 routes by pattern so you can jump to the one you need. Key patterns: Route 32 = session-harvest, Route 33 = click-intercept, Route 8 = GraphQL, Route 15 = __NEXT_DATA__.
 
+## Report the saturation delta
+
+GATHER runs until a pass finds nothing new. In your final report, give the count
+of new transports and endpoints each pass found — e.g. `pass 1: 4, pass 2: 1,
+pass 3: 0`. A final pass above zero means you stopped early and the inventory is
+known-incomplete; say so rather than presenting it as complete.
+
 ## browserFetch vs page.evaluate("fetch()")
 
 `browserFetch` is a method on `RemoteBrowserService` — only available inside route handler code. During discovery, use the `/browser/mcp/fetch` endpoint instead:
@@ -82,15 +89,31 @@ curl -s http://localhost:XXXX/api/yourdomain/route | head -50
 
 If a route needs fixing, edit the file, `kill -9` the server, and restart. Do NOT expect tsx to detect domain file changes — it won't. Do NOT debug "why old code is running" — just kill and restart.
 
+### Finish with route-spec — this is the gate
+
+Curling routes by hand proves the ones you remembered to curl. Finish with:
+
+```bash
+node scripts/route-spec.mjs --record --port=XXXX   # first run, writes the baseline
+node scripts/route-spec.mjs --port=XXXX            # asserts against it
+```
+
+Paste its output. It must end `✓ N route(s) passed` — and read the `⊘ not
+probed` line, because it is a coverage report. A route without `examples` is
+skipped, and a skipped route reads exactly like a passing one. Give every route
+an `examples` entry with real identifiers so nothing is invisible.
+
+**You are not done until this passes.** A domain whose routes were never called
+is not a domain that works.
+
 ## CI Must Be Clean
 
 Before finishing, run `pnpm biome check --write --unsafe .` in your worktree. Fix any remaining lint, type, or build errors. You are responsible for leaving the worktree in a state where `pnpm build` succeeds and `pnpm biome check` returns zero errors. Do not leave broken code for the orchestrator to fix.
 
-**Lint, types, and build prove the code compiles. They prove nothing about the
-routes.** Run `node scripts/route-spec.mjs` with the API server up and paste its
-output — it is the only check that each route returns real data, with an item
-count that matches the total it reports. A green build over routes that serve an
-error page is the failure this exists to catch, and it is not optional.
+**This section is about compilation only.** Lint, types, and a successful build
+say nothing about whether a route returns data — a route serving an error page
+compiles perfectly. Route verification is `route-spec`, above, and clearing this
+section does not discharge it.
 
 ## Process Management
 
