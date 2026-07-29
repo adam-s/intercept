@@ -122,3 +122,18 @@ describe('AGENTS.md holds principles, not facts', () => {
 		expect(offenders).toEqual([]);
 	});
 });
+
+describe('the elimination table and the signature table are one list', () => {
+	// The original defect: the rule listed 8 transports, the scanner knew 7 under
+	// different names, and neither could contradict the other. A row the scanner
+	// cannot see is a row where a wrong verdict survives unchallenged.
+	it('every signature has a row in the discovery rule, and vice versa', async () => {
+		const { TRANSPORT_SIGNATURES } = await import('../discover-probe.mjs');
+		const rule = readFileSync(resolve(ROOT, '.agents/rules/discovery.md'), 'utf8');
+		const table = rule.slice(rule.indexOf('| Transport | Present? | Evidence |'));
+		const rows = [...table.matchAll(/^\| ([^|]+?) \| ✓ or ✗/gm)].map((m) => m[1].trim());
+
+		expect(rows.length).toBeGreaterThan(0);
+		expect(rows.sort()).toEqual(Object.keys(TRANSPORT_SIGNATURES).sort());
+	});
+});

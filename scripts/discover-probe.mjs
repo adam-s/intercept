@@ -159,6 +159,14 @@ export const TRANSPORT_SIGNATURES = {
 		scope: 'html',
 		strong: [
 			/__NEXT_DATA__/,
+			// Next.js App Router (13.4+) does NOT emit __NEXT_DATA__ — it streams RSC
+			// Flight chunks via self.__next_f.push(...). Checking only the old marker
+			// reports every modern Next.js site as having no embedded data.
+			/self\.__next_f|__next_f\.push/,
+			/text\/x-component/,
+			/_next\/static\/chunks\/app\//,
+			/__staticRouterHydrationData/,
+			/qwik\/json|q:container/,
 			/data-sveltekit-fetched/,
 			/__NUXT_DATA__|__NUXT__/,
 			/__remixContext/,
@@ -174,9 +182,33 @@ export const TRANSPORT_SIGNATURES = {
 	},
 	'JSON API (XHR)': {
 		scope: 'both',
-		strong: [/\bfetch\s*\(/, /XMLHttpRequest/, /\.ajax\s*\(/],
+		strong: [
+			/\bfetch\s*\(/,
+			/XMLHttpRequest/,
+			/\.ajax\s*\(/,
+			// RPC-over-HTTP. A Server Action is a POST with a Next-Action header and
+			// no URL of its own, so no path scan will ever surface it.
+			/\/api\/trpc\//,
+			/["']jsonrpc["']\s*:\s*["']2\.0/,
+			/Next-Action/i,
+			/\$ACTION_ID_|"use server"/,
+			/\/odata\//i,
+		],
 		library: [/axios/, /superagent/, /ky\b/, /got\b/, /swr\b/, /react-query|tanstack/],
 		wire: [/application\/json/],
+	},
+	'HTML-over-the-wire': {
+		scope: 'both',
+		// A transport class the table lacked entirely: the response body IS markup,
+		// so a scanner looking for JSON finds nothing and the data hides in plain
+		// sight. htmx and Turbo swap fragments; those endpoints are real APIs.
+		strong: [
+			/\bhx-(get|post|put|delete|swap|target|trigger)\b/,
+			/turbo-stream|data-turbo/,
+			/text\/vnd\.turbo-stream\.html/,
+		],
+		library: [/htmx\.org|htmx\.min/, /@hotwired\/turbo|turbolinks/, /unpoly/],
+		wire: [/text\/vnd\.turbo-stream\.html/],
 	},
 	GraphQL: {
 		scope: 'both',
@@ -205,6 +237,21 @@ export const TRANSPORT_SIGNATURES = {
 			/reconnecting-websocket/,
 		],
 		wire: [/upgrade:\s*websocket/i],
+	},
+	WebTransport: {
+		scope: 'both',
+		// HTTP/3 datagrams and streams — invisible to CDP Network capture entirely.
+		strong: [/new WebTransport\s*\(/, /WebTransportBidirectionalStream/],
+		library: [/webtransport/i],
+		wire: [],
+	},
+	WebRTC: {
+		scope: 'both',
+		// Data channels carry application data, not just media, and nothing in HTTP
+		// capture ever sees them.
+		strong: [/new RTCPeerConnection\s*\(/, /createDataChannel\s*\(/],
+		library: [/simple-peer|peerjs|livekit|mediasoup/],
+		wire: [/application\/sdp/],
 	},
 	'HLS/Media': {
 		scope: 'both',

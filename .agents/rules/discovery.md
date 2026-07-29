@@ -220,16 +220,19 @@ have probed for it there.
 
 ```text
 ## Transport Elimination: [domain]
-| Transport      | Present? | Evidence |
-|----------------|----------|----------|
-| Embedded JSON  | ✓ or ✗   |          |
-| JSON API (XHR) | ✓ or ✗   |          |
-| GraphQL        | ✓ or ✗   |          |
-| WebSocket      | ✓ or ✗   |          |
-| HLS/Media      | ✓ or ✗   |          |
-| gRPC-Web       | ✓ or ✗   |          |
-| SSE            | ✓ or ✗   |          |
-| Encoded/Binary | ✓ or ✗   |          |
+| Transport | Present? | Evidence |
+|---|---|---|
+| Embedded JSON | ✓ or ✗ | |
+| JSON API (XHR) | ✓ or ✗ | |
+| HTML-over-the-wire | ✓ or ✗ | |
+| GraphQL | ✓ or ✗ | |
+| WebSocket | ✓ or ✗ | |
+| WebTransport | ✓ or ✗ | |
+| WebRTC | ✓ or ✗ | |
+| HLS/Media | ✓ or ✗ | |
+| gRPC-Web | ✓ or ✗ | |
+| SSE | ✓ or ✗ | |
+| Encoded/Binary | ✓ or ✗ | |
 ```
 
 Add a `Pass` column recording which pass first found each ✓, and note the
