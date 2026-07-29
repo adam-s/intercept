@@ -365,8 +365,14 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 	// its fetching and appending inside a worker leaves no MSE event in the page,
 	// so a site streaming video reported this row absent while its playlist sat
 	// in the captured traffic. A manifest request settles it whoever made it.
+	// Not every adaptive-media transport announces itself with a playlist
+	// extension. A large video site delivers segments over its own framing on a
+	// `/videoplayback` path with a vendor content type, and matching only on
+	// `.m3u8`/`.mpd` reported no adaptive media on a page that was streaming.
 	const media = rows.filter((r) =>
-		/\.m3u8|\.mpd|\/hls\/|\/dash\/|\/manifest\/video/i.test(r.template),
+		/\.m3u8|\.mpd|\/hls\/|\/dash\/|\/manifest\/video|\/videoplayback|\/v1\/segment\//i.test(
+			r.template,
+		),
 	);
 	if (media.length) {
 		const row = out.find((v) => v.transport === 'HLS/Media');
@@ -374,6 +380,25 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 			row.present = true;
 			for (const m of media.slice(0, 3)) {
 				const ev = `${m.method} ${m.host}${m.template}`;
+				if (!row.evidence.includes(ev)) row.evidence.push(ev);
+			}
+		}
+	}
+
+	// JSONP is visible in the request, not only in the script insertion that made
+	// it. The page-side patch catches a `<script src>` carrying a callback, but a
+	// site that builds the element some other way slips past it — a live run found
+	// a suggest endpoint by hand after the sweep filed it as an ordinary GET. A
+	// callback parameter is the transport regardless of how the element was made.
+	const jsonp = rows.filter((r) =>
+		r.params.some((k) => /^(?:callback|jsonp|jsonpcallback|cb)$/i.test(k)),
+	);
+	if (jsonp.length) {
+		const row = out.find((v) => v.transport === 'JSONP');
+		if (row) {
+			row.present = true;
+			for (const j of jsonp.slice(0, 3)) {
+				const ev = `${j.method} ${j.host}${j.template}`;
 				if (!row.evidence.includes(ev)) row.evidence.push(ev);
 			}
 		}

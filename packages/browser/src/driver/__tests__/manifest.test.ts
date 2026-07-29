@@ -485,12 +485,10 @@ describe('polling is a cadence, and most cadences are not polling', () => {
 		);
 	});
 
+	// Four calls ten milliseconds apart are one page doing several things at once,
+	// not a cadence. A span floor is what separates them.
 	it('does not call a burst of parallel calls polling', () => {
-		const v = deriveTransports(
-			at('fetch', 'https://x.test/a', [0, 10, 20, 30]).reduce((acc, e) => acc.concat(e), []).length
-				? deriveTransports(buildManifest(at('fetch', 'https://x.test/a', [0, 10, 20, 30])))
-				: [],
-		);
+		const v = deriveTransports(buildManifest(at('fetch', 'https://x.test/a', [0, 10, 20, 30])));
 		expect(v.find((r) => r.transport === 'Polling/Long-poll')?.present).toBe(false);
 	});
 
@@ -537,5 +535,37 @@ describe('the reporting cap drops the least informative rows, and says so', () =
 			{ method: 'GET', url: 'https://x.test/api/items', body: { items: [] } },
 		]);
 		expect(rows.some((r) => r.shape)).toBe(true);
+	});
+});
+
+describe('transports that do not announce themselves conventionally', () => {
+	const row = (template, params = [], host = 'x.test') => ({
+		kind: 'wire',
+		method: 'GET',
+		host,
+		template,
+		params,
+		count: 1,
+		example: `https://${host}${template}`,
+	});
+
+	// The page-side patch catches a <script src> carrying a callback. A site that
+	// builds the element another way slips past it — a live run found a suggest
+	// endpoint by hand after the sweep filed it as an ordinary GET.
+	it.each(['callback', 'jsonp', 'cb'])('recognises JSONP from a %s parameter', (p) => {
+		const v = deriveTransports([row('/complete/search', ['client', p])]);
+		expect(v.find((t) => t.transport === 'JSONP')?.present).toBe(true);
+	});
+
+	it('does not call an ordinary query parameter JSONP', () => {
+		const v = deriveTransports([row('/api/items', ['page', 'q'])]);
+		expect(v.find((t) => t.transport === 'JSONP')?.present).toBe(false);
+	});
+
+	// Segments delivered over a vendor framing on a plain path: matching only on
+	// playlist extensions reported no adaptive media on a streaming page.
+	it.each(['/videoplayback', '/v1/segment/abc'])('recognises adaptive media at %s', (t) => {
+		const v = deriveTransports([row(t)]);
+		expect(v.find((x) => x.transport === 'HLS/Media')?.present).toBe(true);
 	});
 });
