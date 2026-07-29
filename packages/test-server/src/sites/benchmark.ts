@@ -160,6 +160,18 @@ export function createBenchmarkSite(): Hono {
 
 	app.get('/', (c) => c.html(PAGE));
 
+	/**
+	 * The same page under a strict `script-src`. A great many real sites ship one,
+	 * and it refuses an injected <script> — so a capture layer that bridges worlds
+	 * by injection reports an instrumented page here as a page that made no calls.
+	 * Recall against this route and against `/` should be identical.
+	 */
+	app.get('/csp', (c) =>
+		c.html(PAGE, 200, {
+			'content-security-policy': "script-src 'self' 'unsafe-inline'; object-src 'none'",
+		}),
+	);
+
 	app.get('/api/items', (c) =>
 		c.json({ items: [{ id: 1, name: 'deck' }], page: 1, total: 2, hasMore: true }),
 	);

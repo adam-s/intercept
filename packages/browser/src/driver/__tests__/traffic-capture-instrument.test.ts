@@ -9,10 +9,17 @@
  * the run concludes the site makes no calls — the exact quiet failure this
  * capture layer exists to remove.
  *
- * There is no assertion available for "ran in the main world" from Node, so
- * these pin the observable proxy: only the main-world bridge calls
- * `waitForFunction`, because only it waits on a DOM handshake. A refactor back
- * to a plain `evaluate` stops calling it and turns these red.
+ * The two halves reach that world differently, and the difference is deliberate.
+ * Install goes through the main-world bridge, which appends a <script>. Drain
+ * must not: a `script-src` policy refuses an injected tag, and a great many real
+ * sites ship one, so a drain that needed injection would report an instrumented
+ * page as a page that made no calls. Instead the instrument listens for a DOM
+ * event and answers on the shared DOM, which crosses the boundary without
+ * injecting anything — so drain is an ordinary evaluate.
+ *
+ * From Node there is no assertion for "ran in the main world", so these pin the
+ * observable proxy: only the bridge calls `waitForFunction`. Install must call
+ * it; drain must not.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -99,35 +106,58 @@ describe('installEgressInstrument', () => {
 describe('drainEgressEvents', () => {
 	const event = { kind: 'fetch', method: 'GET', url: 'https://x.test/a', t: 1 };
 
-	it('reads the buffer through the bridge, not the isolated world', async () => {
-		const page = bridgePage([event]);
-		const out = await drainEgressEvents(page);
-		expect(out).toEqual([event]);
-		expect(page.seen.waitForFunction).toBeGreaterThan(0);
+	/** A frame double whose evaluate answers with whatever the drain would find. */
+	function frame(result: unknown, over: Record<string, unknown> = {}) {
+		const seen = { evaluate: 0, waitForFunction: 0 };
+		return Object.assign(
+			{
+				evaluate: vi.fn(async () => {
+					seen.evaluate += 1;
+					return result;
+				}),
+				waitForFunction: vi.fn(async () => {
+					seen.waitForFunction += 1;
+				}),
+				seen,
+			},
+			over,
+		) as unknown as DriverPage & { seen: typeof seen };
+	}
+
+	it('reads the buffer with an ordinary evaluate', async () => {
+		const page = frame([event]);
+		expect(await drainEgressEvents(page)).toEqual([event]);
+	});
+
+	// The reason drain does not use the bridge: injection is what CSP refuses.
+	it('never injects a script, so a strict script-src cannot silence it', async () => {
+		const page = frame([event]);
+		await drainEgressEvents(page);
+		expect(page.seen.waitForFunction).toBe(0);
+		expect(page.seen.evaluate).toBeGreaterThan(0);
 	});
 
 	// An iframe has its own global, and an embedded player is exactly where a
 	// transport hides — draining only the main frame reports it as absent.
 	it('drains every frame, not only the main one', async () => {
-		const frames = [bridgePage([event]), bridgePage([{ ...event, url: 'https://y.test/b' }])];
-		const page = bridgePage([], { frames: () => frames });
+		const frames = [frame([event]), frame([{ ...event, url: 'https://y.test/b' }])];
+		const page = frame([], { frames: () => frames });
 		const out = await drainEgressEvents(page);
 		expect(out.map((e) => e.url)).toEqual(['https://x.test/a', 'https://y.test/b']);
 	});
 
 	it('keeps the frames that answered when one refuses', async () => {
-		const good = bridgePage([event]);
-		const bad = bridgePage(null, {
-			waitForFunction: vi.fn(async () => {
+		const good = frame([event]);
+		const bad = frame(null, {
+			evaluate: vi.fn(async () => {
 				throw new Error('detached frame');
 			}),
 		});
-		const page = bridgePage([], { frames: () => [bad, good] });
+		const page = frame([], { frames: () => [bad, good] });
 		expect(await drainEgressEvents(page)).toEqual([event]);
 	});
 
 	it('returns nothing rather than throwing when a frame answers with a non-array', async () => {
-		const page = bridgePage({ not: 'an array' });
-		expect(await drainEgressEvents(page)).toEqual([]);
+		expect(await drainEgressEvents(frame({ not: 'an array' }))).toEqual([]);
 	});
 });

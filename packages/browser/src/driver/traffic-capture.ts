@@ -238,11 +238,11 @@ export async function drainEgressEvents(page: DriverPage): Promise<EgressEvent[]
 
 	for (const frame of targets.length ? targets : [page]) {
 		try {
-			const events = await evaluateInMainWorld<EgressEvent[], string>(
-				frame as MainWorldPage,
-				(src: string) => new Function(`return ${src}`)() as EgressEvent[],
-				DRAIN_SOURCE,
-			);
+			// An ordinary evaluate: the drain source talks to the page's world over
+			// a DOM event rather than by injecting a script, so this survives a
+			// `script-src` policy that would refuse the main-world bridge.
+			// biome-ignore lint/suspicious/noExplicitAny: structural frame
+			const events = (await (frame as any).evaluate(DRAIN_SOURCE)) as EgressEvent[];
 			if (Array.isArray(events)) out.push(...events);
 		} catch (err) {
 			// A detached or cross-origin frame that refuses evaluation is a gap, not

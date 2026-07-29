@@ -52,6 +52,9 @@ export function parseArgs(argv) {
 	}
 	return {
 		driver: typeof flags.driver === 'string' ? flags.driver : 'patchright',
+		// The same page under a strict script-src, to prove the drain does not
+		// depend on injecting anything.
+		csp: flags.csp === true,
 		headed: flags.headed === true,
 		json: flags.json === true,
 		// Capped, because an unbounded settle turns a hung page into a hung gate.
@@ -132,7 +135,7 @@ async function main() {
 		const installed = await captureMod.installEgressInstrument(page);
 		if (!installed) throw new Error('instrument failed to install — capture would be empty');
 
-		await page.goto(`${server.url}/sites/benchmark/`, {
+		await page.goto(`${server.url}/sites/benchmark/${opts.csp ? 'csp' : ''}`, {
 			waitUntil: 'domcontentloaded',
 			timeout: opts.timeout,
 		});
@@ -155,7 +158,7 @@ async function main() {
 			console.log(`\nRecall against the benchmark's declaration:`);
 			console.log(renderScore(score, declared));
 			console.log(
-				`\n  ${score.found.length}/${declared.length} = ${(score.recall * 100).toFixed(0)}%  [${opts.driver}]\n`,
+				`\n  ${score.found.length}/${declared.length} = ${(score.recall * 100).toFixed(0)}%  [${opts.driver}${opts.csp ? ', strict CSP' : ''}]\n`,
 			);
 		}
 

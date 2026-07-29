@@ -341,3 +341,96 @@ describe('bounds', () => {
 		expect(h.ctx[EGRESS_GLOBAL]).toBeDefined();
 	});
 });
+
+describe('it does not announce itself', () => {
+	// A patched global is trivially detectable — `String(fetch)` reports source
+	// where a native function reports `[native code]` — and bot-detection scripts
+	// read exactly that. On a hardened target, instrumenting is then what gets the
+	// session blocked: the observation changing the thing observed.
+	//
+	// A vm context has no native `fetch` to compare against, so what is asserted
+	// here is the property that produces the native answer in a real engine: the
+	// wrapper reports the *original's* source rather than its own. The live check
+	// against genuine natives is `scripts/capture-bench.mjs`.
+	const NAMED = 'function originalFetch() { /* pretend native */ }';
+
+	it.each([
+		['fetch', 'fetch'],
+		['WebSocket', 'WebSocket'],
+		['EventSource', 'EventSource'],
+		['XHR open', 'XMLHttpRequest.prototype.open'],
+	])('%s reports the original source, not the wrapper', (_name, expr) => {
+		const h = install();
+		const shown = h.run(`String(${expr})`) as string;
+		// The wrapper's body is what must not surface. Its tell is the hook call
+		// every patched function carries.
+		expect(shown).not.toContain('hook.call');
+		expect(shown).not.toContain('originals');
+	});
+
+	it('returns the replaced function source verbatim', () => {
+		const h = install({ fetch: new Function(`return ${NAMED}`)() });
+		expect(h.run(`String(fetch)`)).toBe(NAMED);
+	});
+
+	// A per-function override would leave an own property, which is its own tell.
+	it('leaves no own toString on a wrapped function', () => {
+		const h = install();
+		expect(h.run(`Object.prototype.hasOwnProperty.call(fetch, 'toString')`)).toBe(false);
+	});
+
+	it('keeps toString working for ordinary page functions', () => {
+		const h = install();
+		expect(h.run(`String(function appFn(){ return 1 })`)).toContain('appFn');
+	});
+
+	it('reports the native source for the patched toString itself', () => {
+		const h = install();
+		expect(h.run(`String(Function.prototype.toString).includes('[native code]')`)).toBe(true);
+	});
+});
+
+describe('the drain channel crosses worlds without injecting anything', () => {
+	// The obvious bridge appends a <script>, which any `script-src` policy
+	// refuses — and many real sites ship one, so that path reports an
+	// instrumented page as a page that made no calls. DOM events cross the
+	// boundary because the DOM is shared, and nothing is injected.
+	it('registers a drain listener on the document', () => {
+		const listeners: string[] = [];
+		const h = install({
+			document: {
+				addEventListener: (k: string) => listeners.push(k),
+				documentElement: { setAttribute: () => {} },
+			},
+		});
+		expect(listeners).toContain(`${EGRESS_GLOBAL}_drain`);
+		expect(h.drain).toBeDefined();
+	});
+
+	it('writes the buffer to the shared DOM when the event fires', () => {
+		let handler: (() => void) | null = null;
+		let written: string | null = null;
+		const h = install({
+			document: {
+				addEventListener: (_k: string, fn: () => void) => {
+					handler = fn;
+				},
+				documentElement: {
+					setAttribute: (_k: string, v: string) => {
+						written = v;
+					},
+				},
+			},
+		});
+		h.run(`fetch('/api/x')`);
+		(handler as unknown as () => void)();
+		expect(JSON.parse(written as unknown as string)[0]).toMatchObject({
+			kind: 'fetch',
+			url: '/api/x',
+		});
+	});
+
+	it('installs without a document, because a worker scope has none', () => {
+		expect(() => install({ document: undefined })).not.toThrow();
+	});
+});

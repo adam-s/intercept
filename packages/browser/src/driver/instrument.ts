@@ -150,6 +150,30 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 	};
 
 	/**
+	 * Make a wrapper answer `toString()` the way the function it replaced does.
+	 *
+	 * A patched global is trivially detectable: `String(fetch)` on a native
+	 * function reports `[native code]`, and on a wrapper reports its source.
+	 * Bot-detection scripts read exactly that, so instrumenting a hardened target
+	 * can be what gets the session blocked — the observation changing the thing
+	 * observed. Routing every wrapper through one patched `Function.prototype
+	 * .toString` keeps the answer native and leaves no own `toString` property on
+	 * the wrapper, which a per-function override would.
+	 */
+	const originals = new WeakMap<object, unknown>();
+	try {
+		const fnToString = Function.prototype.toString;
+		const patchedToString = function (this: unknown) {
+			const orig = originals.get(this as object);
+			return fnToString.call(orig ?? this);
+		};
+		originals.set(patchedToString, fnToString);
+		Function.prototype.toString = patchedToString;
+	} catch {
+		/* a sealed Function.prototype leaves wrappers visible; capture still works */
+	}
+
+	/**
 	 * Wrap `obj[key]`, always calling through even when the hook fails.
 	 *
 	 * The hook receives the call's `this`. Prototype methods are where the useful
@@ -170,7 +194,7 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 			const orig = obj?.[key];
 			if (typeof orig !== 'function') return;
 			// biome-ignore lint/suspicious/noExplicitAny: patching foreign globals
-			obj[key] = function (this: unknown, ...args: any[]) {
+			const wrapper = function (this: unknown, ...args: any[]) {
 				try {
 					hook.call(this, args);
 				} catch {
@@ -178,6 +202,8 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 				}
 				return orig.apply(this, args);
 			};
+			originals.set(wrapper, orig);
+			obj[key] = wrapper;
 		} catch {
 			/* a frozen or absent global is a gap, not a failure */
 		}
@@ -193,6 +219,30 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 			return '';
 		}
 	};
+
+	// ─── Drain channel ──────────────────────────────────────────────────
+	// The buffer lives in this world; a reader outside it cannot see the global.
+	// The obvious bridge injects a <script>, which any `script-src` policy
+	// refuses — and a great many real sites ship one, so that path would report
+	// an instrumented page as a page that made no calls. DOM *events* cross the
+	// world boundary without injecting anything: a listener registered here fires
+	// for an event dispatched from an isolated world, because the DOM is shared.
+	// So the reader dispatches, this writes the buffer to an attribute, and the
+	// reader reads it back with an ordinary evaluate.
+	try {
+		if (g.document?.addEventListener) {
+			g.document.addEventListener(`${globalName}_drain`, () => {
+				try {
+					const batch = events.splice(0, events.length);
+					g.document.documentElement.setAttribute(`${globalName}_out`, JSON.stringify(batch));
+				} catch {
+					/* a page that cannot hold the attribute keeps its events buffered */
+				}
+			});
+		}
+	} catch {
+		/* worker scope has no document; its buffer is read another way */
+	}
 
 	// ─── fetch ──────────────────────────────────────────────────────────
 	patch(g, 'fetch', (args) => {
@@ -249,6 +299,7 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 			};
 			Wrapped.prototype = Orig.prototype;
 			for (const k of Object.keys(Orig)) Wrapped[k] = Orig[k];
+			originals.set(Wrapped, Orig);
 			g[name] = Wrapped;
 		} catch {
 			/* absent in this scope */
@@ -458,9 +509,25 @@ export const INSTRUMENT_SOURCE = `(function(){${BUILD_HELPER_PROLOGUE}return (${
 	INSTRUMENT_LIMITS,
 )}, ${JSON.stringify(EGRESS_GLOBAL)})})()`;
 
-/** Reads and clears the buffer. Exported as source so any driver can evaluate it. */
+/**
+ * Reads and clears the buffer from *outside* the page's world.
+ *
+ * Runs as an ordinary evaluate — no script injection — so it works under a
+ * `script-src` policy that would refuse the main-world bridge. The event
+ * crosses into the page's world, the instrument answers on the shared DOM, and
+ * this reads the answer back.
+ */
 export const DRAIN_SOURCE = `(() => {
-	const b = globalThis[${JSON.stringify(EGRESS_GLOBAL)}];
-	if (!b) return [];
-	return b.splice(0, b.length);
+	try {
+		const direct = globalThis[${JSON.stringify(EGRESS_GLOBAL)}];
+		if (direct) return direct.splice(0, direct.length);
+		if (typeof document === 'undefined') return [];
+		document.dispatchEvent(new CustomEvent(${JSON.stringify(`${EGRESS_GLOBAL}_drain`)}));
+		const raw = document.documentElement.getAttribute(${JSON.stringify(`${EGRESS_GLOBAL}_out`)});
+		if (raw === null) return [];
+		document.documentElement.removeAttribute(${JSON.stringify(`${EGRESS_GLOBAL}_out`)});
+		return JSON.parse(raw);
+	} catch {
+		return [];
+	}
 })()`;
