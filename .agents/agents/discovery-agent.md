@@ -43,11 +43,49 @@ sleep 8 && curl -s http://localhost:XXXX/health
 
 Follow `.agents/rules/discovery.md` — **PRE-FLIGHT→GATHER→SCAN→CLASSIFY→BUILD**.
 
+### Two passes: instrumented, then clean
+
+Everything that helps discovery is detectable, so nothing that helps discovery
+runs during the pass that has to succeed.
+
+```bash
+# Instrumented pass — patches the page's egress primitives, exercises it, and
+# prints the elimination table derived from what actually fired.
+node scripts/discover-probe.mjs --mode=manifest --sweep --port=XXXX
+
+# Ends it and hands the page back unmodified. Run before collecting anything.
+node scripts/discover-probe.mjs --mode=uninstall --port=XXXX
+```
+
+`--sweep` is not cosmetic. Measured against a fixture carrying transports that
+appear only after interaction, a merely loaded page yielded eight transports and
+sixteen call shapes; the same page exercised yielded nine and twenty-two, and
+every interaction-gated endpoint came only from the second.
+
+**Do not write the elimination table from memory — paste the derived one.** Each
+✓ arrives with the call shape that produced it. Your job is to explain rows and
+to close the ones reading absent, not to remember what you saw.
+
+**A ✗ means "not observed", which is weaker than "the site does not have it".**
+Upgrade one to a claim only by saying what you provoked and where.
+
+**If bot protection is reported, a block cannot be attributed to the site.** The
+manifest names any vendor it saw. Anything refused while aids were installed is
+evidence about the run; re-test after `--mode=uninstall` before recording it as
+the site's policy. When runs start failing, take aids off one at a time — the
+sweep first, since synthetic interaction is the loudest — because removing all
+of them at once only tells you the set was the problem.
+
 Start with PRE-FLIGHT: write down what you already know about the target site (framework, APIs, pagination, auth, bot detection, content hierarchy). Name a specific page that will have 100+ items.
 
 In GATHER: navigate to that page, intercept pagination 2-3 times to capture the API pattern. If you see an API endpoint with pagination params (e.g., `?page=1`) in initial traffic, confirm it via `page.evaluate("fetch('/api/path?page=2').then(r=>r.json())...")` — do not wait for new traffic entries. Use `page.evaluate` for interaction and `fetch()` testing — not to read `__NEXT_DATA__` or DOM data.
 
-Read `domains/boardshop/ROUTES.md` first — it indexes all 33 routes by pattern so you can jump to the one you need. Key patterns: Route 32 = session-harvest, Route 33 = click-intercept, Route 8 = GraphQL, Route 15 = __NEXT_DATA__.
+Read `domains/boardshop/ROUTES.md` first — it indexes the reference domain's
+routes by pattern, so you can jump to the one nearest your case instead of
+inventing a shape. Every transport the elimination table asks about is
+demonstrated there by a route that declares which one it consumes, and the test
+server serves a fixture for each. A row you have never seen present is a row you
+cannot honestly mark absent.
 
 ## Report the saturation delta
 
@@ -98,10 +136,21 @@ node scripts/route-spec.mjs --record --port=XXXX   # first run, writes the basel
 node scripts/route-spec.mjs --port=XXXX            # asserts against it
 ```
 
-Paste its output. It must end `✓ N route(s) passed` — and read the `⊘ not
-probed` line, because it is a coverage report. A route without `examples` is
-skipped, and a skipped route reads exactly like a passing one. Give every route
-an `examples` entry with real identifiers so nothing is invisible.
+Paste its output. It must end `✓ N route(s) passed`.
+
+It fails before probing anything if a route did not declare what the checker
+needs. Every route declares `upstream` — the endpoints it consumes, written
+scheme-less with `{placeholder}` for the parts that vary — because a route's own
+path says nothing about what it calls, and the recall check cannot recover that
+by name similarity. Every route with a path or required query parameter declares
+`examples` with real identifiers; an example naming an id the site does not have
+fails the route for a reason that has nothing to do with the route. Declare
+`transport` too: the elimination table says what the site has, and this says
+which of it you actually consume.
+
+It also refuses to run against an instrumented session, because an assertion
+over a page carrying discovery aids measures something no ordinary visitor sees.
+Run `--mode=uninstall` first.
 
 **You are not done until this passes.** A domain whose routes were never called
 is not a domain that works.
@@ -113,8 +162,9 @@ node scripts/discover-probe.mjs --mode=coverage --domain=yourdomain --port=XXXX
 ```
 
 route-spec grades the routes you built. It has no opinion about the ones you
-didn't. This diffs the endpoints the browser actually called against your
-routes and prints a floor.
+didn't. This diffs the call shapes the browser actually made — read off the same
+manifest as the elimination table, so there is one answer rather than two that
+can disagree — against your routes, and prints a floor.
 
 Paste its output and **account for every unaccounted endpoint** — a route, or a
 line in the elimination table saying why not. Each one fired in a real browser,
