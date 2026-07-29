@@ -319,13 +319,28 @@ is identical and only the identity differs. When traffic carries a self-
 description, vary it and compare: that is a second axis, and a run that explored
 only paths explored half the surface.
 
-**Some access values are computed, not carried.** A signature descrambled by
-running the page's own player code, a token minted by a widget, a hash derived
-from a build artefact — none is a header to copy or an endpoint to call, and no
-amount of replaying captured traffic produces one. These are the cases the
-browser is for: run the page's own code and take the result. A value you cannot
-obtain by replay and cannot compute is a reported give-up, not a gap to paper
-over.
+**Ask which transports carry the *same* records, not only which exist.** A site
+routinely serves overlapping data more than one way — the initial document, a
+config blob, the code that renders the page, and an API — and a mature
+reverse-engineering tool for a large site will let you skip any of those,
+because each is an alternative route to the same fields. The elimination table
+asks which transports are present and never asks which are redundant, so a route
+gets built on whichever path was found first. Found-first is not a property
+worth optimising: prefer the path that is stable, cheap and least gated, and
+record which alternatives exist so a later break has somewhere to fall back to.
+
+**Access values come in three kinds, and only one of them can be copied.**
+*Harvested* — read from a response, a cookie, a page. *Computed* — produced by
+running the site's own code, so no amount of replaying captured traffic yields
+one. *Invented* — a nonce, request id or playback id the client generates
+itself and the server merely expects to be present and well-formed. The third
+is the one that reads as a mystery: nothing in captured traffic shows where it
+came from, because it did not come from anywhere. When a request fails and every
+copied value matches, ask what the client was supposed to make up.
+
+The computed kind is what the browser is for: run the page's own code and take
+the result. A value that can be neither replayed, computed, nor invented is a
+reported give-up rather than a gap to paper over.
 
 **A constant borrowed from a running site expires.** Persisted-query hashes,
 client ids, schema descriptors and player versions are all values the site may
