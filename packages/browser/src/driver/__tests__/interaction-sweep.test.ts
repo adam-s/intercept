@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
 	DESTRUCTIVE,
+	elementMeta,
 	isDestructive,
 	runSweep,
 	SWEEP_LIMITS,
@@ -444,5 +445,71 @@ describe('the caption backstop discriminates', () => {
 
 	it('matches a multi-word entry as a phrase', () => {
 		expect(isDestructive('Sign out of your account')).toBe(true);
+	});
+});
+
+describe('free text is left alone', () => {
+	/**
+	 * Reported from a live run and unfixed until now. Refusing Enter in a
+	 * composer was not enough: the provocation still clicked it and typed a
+	 * character, and sites autosave comment drafts — so on a signed-in session a
+	 * sweep would leave a draft under somebody's account. That run was signed
+	 * out, which limited the blast radius without making the behaviour right.
+	 */
+	it('does not type into a composer', async () => {
+		const composer = fakeEl('Add a comment', '', { isEditable: true, isSearch: false });
+		const page = fakePage({ $$: vi.fn(async () => [composer.handle]) });
+		const result = await runSweep(page, { dwellMs: 1 });
+		// Typing is the harm — a keystroke is what a site autosaves. Focus is not,
+		// and the double here answers every selector, so a click may arrive from
+		// the hover or activate provocation rather than from this one.
+		expect(
+			(page as unknown as { keyboard: { type: { mock: { calls: unknown[] } } } }).keyboard.type.mock
+				.calls.length,
+		).toBe(0);
+		expect(result.skipped.some((s) => s.includes('free text'))).toBe(true);
+	});
+
+	// Some sites build their query box as a contenteditable, and that one is
+	// still worth typing into — the point is the announcement, not the element.
+	it('still types into a contenteditable that announces itself as search', async () => {
+		const box = fakeEl('Search', '', { isEditable: true, isSearch: true });
+		const page = fakePage({ $$: vi.fn(async () => [box.handle]) });
+		await runSweep(page, { dwellMs: 1 });
+		expect(box.clicked.count).toBeGreaterThan(0);
+	});
+});
+
+describe('a label comes from a control, not from code', () => {
+	/**
+	 * The guard this pins was written without one. `elementMeta` read `innerText`
+	 * off whatever the selector matched, so a `<style>` block's own class names
+	 * became a caption — and a stylesheet mentioning `.post-thumbnail` vetoed a
+	 * read-only hover on a site about posts.
+	 *
+	 * Driven against `elementMeta` itself rather than against its source text: an
+	 * earlier version of this test grepped the extracted body, which has its
+	 * string literals stripped, so it asserted on text that could never be there.
+	 */
+	const el = (tagName: string, innerText: string) =>
+		({
+			tagName,
+			innerText,
+			getAttribute: () => null,
+			closest: () => null,
+		}) as unknown as Element;
+
+	it.each(['STYLE', 'SCRIPT', 'TEMPLATE'])('reads no label off a %s element', (tag) => {
+		expect(elementMeta(el(tag, '.post-thumbnail { color: red }')).label).toBe('');
+	});
+
+	it('still reads a label off a real control', () => {
+		expect(elementMeta(el('BUTTON', 'Load more')).label).toBe('Load more');
+	});
+
+	// The pairing that caused it: code as a caption, judged as a control.
+	it('so a stylesheet mentioning a guarded word vetoes nothing', () => {
+		const meta = elementMeta(el('STYLE', '.post-thumbnail, .report-row { display: none }'));
+		expect(isDestructive(meta.label)).toBe(false);
 	});
 });

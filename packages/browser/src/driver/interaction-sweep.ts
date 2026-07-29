@@ -536,6 +536,26 @@ export async function runSweep(
 					} else if (action.kind === 'hover') {
 						await bounded(h.hover({ timeout: 2_000 }), CALL_TIMEOUT_MS, 'hover').catch(() => {});
 					} else if (action.kind === 'type' || action.kind === 'query') {
+						// Free text is not typed into at all, unless it says it takes a query.
+						//
+						// Refusing Enter there was not enough. This provocation exists to
+						// trigger typeahead, and a composer has none — so typing into one
+						// buys nothing and costs whatever the site does with the keystroke.
+						// Sites autosave comment drafts, which means a single character can
+						// leave a draft under somebody's account on a signed-in session. The
+						// run that found this was signed out, so nothing came of it; that
+						// limits the blast radius and does not make the behaviour right.
+						//
+						// A contenteditable that announces itself as search is still typed
+						// into, because some sites build their query box that way. The
+						// discriminator is the same one Enter already used, applied a step
+						// earlier.
+						if (meta.isEditable && !meta.isSearch) {
+							skipped.push(
+								`${action.kind} "${meta.label.slice(0, 40) || '(unlabelled)'}": free text, not a query field`,
+							);
+							continue;
+						}
 						await bounded(
 							h.click({ timeout: 2_000, noWaitAfter: true }),
 							CALL_TIMEOUT_MS,
