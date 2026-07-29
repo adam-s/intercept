@@ -49,4 +49,7 @@ Decoder: indirect key lookup → cents ÷ 100 → format as dollars.
 ## When NOT to use this
 
 - API returns clean, matching values — just use them
-- Site has public API documentation — read the docs
+- The site publishes a schema for the *intercepted* endpoint (an OpenAPI or
+  GraphQL introspection response) — read that rather than reverse-engineering it.
+  This is not licence to substitute a published developer API for interception;
+  see the public-API gate in the discovery rule.

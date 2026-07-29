@@ -86,6 +86,12 @@ If a route needs fixing, edit the file, `kill -9` the server, and restart. Do NO
 
 Before finishing, run `pnpm biome check --write --unsafe .` in your worktree. Fix any remaining lint, type, or build errors. You are responsible for leaving the worktree in a state where `pnpm build` succeeds and `pnpm biome check` returns zero errors. Do not leave broken code for the orchestrator to fix.
 
+**Lint, types, and build prove the code compiles. They prove nothing about the
+routes.** Run `node scripts/route-spec.mjs` with the API server up and paste its
+output — it is the only check that each route returns real data, with an item
+count that matches the total it reports. A green build over routes that serve an
+error page is the failure this exists to catch, and it is not optional.
+
 ## Process Management
 
 Track every background process. Before exiting: `kill $(jobs -p) 2>/dev/null`

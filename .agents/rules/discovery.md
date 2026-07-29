@@ -20,6 +20,17 @@ proxy route.
 
 Five steps, no skipping: **PRE-FLIGHT → GATHER → SCAN → CLASSIFY → BUILD.**
 
+> **GATE: a documented public API is not a discovery result.** "Discover the API
+> for X" means intercepting the traffic X's own front end makes — not finding X's
+> published developer API and wrapping it. Searching for public API docs as a
+> first step skips the entire point, and it looks like success: you get working
+> routes and zero knowledge of the site's real transports.
+>
+> A public API is in scope only when the maintainer explicitly asks for it, or
+> when interception is complete and its endpoints turned out to need credentials
+> no browser session can supply. Sites with famous public APIs are where this
+> shortcut is most tempting and most costly.
+
 The mechanical parts of GATHER and SCAN are a script, not a recipe:
 `node scripts/discover-probe.mjs --help`. Its header docblock states what each
 mode does and the bounds it respects. Read that rather than assembling requests
@@ -99,10 +110,19 @@ have been deduplicated. Before concluding embedded/SSR: scan for any endpoint
 carrying pagination parameters and probe it directly. Conclude "no XHR" only
 after that comes back empty across several pages.
 
-**GATHER is done when** you have a confirmed paginated endpoint, or embedded
-data on two or more page types, or several distinct API endpoints in traffic.
-Stop navigating once you have enough; more pages past that point is spend
-without return.
+**GATHER is done when a pass finds nothing new — never when you have "enough".**
+
+Run GATHER at least **twice** over the same site, and keep going until a full
+pass surfaces no transport and no endpoint the previous pass missed. A second
+pass reliably finds more than the first: streaming and interaction-only
+transports need page types the first pass had no reason to visit, so "I found a
+paginated endpoint" is a statement about what you looked at, not about what the
+site has.
+
+Record the count of *new* findings per pass. A pass that adds nothing is the
+stop signal; a pass that adds something means run another. That delta is the
+only evidence available that the inventory is complete, so write it into the
+elimination table rather than discarding it.
 
 **Rules that bind the whole step:**
 
@@ -121,6 +141,13 @@ without return.
   (`--mode=bundles`), then confirm the URL directly.
 - If the browser connection drops, reconnect once. If that fails, continue with
   what you have and say so — a give-up is a reported outcome.
+- **A rate limit you caused is not a property of the target.** Probing hammers
+  one host from one address with one user agent, which is exactly the shape
+  abuse counters watch for. Before concluding an endpoint is session-gated,
+  rule out the counter you tripped yourself: vary the user agent, pause, and
+  retry once from a different shape. A 429 that clears under a fresh user agent
+  is your own footprint, and building a browser-only route around it adds cost
+  and fragility the endpoint never required.
 
 ---
 
@@ -168,6 +195,17 @@ as session-gated so the transport-tier guard enforces it — see
 
 ## STEP 3: CLASSIFY (reasoning only)
 
+**Classify per data type, not per site.** One page routinely serves different
+data over different transports — a listing over XHR, its prices over a
+WebSocket, its metadata server-rendered into the HTML. A single table for the
+whole site invites the failure it is meant to prevent: you confirm XHR for the
+first data type you find, mark JSON API present, and stop looking, while another
+transport on the same page goes unrecorded.
+
+So name the data types first — the things a consumer would actually ask for —
+and carry a row set for each. A transport is only ✗ for a data type once you
+have probed for it there.
+
 ```text
 ## Transport Elimination: [domain]
 | Transport      | Present? | Evidence |
@@ -182,7 +220,17 @@ as session-gated so the transport-tier guard enforces it — see
 | Encoded/Binary | ✓ or ✗   |          |
 ```
 
+Add a `Pass` column recording which pass first found each ✓, and note the
+per-pass new-finding count beneath the table.
+
 Every row carries a verdict and evidence — captured output, not recollection.
+
+**A ✗ needs evidence of absence, not absence of evidence.** "WebSocket ✗" is
+not a finding; "WebSocket ✗ — 3 bundles scanned for `new WebSocket(`/`wss://`,
+no live or chat page type exists on this site" is. Write what you probed and
+where, so the claim can be falsified. A ✗ that only records a conclusion is
+indistinguishable from not having looked.
+
 Every Gap=Y endpoint has a planned route. **BUILD does not start until this
 table is complete.**
 
