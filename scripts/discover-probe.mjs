@@ -366,7 +366,9 @@ async function main() {
 			console.log('  The control may be custom. Find it by hand, then click it via the browser.');
 			return 0;
 		}
-		console.log(`Trigger: <${hit.tag}> "${hit.text || '(no text)'}" via ${hit.selector} (${hit.matches} match(es))`);
+		console.log(
+			`Trigger: <${hit.tag}> "${hit.text || '(no text)'}" via ${hit.selector} (${hit.matches} match(es))`,
+		);
 		if (!hit.text) {
 			console.log('  ⚠ The clicked element has no text — likely not the pagination control.');
 		}
@@ -461,7 +463,9 @@ async function main() {
 				console.log(verdict.detail);
 				return 1;
 			}
-			console.log('This page loaded no scripts of its own — that is a finding, not a setup problem.');
+			console.log(
+				'This page loaded no scripts of its own — that is a finding, not a setup problem.',
+			);
 			console.log('A site that ships no JavaScript has no client-side transport to find: its data');
 			console.log('is in the HTML. Run --mode=embedded.');
 			return 0;
