@@ -10,6 +10,7 @@ import {
 	checkResponse,
 	diffShape,
 	isProbeable,
+	isRecordableStatus,
 	parseArgs,
 	probeTargets,
 	shapeOf,
@@ -412,5 +413,68 @@ describe('a shape pin describes schema, never content', () => {
 	it('does not treat a mixed-value object as a map however many keys it has', () => {
 		const obj = { a: 1, b: 'x', c: true, d: 1, e: 1, f: 1, g: 1, h: 1, i: 1 };
 		expect(shapeOf(obj)).not.toContain('*');
+	});
+});
+
+describe('a recursive structure is described once, not per level', () => {
+	/**
+	 * The third face of the same defect, found on a comment thread. A tree's
+	 * DEPTH is content: the baseline recorded a story with a deep reply chain and
+	 * asserted it against a shallower one, so the check failed because somebody
+	 * had answered a comment. Spelling the nesting out also spent the depth budget
+	 * re-describing one type, so the ellipsis landed mid-structure and two shapes
+	 * that agreed printed as though they differed.
+	 */
+	const node = (d) =>
+		d === 0
+			? { id: 'x', text: 't', children: [] }
+			: { id: 'x', text: 't', children: [node(d - 1)] };
+
+	it('gives the same shape whatever the nesting depth', () => {
+		expect(shapeOf({ comments: [node(2)] })).toBe(shapeOf({ comments: [node(7)] }));
+	});
+
+	it('describes the repeat rather than unrolling it', () => {
+		expect(shapeOf({ comments: [node(3)] })).toBe(
+			'{comments:[{children:[{↻}],id:string,text:string}]}',
+		);
+	});
+
+	it('accepts a deeper thread against a shallower baseline', () => {
+		expect(
+			diffShape(shapeOf({ comments: [node(1)] }), shapeOf({ comments: [node(9)] })).verdict,
+		).toBe('no-signal-flipped');
+	});
+
+	// The collapse must not swallow a real change. A node that loses a field is
+	// still a regression, however deep the tree goes.
+	it('still fails when the repeating node loses a field', () => {
+		const thin = { id: 'x', children: [] };
+		expect(diffShape(shapeOf({ comments: [node(3)] }), shapeOf({ comments: [thin] })).verdict).toBe(
+			'unexpected-regression',
+		);
+	});
+
+	it('does not collapse two unrelated single-key objects', () => {
+		expect(shapeOf({ a: { z: 1 }, b: { z: 2 } })).toBe('{a:{z:number},b:{z:number}}');
+	});
+});
+
+describe('a failing response never becomes the expected shape', () => {
+	/**
+	 * This gate exists because the rule alone did not hold. "Do not record while
+	 * rate-limited" was written down, and then a discovery run recorded
+	 * `{error:string}` as an accepted shape for six routes on a host that was
+	 * refusing it — and afterwards, so did I, having just written the warning.
+	 * Those routes would have passed over an error response for good.
+	 *
+	 * The pure part is the predicate; the runner refuses and reports.
+	 */
+	it.each([200, 201, 204, 299])('records a shape from HTTP %i', (status) => {
+		expect(isRecordableStatus(status)).toBe(true);
+	});
+
+	it.each([301, 400, 403, 404, 429, 500, 502, 503])('refuses HTTP %i', (status) => {
+		expect(isRecordableStatus(status)).toBe(false);
 	});
 });

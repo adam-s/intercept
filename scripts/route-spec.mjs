@@ -106,7 +106,19 @@ export function parseArgs(argv) {
  */
 const MAP_LIKE_MIN_KEYS = 8;
 
-export function shapeOf(value, depth = 0) {
+/**
+ * Whether a response may become a recorded contract.
+ *
+ * Only a success may. A failure recorded as the expected shape turns the route
+ * green forever over exactly the response the check exists to catch, and the
+ * window where this happens is ordinary: a host that rate-limits mid-run answers
+ * some routes and refuses others.
+ */
+export function isRecordableStatus(status) {
+	return status >= 200 && status < 300;
+}
+
+export function shapeOf(value, depth = 0, ancestors = []) {
 	if (depth > 6) return '…';
 	if (value === null) return 'null';
 	if (Array.isArray(value)) {
@@ -131,7 +143,7 @@ export function shapeOf(value, depth = 0) {
 			for (const el of objects) {
 				for (const k of Object.keys(el)) {
 					counts.set(k, (counts.get(k) ?? 0) + 1);
-					if (!shapes.has(k)) shapes.set(k, shapeOf(el[k], depth + 1));
+					if (!shapes.has(k)) shapes.set(k, shapeOf(el[k], depth + 1, ancestors));
 				}
 			}
 			const keys = [...counts.keys()].sort();
@@ -140,16 +152,33 @@ export function shapeOf(value, depth = 0) {
 				.join(',');
 			return `[{${inner}}]`;
 		}
-		return `[${shapeOf(value[0], depth + 1)}]`;
+		return `[${shapeOf(value[0], depth + 1, ancestors)}]`;
 	}
 	if (typeof value === 'object') {
 		const keys = Object.keys(value).sort();
+
+		// A self-similar node, described once however deep this instance goes.
+		//
+		// A comment tree, a category tree, a threaded reply — its DEPTH is content.
+		// Recording the shape of a story with eight levels of replies and asserting
+		// it against a story with three is a check that fails when somebody
+		// answers a comment, which it did. Spelling the nesting out also spends the
+		// depth budget re-describing one type, so the ellipsis lands mid-structure
+		// and two shapes that agree print as though they differ.
+		//
+		// Matched on the key signature rather than the rendered shape, because the
+		// shape is not known until the recursion returns. Two keys minimum, so
+		// small unrelated objects are not collapsed into each other.
+		const signature = keys.join(',');
+		if (keys.length >= 2 && ancestors.includes(signature)) return '{↻}';
+		const nested = [...ancestors, signature];
+
 		// A map, described by what its values look like rather than by its keys.
 		if (keys.length >= MAP_LIKE_MIN_KEYS) {
-			const valueShapes = new Set(keys.map((k) => shapeOf(value[k], depth + 1)));
+			const valueShapes = new Set(keys.map((k) => shapeOf(value[k], depth + 1, nested)));
 			if (valueShapes.size === 1) return `{*:${[...valueShapes][0]}}`;
 		}
-		return `{${keys.map((k) => `${k}:${shapeOf(value[k], depth + 1)}`).join(',')}}`;
+		return `{${keys.map((k) => `${k}:${shapeOf(value[k], depth + 1, nested)}`).join(',')}}`;
 	}
 	return typeof value;
 }
@@ -532,6 +561,9 @@ async function main() {
 	let skippedForBudget = 0;
 	let skippedUnprobeable = 0;
 	let declarationFailures = 0;
+	// Routes whose shape was refused because the upstream was failing. A run that
+	// refused any is not a complete recording, and says so at the end.
+	let refusedToRecord = 0;
 
 	outer: for (const domain of domains) {
 		baselines[domain.name] = opts.record ? {} : readBaseline(domain.name);
@@ -586,7 +618,29 @@ async function main() {
 			}
 
 			const shape = res.body === undefined ? null : shapeOf(res.body);
-			if (recorded && shape) {
+
+			// GATE: a failing response never becomes the expected shape.
+			//
+			// The guard above stops a domain-wide record from baking in a dead
+			// server's failures; this stops the same thing one route at a time, which
+			// is the form it actually takes. A host that rate-limits mid-run answers
+			// some routes and refuses others, so `--record` accumulated
+			// `{error:string}` as an accepted shape for six routes on one target —
+			// and those routes would then pass over an error response for good. It
+			// happened twice on the same host: once to a discovery run, once to me
+			// re-recording afterwards, both times having written down the rule about
+			// not recording while rate-limited. A rule nothing checks is a
+			// suggestion.
+			//
+			// Reported rather than silent, because a route whose shape was refused is
+			// a route with no baseline, and that must not read like a recorded one.
+			if (recorded && shape && !isRecordableStatus(res.status)) {
+				console.error(
+					`    ⚠ not recorded: ${route} answered HTTP ${res.status}. ` +
+						`A failure is not a contract — re-record when the upstream is healthy.`,
+				);
+				refusedToRecord += 1;
+			} else if (recorded && shape) {
 				const seen = new Set(
 					Array.isArray(recorded[route])
 						? recorded[route]
@@ -673,6 +727,16 @@ async function main() {
 	if (declarationFailures > 0) {
 		console.log(
 			`\n✗ ${declarationFailures} undeclared route(s). Every route declares \`upstream\`, and any route with a path or required query parameter declares \`examples\`.`,
+		);
+		return 1;
+	}
+	if (refusedToRecord > 0) {
+		// An incomplete recording presented as a recording is the same failure this
+		// whole tier exists to remove, one level up.
+		console.error(
+			`\n✗ ${refusedToRecord} route(s) had no shape recorded because the upstream was failing.\n` +
+				'  Those routes now have no baseline. Re-record when the upstream is healthy —\n' +
+				'  and if we caused the failure, wait rather than retrying into it.',
 		);
 		return 1;
 	}

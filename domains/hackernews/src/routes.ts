@@ -37,6 +37,14 @@
  * confirmed directly, not assumed. All routes use `rateLimitedFetch`
  * (`browserRequired: false`).
  *
+ * NOT BUILT (fired in a browser, carries no data): `hn.js`, `news.css`,
+ * `y18.svg`, `triangle.svg`, `s.gif`. Every page load requests all five and
+ * a recall check lists them as endpoints with no route, which they are and
+ * should stay: four are chrome and the fifth is the site's only script.
+ * `hn.js` is read as *source* — it is where the session-gated XHR calls
+ * below were found — and proxying it as data would return JavaScript to a
+ * caller asking for stories.
+ *
  * NOT BUILT (present in source, session-gated, no credentials to verify):
  *  - `vote?id=&how=&auth=&goto=&js=t`         — fire-and-forget XHR GET,
  *    only reachable for a logged-in session (anonymous vote links carry no
@@ -52,19 +60,35 @@
  *    `POST /submit` — real `<form method="post">`s found via DOM
  *    inspection (Form-encoded POST, present) that all require credentials.
  *
- * OUT OF SCOPE: the page's own search box is
- * `<form method="get" action="//hn.algolia.com/">` — a real, observed part
- * of the front end, but it full-navigates to a different site (a distinct
- * origin with its own React SPA, own pagination, and undiscovered API of
- * its own). Wrapping it would be discovering hn.algolia.com, not
- * news.ycombinator.com; it is named here rather than silently dropped.
+ * SEARCH — supersedes the earlier run's "out of scope" note on this same
+ * form, which is retired rather than left standing. That run recorded the
+ * search box as a real part of the front end that it did not follow, on the
+ * grounds that following it would be discovering hn.algolia.com. A later
+ * run followed it: the interaction sweep pressed Enter in the box, the page
+ * full-navigated, and the SPA on the other side issued a POST to an Algolia
+ * index. That call is the only JSON API this site's front end reaches
+ * without a login, it was found by interception rather than by reading
+ * anybody's API docs, and the entry point is a control HN itself renders.
+ * Route 7 consumes it, with its credentials harvested at runtime — see
+ * algolia.ts for why the harvest leaves the browser. The boundary the
+ * earlier note drew is still true and now stated where it belongs: the
+ * transport is hn.algolia.com's, not news.ycombinator.com's, and Route 7 is
+ * the only route here that leaves the site.
  *
  * @module domain-hackernews/routes
  */
 
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
-import { DEBUG, rateLimitedFetch, withCompleteness } from '@interceptor/shared';
+import {
+	DEBUG,
+	DERIVED_STREAM_LIMITS,
+	derivedItemStream,
+	rateLimitedFetch,
+	UpstreamStatusError,
+	withCompleteness,
+} from '@interceptor/shared';
 import { load } from 'cheerio';
+import { clearAlgoliaCredentials, getAlgoliaCredentials } from './algolia';
 import {
 	buildCommentTree,
 	extractCursorNext,
@@ -109,6 +133,11 @@ export const routes: DomainRoute[] = [
 		path: '/list/:type',
 		examples: ['/list/top', '/list/top?page=2', '/list/new', '/list/best'],
 		upstream: [
+			// The bare origin is the same document `/news` serves and is what a
+			// browser actually requests when somebody types the site in. Named
+			// here so the coverage check can match it: the route reaches it under
+			// its other path, and an unnamed endpoint reads as an unexplained gap.
+			'news.ycombinator.com/',
 			'news.ycombinator.com/news?p={page}',
 			'news.ycombinator.com/best?p={page}',
 			'news.ycombinator.com/show?p={page}',
@@ -360,6 +389,255 @@ export const routes: DomainRoute[] = [
 				.get();
 
 			return c.json({ title: $('channel > title').text(), items, count: items.length });
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════
+	// DATE-ADDRESSED LISTING — a third pagination encoding
+	// ═══════════════════════════════════════════════════════════════════
+
+	// ─── Route 7: /front — the front page as it stood on a given day ──
+	// The same story rows as Route 1, addressed by date rather than by rank:
+	// `front?day=YYYY-MM-DD`, and then `&p=N` within that day. Two axes, so
+	// the route carries both.
+	//
+	// The day anchors are returned verbatim rather than interpreted. Their
+	// labels are relative ("1 day ago", "1 month ago"), the set differs
+	// between today's page and an archived one, and inventing prev/next
+	// semantics for them would be describing the page rather than reading
+	// it. Returning them is also what caught this route's own first version
+	// being wrong: it declared `hasMore: false` on the belief that a day was
+	// a fixed 30 items, and the anchor list came back carrying a
+	// `?day=…&p=2` More link that disproved it.
+	{
+		method: 'GET',
+		path: '/front',
+		// `?page=2` on an archived day is deliberately not an example. It is a
+		// real parameter — the page renders its own `front?day=…&p=2` More link —
+		// but requesting it during discovery drew a 429 after that session had
+		// already spent ~25 requests on the host. That was our footprint rather
+		// than the site's policy, and it was not retried; an example that
+		// re-provokes it would fail the route for a reason that has nothing to do
+		// with the route.
+		examples: ['/front', '/front?day=2026-07-27'],
+		upstream: ['news.ycombinator.com/front?day={day}&p={page}'],
+		transport: 'HTML-over-the-wire',
+		description:
+			'The front page as it stood on a given day. Date-addressed (?day=YYYY-MM-DD) and page-numbered within the day (?page=N).',
+		browserRequired: false,
+		handler: async (c) => {
+			const q = new URL(c.req.url).searchParams;
+			const day = q.get('day');
+			if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+				return c.json({ error: `day must be YYYY-MM-DD, got '${day}'` }, 400);
+			}
+			const page = q.get('page');
+			if (page && !/^\d+$/.test(page)) {
+				return c.json({ error: `page must be a positive integer, got '${page}'` }, 400);
+			}
+			const params = new URLSearchParams();
+			if (day) params.set('day', day);
+			if (page) params.set('p', page);
+			const query = params.toString();
+			const upstreamUrl = query ? `${BASE_URL}/front?${query}` : `${BASE_URL}/front`;
+
+			DEBUG('hackernews', `front: fetching ${upstreamUrl}`);
+			const res = await fetchHtml(upstreamUrl);
+			if (!res.ok) return c.json({ error: `Front page returned ${res.status}` }, 502);
+
+			const $ = load(res.html);
+			const items = parseStoryRows($);
+			const nextPage = extractPageNext($);
+			// Only the bare dates: the same selector also matches this page's own
+			// More link, which is the next page of this day rather than another
+			// day, and Route 1's `nextPage` already carries that.
+			const dayLinks = [
+				...new Set(
+					$('a[href^="front?day="]')
+						.map((_, el) => $(el).attr('href')?.slice('front?day='.length) ?? '')
+						.get()
+						.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)),
+				),
+			];
+
+			return c.json(
+				withCompleteness({
+					day: day ?? null,
+					page: page ? Number(page) : 1,
+					items,
+					returned: items.length,
+					hasMore: nextPage !== null,
+					nextPage,
+					dayLinks,
+				}),
+			);
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════
+	// SEARCH — JSON API, on the origin HN's own search box submits to
+	// ═══════════════════════════════════════════════════════════════════
+
+	// ─── Route 8: hn.algolia.com's Algolia index ─────────────────────
+	// The one JSON transport the anonymous front end reaches, and the only
+	// route here that leaves news.ycombinator.com. See the SEARCH note in
+	// the module docblock for how it was found and where the boundary sits.
+	//
+	// The request body is the SPA's own, replayed: `query` and `page` are
+	// substituted and everything else is left exactly as observed. The
+	// tuning fields (typo tolerance, proximity, searchable attributes) are
+	// what make the results match what a visitor sees, and dropping the ones
+	// that "look unnecessary" quietly returns a different ranking.
+	//
+	// `application/x-www-form-urlencoded` on a JSON body is not a mistake —
+	// it is how the Algolia browser client dodges a CORS preflight, and it
+	// is what was captured on the wire.
+	{
+		method: 'GET',
+		path: '/search',
+		examples: ['/search?q=hacker%20news', '/search?q=rust&page=1'],
+		upstream: ['hn.algolia.com/', '{appid}-dsn.algolia.net/1/indexes/Item_dev/query'],
+		transport: 'JSON API (XHR)',
+		description:
+			"Story search over the Algolia index HN's search box submits to. Zero-based ?page, 30 hits per page.",
+		browserRequired: false,
+		handler: async (c) => {
+			const q = new URL(c.req.url).searchParams;
+			const query = q.get('q');
+			if (!query) return c.json({ error: 'q is required' }, 400);
+			const page = Number(q.get('page') ?? '0');
+			if (!Number.isInteger(page) || page < 0) {
+				return c.json(
+					{ error: `page must be a non-negative integer, got '${q.get('page')}'` },
+					400,
+				);
+			}
+
+			const creds = await getAlgoliaCredentials();
+			const url =
+				`https://${creds.host}/1/indexes/Item_dev/query` +
+				`?x-algolia-agent=${encodeURIComponent('Algolia for JavaScript (4.13.1); Browser (lite)')}` +
+				`&x-algolia-api-key=${creds.apiKey}` +
+				`&x-algolia-application-id=${creds.appId}`;
+
+			DEBUG('hackernews', `search: ${query} page=${page}`);
+			const res = await rateLimitedFetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: JSON.stringify({
+					query,
+					analyticsTags: ['web'],
+					page,
+					hitsPerPage: 30,
+					minWordSizefor1Typo: 4,
+					minWordSizefor2Typos: 8,
+					advancedSyntax: true,
+					ignorePlurals: false,
+					clickAnalytics: false,
+					minProximity: 7,
+					numericFilters: [],
+					tagFilters: [['story'], []],
+					typoTolerance: true,
+					queryType: 'prefixNone',
+					restrictSearchableAttributes: ['title', 'comment_text', 'url', 'story_text', 'author'],
+					getRankingInfo: false,
+				}),
+			});
+			if (!res.ok) {
+				// A rotated key answers 403 here and nowhere else, so the cache is
+				// dropped on the way out and the next call re-harvests.
+				if (res.status === 403) clearAlgoliaCredentials();
+				return c.json({ error: `Algolia returned ${res.status}` }, 502);
+			}
+
+			const body = (await res.json()) as {
+				hits?: unknown[];
+				nbHits?: number;
+				nbPages?: number;
+				page?: number;
+				hitsPerPage?: number;
+			};
+			const hits = body.hits ?? [];
+
+			return c.json({
+				query,
+				page: body.page ?? page,
+				items: hits,
+				returned: hits.length,
+				total: body.nbHits ?? null,
+				totalPages: body.nbPages ?? null,
+				hasMore: body.nbPages !== undefined && (body.page ?? page) + 1 < body.nbPages,
+			});
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════
+	// DERIVED STREAM — liveness this site does not publish
+	// ═══════════════════════════════════════════════════════════════════
+
+	// ─── Route 9: /stream/new — arrivals on /newest, as SSE ──────────
+	//
+	// READ THIS BEFORE CITING THE ROUTE: Hacker News has no realtime
+	// transport. The elimination table for news.ycombinator.com records
+	// SSE ✗ and WebSocket ✗, and this route is not evidence against either
+	// row. Nothing is intercepted here. The site answers one whole page per
+	// request, exactly as it always has; the stream is manufactured on this
+	// side by asking for that page on a timer and reporting what changed.
+	// A future reader looking for "which sites stream" must not count this
+	// one, and a route that consumes a real upstream stream (see
+	// yahoofinance's /stream/subscribe) is a different thing entirely.
+	//
+	// The mechanism lives in @interceptor/shared — the poll loop, the
+	// diff-by-identity, the heartbeat, the disconnect handling and the
+	// bounds are what any site would need. All this domain supplies is how
+	// to fetch one page and what an item's identity is.
+	//
+	// Identity is the story id from `tr.athing[id]`, never the rank: the
+	// front page and /newest reorder between polls, so a positional key
+	// would report a shuffle as a flood of arrivals and miss the real one.
+	{
+		method: 'GET',
+		path: '/stream/new',
+		examples: ['/stream/new?seconds=20&interval=6'],
+		upstream: ['news.ycombinator.com/newest'],
+		transport: 'SSE',
+		description:
+			'Server-sent events for stories arriving on /newest. DERIVED, not intercepted: HN publishes no stream — this polls the page and diffs by story id.',
+		browserRequired: false,
+		handler: async (c) => {
+			const q = new URL(c.req.url).searchParams;
+			const seconds = Number(q.get('seconds') ?? '30');
+			const interval = Number(q.get('interval') ?? '10');
+			const lifetimeMs = Number.isFinite(seconds) ? seconds * 1000 : undefined;
+			const intervalMs = Number.isFinite(interval) ? interval * 1000 : undefined;
+
+			const body = derivedItemStream({
+				label: 'hackernews',
+				upstream: `${BASE_URL}/newest`,
+				lifetimeMs,
+				intervalMs,
+				// Well under the lifetime, so a caller sees a pulse even in a short
+				// window where nothing arrives.
+				heartbeatMs: Math.max(5_000, Math.min(DERIVED_STREAM_LIMITS.defaultHeartbeatMs, 8_000)),
+				signal: c.req.raw.signal,
+				poll: async () => {
+					const res = await rateLimitedFetch(`${BASE_URL}/newest`);
+					// The status is carried out rather than flattened into a message,
+					// because the stream treats 429 differently from every other
+					// failure and cannot tell them apart from prose.
+					if (!res.ok) throw new UpstreamStatusError(res.status);
+					return parseStoryRows(load(await res.text()));
+				},
+				identify: (story) => story.id,
+			});
+
+			return new Response(body, {
+				headers: {
+					'content-type': 'text/event-stream',
+					'cache-control': 'no-cache',
+					connection: 'keep-alive',
+				},
+			});
 		},
 	},
 ];
