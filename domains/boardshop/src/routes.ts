@@ -186,6 +186,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/catalog',
+		examples: ['/catalog', '/catalog?q=deck'],
+		upstream: ['localhost:4444/sites/boardshop/'],
 		description: 'Product catalog via embedded JSON extraction.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -228,6 +230,7 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/product/:sku',
 		examples: ['/product/DECK-001'],
+		upstream: ['localhost:4444/sites/boardshop/product/{sku}'],
 		description: 'Product detail via embedded JSON extraction.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -251,6 +254,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/availability',
+		examples: ['/availability', '/availability?category=decks'],
+		upstream: ['localhost:4444/sites/boardshop/api/availability'],
 		description: 'Escalation: direct HTTP → browserFetch on 429.',
 		handler: async (c, browser) => {
 			const category = new URL(c.req.url).searchParams.get('category') ?? '';
@@ -275,6 +280,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/reviews',
+		examples: ['/reviews?limit=5'],
+		upstream: ['localhost:4444/sites/boardshop/reviews'],
 		description: 'Cursor-paginated reviews via direct JSON API.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -296,6 +303,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/products',
+		examples: ['/products?page=1'],
+		upstream: ['localhost:4444/sites/boardshop/api/products'],
 		description: 'Products via JSON API with X-API-Key header.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -324,6 +333,7 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/inventory/:sku',
 		examples: ['/inventory/DECK-001'],
+		upstream: ['localhost:4444/sites/boardshop/api/inventory/{sku}'],
 		description: 'Warehouse inventory with custom headers discovered from traffic.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -347,6 +357,7 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/catalog/page/:page',
 		examples: ['/catalog/page/1', '/catalog/page/2'],
+		upstream: ['localhost:4444/sites/boardshop/'],
 		description: 'POST pagination with CSRF + session token extraction.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -393,6 +404,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/graphql-example',
+		examples: ['/graphql-example'],
+		upstream: ['localhost:4444/sites/streamshop/gql'],
 		description: 'GraphQL query via streamshop. Client-ID from page source.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -425,6 +438,11 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/hls-example',
+		examples: ['/hls-example'],
+		upstream: [
+			'localhost:4444/sites/streamshop/stream/token',
+			'localhost:4444/sites/streamshop/stream/master.m3u8',
+		],
 		description: 'HLS stream: token → master playlist → quality variants.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -472,6 +490,11 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/encoded-example',
+		examples: ['/encoded-example'],
+		upstream: [
+			'localhost:4444/sites/databoard/api/products',
+			'localhost:4444/sites/databoard/api/auth/token',
+		],
 		description: 'Base64-encoded JSON API with Bearer auth.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -497,6 +520,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/msgpack-example',
+		examples: ['/msgpack-example'],
+		upstream: ['localhost:4444/sites/databoard/api/stats'],
 		description: 'MessagePack binary response with Bearer auth.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -525,6 +550,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/crumb-example',
+		examples: ['/crumb-example?symbol=DECK'],
+		upstream: ['localhost:4444/sites/liveboard/api/quote/{symbol}'],
 		description: 'Crumb-authenticated REST API. Token from embedded JSON.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -558,6 +585,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/ws-json-example',
+		examples: ['/ws-json-example'],
+		upstream: ['ws://localhost:4444/sites/liveboard/ws/json'],
 		description: 'WebSocket JSON: capture N real-time price updates.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -603,6 +632,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/ws-protobuf-example',
+		examples: ['/ws-protobuf-example'],
+		upstream: ['ws://localhost:4444/sites/liveboard/stream'],
 		description: 'WebSocket protobuf: capture base64-wrapped binary frames.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -661,6 +692,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/nextjs-example',
+		examples: ['/nextjs-example'],
+		upstream: ['localhost:4444/sites/boardshop/nextjs'],
 		description: '__NEXT_DATA__ extraction: navigate Redux RTK Query state tree.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -698,6 +731,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/deferred-example',
+		examples: ['/deferred-example'],
+		upstream: ['localhost:4444/sites/boardshop/deferred'],
 		description: 'Deferred state extraction: deep nested array structure.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -734,6 +769,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/method-example',
+		examples: ['/method-example'],
+		upstream: ['localhost:4444/sites/boardshop/methods'],
 		description: 'POST ?method= dispatch: same URL, different operations.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -766,6 +803,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/cursor-example',
+		examples: ['/cursor-example'],
+		upstream: ['localhost:4444/sites/boardshop/catalog/cursor'],
 		description: 'Base64 cursor pagination: decode/re-encode cursor tokens.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -790,6 +829,10 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/chart/:sku',
 		examples: ['/chart/DECK-001'],
+		upstream: [
+			'localhost:4444/sites/boardshop/api/chart/{sku}',
+			'localhost:4444/sites/boardshop/product/{sku}',
+		],
 		description: 'Rate-limited chart: tries API first, falls back to embedded JSON.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -837,6 +880,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/hydrated-example',
+		examples: ['/hydrated-example'],
+		upstream: ['localhost:4444/sites/boardshop/hydrated'],
 		description: 'Hydrated page: script tags stripped by JS. Use raw HTTP, not DOM.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -864,6 +909,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/sveltekit-example',
+		examples: ['/sveltekit-example'],
+		upstream: ['localhost:4444/sites/boardshop/sveltekit'],
 		description: 'SvelteKit fetched data: JSON-wrapped responses with double parse.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -903,6 +950,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/jsonp-example',
+		examples: ['/jsonp-example?q=deck'],
+		upstream: ['localhost:4444/sites/boardshop/api/suggest'],
 		description: 'JSONP: strip callback wrapper to parse JSON.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -936,6 +985,7 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/captions-example/:sku',
 		examples: ['/captions-example/DECK-001?lang=en'],
+		upstream: ['localhost:4444/sites/boardshop/api/captions/{sku}'],
 		description: 'Captions: structured timed text from media endpoint.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -958,6 +1008,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/notifications-example',
+		examples: ['/notifications-example'],
+		upstream: ['ws://localhost:4444/sites/boardshop/ws/notifications'],
 		description: 'PubSub WS: capture push notifications.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1004,6 +1056,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/gql-subscription-example',
+		examples: ['/gql-subscription-example'],
+		upstream: ['ws://localhost:4444/sites/boardshop/ws/subscriptions'],
 		description: 'GraphQL subscription over WebSocket (graphql-ws protocol).',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1066,6 +1120,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/binary-ws-example',
+		examples: ['/binary-ws-example'],
+		upstream: ['ws://localhost:4444/sites/boardshop/ws/binary'],
 		description: 'Custom binary WebSocket: decode frame header + payload.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1118,6 +1174,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/rss-example',
+		examples: ['/rss-example'],
+		upstream: ['localhost:4444/sites/boardshop/rss'],
 		description: 'RSS feed: parse XML with cheerio.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1157,6 +1215,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/ssr-example',
+		examples: ['/ssr-example'],
+		upstream: ['localhost:4444/sites/boardshop/ssr'],
 		description: 'SSR HTML: parse table rows with cheerio.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1198,6 +1258,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/formdata-search-example',
+		examples: ['/formdata-search-example?q=deck'],
+		upstream: ['localhost:4444/sites/boardshop/search/form'],
 		description: 'FormData POST: multipart search request.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1229,6 +1291,11 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/drops/inventory',
+		examples: ['/drops/inventory?deckId=DECK-001'],
+		upstream: [
+			'localhost:4444/sites/boardshop/drops',
+			'localhost:4444/sites/boardshop/drops/api/inventory',
+		],
 		description: 'SessionHarvester (httpOnly cookie): httpOnly cookie + correlation header.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1305,6 +1372,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/resale/listings',
+		examples: ['/resale/listings'],
+		upstream: ['localhost:4444/sites/boardshop/resale'],
 		description: 'SessionHarvester (WAF + POST): WAF + session cookies + POST pagination.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1396,6 +1465,10 @@ export const routes: DomainRoute[] = [
 		method: 'GET',
 		path: '/collection/:id/listings',
 		examples: ['/collection/COL-001/listings'],
+		upstream: [
+			'localhost:4444/sites/boardshop/collection/{id}',
+			'localhost:4444/sites/boardshop/api/collection/{id}/listings',
+		],
 		description: 'Encoded pricing: session harvest + indirect price refs + JS decode + pagination.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1531,6 +1604,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/resale/all',
+		examples: ['/resale/all'],
+		upstream: ['localhost:4444/sites/boardshop/resale'],
 		description: 'Click-intercept: Patchright clicks "Load More", intercepts POST responses.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1626,6 +1701,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/captcha-turnstile',
+		examples: ['/captcha-turnstile'],
+		upstream: ['localhost:4444/sites/turnstile/'],
 		description: 'Captcha-gated form: mint Turnstile-shape token in browser, submit, verify.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1713,6 +1790,8 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/captcha-hcaptcha',
+		examples: ['/captcha-hcaptcha'],
+		upstream: ['localhost:4444/sites/hcaptcha/'],
 		description: 'Captcha-gated send: capture P1_-shape token via postMessage, replay in header.',
 		browserRequired: false,
 		handler: async (c) => {

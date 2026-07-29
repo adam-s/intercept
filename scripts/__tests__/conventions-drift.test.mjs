@@ -164,3 +164,54 @@ describe('the elimination table and the signature table are one list', () => {
 		expect(rule).toMatch(/derive it/i);
 	});
 });
+
+describe('the reference domain demonstrates the whole route contract', () => {
+	// AGENTS.md calls the reference domain executable documentation, and agents
+	// treat it that way: they copy its shape rather than re-derive one from the
+	// rule. So a field added to the contract and to the rule, but not to the
+	// reference, is a field that does not get used. That is not hypothetical —
+	// `examples` was demonstrated here and got declared downstream, `upstream`
+	// was not and did not, in the same run by the same agent.
+	const ROUTES = readFileSync(resolve(ROOT, 'domains/boardshop/src/routes.ts'), 'utf8');
+	const LOADER = readFileSync(
+		resolve(ROOT, 'packages/browser/src/handler/domain-loader.ts'),
+		'utf8',
+	);
+
+	/** Field names the DomainRoute contract declares, from the contract itself. */
+	const contractFields = [
+		...new Set(
+			[...LOADER.matchAll(/^\t{3,4}(\w+)\??:/gm)]
+				.map((m) => m[1])
+				.filter((f) => !['method', 'targetUrl', 'handler'].includes(f)),
+		),
+	];
+
+	it('reads a non-empty field list off the contract, so this test cannot pass vacuously', () => {
+		expect(contractFields.length).toBeGreaterThanOrEqual(4);
+		expect(contractFields).toContain('upstream');
+		expect(contractFields).toContain('examples');
+	});
+
+	it.each(contractFields)('demonstrates %s', (field) => {
+		expect(ROUTES).toMatch(new RegExp(`^\\t\\t${field}:`, 'm'));
+	});
+
+	// Demonstrating a field once is not enough for a file that gets copied route
+	// by route: a reader lands on whichever route is nearest their case.
+	it('declares examples and upstream on every route, not just a sample', () => {
+		const routes = [...ROUTES.matchAll(/^\t\tpath: '/gm)].length;
+		expect(routes).toBeGreaterThan(0);
+		expect([...ROUTES.matchAll(/^\t\texamples: \[/gm)]).toHaveLength(routes);
+		expect([...ROUTES.matchAll(/^\t\tupstream: \[/gm)]).toHaveLength(routes);
+	});
+
+	// A placeholder is what makes a declaration match a real captured endpoint;
+	// a path parameter left literal matches nothing and reads as a coverage gap.
+	it('writes upstream scheme-less with placeholders for the parts that vary', () => {
+		const declared = [...ROUTES.matchAll(/^\t\tupstream: \[(.+)\],$/gm)].map((m) => m[1]);
+		expect(declared.length).toBeGreaterThan(0);
+		expect(declared.some((d) => d.includes('{'))).toBe(true);
+		expect(declared.filter((d) => /'https?:\/\//.test(d))).toEqual([]);
+	});
+});
