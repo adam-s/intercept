@@ -25,6 +25,7 @@
  */
 
 import { DEBUG } from '@interceptor/shared';
+import { evaluateInMainWorld, type MainWorldPage } from '../shared/main-world.js';
 import { captureDecision, header, parseBody } from './capture-filter.js';
 import { DRAIN_SOURCE, type EgressEvent, INSTRUMENT_SOURCE } from './instrument.js';
 import type { DriverPage, NetworkCaptureCallback } from './types.js';
@@ -174,30 +175,60 @@ export function startTrafficCapture(
  * navigation rather than once per page matters for the same reason — a
  * client-side route change that remounts the app re-runs that startup.
  *
+ * Both install paths must reach the page's own JavaScript world. `addInitScript`
+ * does. `page.evaluate` does not — it runs in an isolated world that shares the
+ * DOM and nothing else, so patching `fetch` there produces a wrapper the page
+ * will never call, and capture comes back empty with nothing thrown. The
+ * catch-up install therefore goes through the main-world bridge, which is the
+ * same trap `main-world.ts` exists to document.
+ *
  * Best-effort by design. An engine that rejects init scripts still gets wire
  * capture, and degraded capture beats a session that refuses to start.
  */
 export async function installEgressInstrument(page: DriverPage): Promise<boolean> {
 	// biome-ignore lint/suspicious/noExplicitAny: addInitScript is engine-level, not on the structural page type
 	const p = page as any;
+	let installed = false;
+
 	try {
 		await p.addInitScript?.(INSTRUMENT_SOURCE);
-		// The current document already exists and missed the init hook, so patch it
-		// too; the instrument is idempotent, which is what makes this safe.
-		await p.evaluate?.(INSTRUMENT_SOURCE).catch(() => {});
-		return true;
+		installed = true;
 	} catch (err) {
-		DEBUG('traffic-capture', `instrument install failed: ${String(err)}`);
-		return false;
+		DEBUG('traffic-capture', `addInitScript unavailable: ${String(err).slice(0, 80)}`);
 	}
+
+	// The current document loaded before the init hook existed, so patch it too.
+	// The instrument is idempotent, which is what makes running both safe.
+	try {
+		await evaluateInMainWorld(
+			p as MainWorldPage,
+			(src: string) => {
+				// Evaluated inside the injected tag, so this already *is* the page's
+				// world; the indirection just executes the source there.
+				new Function(src)();
+				return true;
+			},
+			INSTRUMENT_SOURCE,
+		);
+		installed = true;
+	} catch (err) {
+		DEBUG('traffic-capture', `catch-up install skipped: ${String(err).slice(0, 80)}`);
+	}
+
+	return installed;
 }
 
 /**
  * Drain buffered egress events from every frame.
  *
- * Frames are drained individually because an iframe has its own global, and a
- * cross-origin one is where embedded players and checkout widgets do their
- * work — draining only the main frame reports those transports as absent.
+ * This reads a global the instrument wrote, so it must run in the same world
+ * that wrote it. An isolated-world `evaluate` has its own `globalThis` and
+ * would find nothing — returning an empty array that reads as "the page made no
+ * calls" rather than as a failed read. That is the quiet failure this whole
+ * module is meant to remove, so the drain goes through the bridge too.
+ *
+ * Frames are drained individually because an iframe has its own global, and an
+ * embedded player or checkout widget is exactly where a transport hides.
  */
 export async function drainEgressEvents(page: DriverPage): Promise<EgressEvent[]> {
 	// biome-ignore lint/suspicious/noExplicitAny: frames() is engine-level
@@ -207,8 +238,11 @@ export async function drainEgressEvents(page: DriverPage): Promise<EgressEvent[]
 
 	for (const frame of targets.length ? targets : [page]) {
 		try {
-			// biome-ignore lint/suspicious/noExplicitAny: structural frame
-			const events = (await (frame as any).evaluate(DRAIN_SOURCE)) as EgressEvent[];
+			const events = await evaluateInMainWorld<EgressEvent[], string>(
+				frame as MainWorldPage,
+				(src: string) => new Function(`return ${src}`)() as EgressEvent[],
+				DRAIN_SOURCE,
+			);
 			if (Array.isArray(events)) out.push(...events);
 		} catch (err) {
 			// A detached or cross-origin frame that refuses evaluation is a gap, not
