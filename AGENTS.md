@@ -267,6 +267,27 @@ break-it review exists to catch.
   so in its output, with the reason; and a count is read for whether it moved
   the way the change implies, not only for whether it contains failures. A new
   check that added no cases did not run. Break the thing it guards, watch it go red, restore.
+- **A check that cannot fail is worse than a missing one**, because it reports
+  health. Absence of a result at least leaves a gap where a result should be;
+  this fills the gap with a verdict. Four ways a live, green check turns out to
+  have stopped discriminating: its match is so broad that everything satisfies
+  it; it credits our own action as the evidence; it recorded a failure as the
+  expected result, so the failure now passes forever; or it pins content that
+  varies on its own and goes red on ordinary behaviour until a reader learns to
+  ignore it. The last is the most expensive, because the check is then worse than
+  absent — it trains people past the signal.
+- **Re-prove red whenever you change what a check compares**, not only when you
+  add one. Reproving means breaking the thing it guards and watching it go red,
+  and a check written against the wrong artifact never can: the shipped form of a
+  thing and its form under a test runner are decided by different builds, so
+  reading the wrong one is green by construction. And where two rules write one
+  verdict, the later can set it directly and silently overrule the earlier —
+  fixing the first is not fixing the check.
+- **A verdict distinguishes schema from content.** What a thing *is* belongs in a
+  contract; how much of it arrived, how deep it nested, which optional parts came
+  this time, and which keys a third party happened to ship are all instance
+  properties. Pin the first and a break is legible; pin the second and the check
+  fails on the subject behaving normally.
 - **Dynamic scripts are bounded** — a hard cap on requests, wall time, output
   size, or scenarios, stated in the header docblock and enforced in the code. No
   model judgment inside a script. Importing a script runs nothing, so a unit
