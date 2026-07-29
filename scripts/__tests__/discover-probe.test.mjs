@@ -19,6 +19,7 @@ import {
 	PAGINATION_SELECTORS,
 	paginationParams,
 	parseArgs,
+	stripOwnInstrument,
 	summarize,
 	TRANSPORT_SIGNATURES,
 	transportEvidence,
@@ -420,5 +421,52 @@ describe('upstreamMatches — declared coverage', () => {
 		const entries = [{ method: 'GET', url: 'https://gql.twitch.tv/gql' }];
 		const d = coverageDiff(entries, ['GET /api/twitch/directory/top'], [], ['gql.twitch.tv/gql']);
 		expect(d.recallFloor).toBe(100);
+	});
+});
+
+describe('the scan does not read our own instrument as the target', () => {
+	// The instrument is injected into the page, so it becomes part of what a
+	// source scan sees. It constructs a WebTransport, patches WebSocket, and
+	// carries a `callback=` pattern for JSONP detection — a live run reported all
+	// three as findings about the site. That is worse than an ordinary false
+	// positive: the evidence looks exactly like a real hit.
+	// Excerpted from the shipped instrument rather than invented, so the test
+	// fails if the instrument changes shape and the markers stop covering it.
+	const OURS = `
+		const g = globalThis;
+		const events = [];
+		g.__ic_egress = events;
+		patchCtor('WebTransport', (_inst, args) => rec({ kind: 'webtransport', method: 'OPEN' }));
+		originals.set(wrapper, orig);
+		if (/[?&](callback|jsonp)=/i.test(String(value))) { rec({ kind: 'jsonp', method: 'GET' }); }
+	`;
+
+	it('finds nothing in our own source alone', () => {
+		expect(Object.keys(transportEvidence(OURS))).toEqual([]);
+	});
+
+	it('still finds the page real transports when ours is mixed in', () => {
+		const page = `${OURS}\nfetch('/api/items');\nnew WebSocket('wss://x.test/ws');`;
+		const found = Object.keys(transportEvidence(page));
+		expect(found).toContain('WebSocket');
+		expect(found).toContain('JSON API (XHR)');
+		expect(found).not.toContain('WebTransport');
+	});
+
+	// Dropping the whole file would trade a false positive for a blind spot.
+	it('strips by line, keeping the page code around it', () => {
+		const out = stripOwnInstrument(`real.line();\ng.__ic_egress = [];\nother.line();`);
+		expect(out).toContain('real.line()');
+		expect(out).toContain('other.line()');
+		expect(out).not.toContain('__ic_egress');
+	});
+
+	it('leaves an uninstrumented source untouched', () => {
+		const clean = `fetch('/api');\nnew EventSource('/sse');`;
+		expect(stripOwnInstrument(clean)).toBe(clean);
+	});
+
+	it('keeps snippets free of our own code', () => {
+		expect(extractSnippets(`${OURS}\nfetch('/real/api')`).join(' ')).not.toContain('__ic_egress');
 	});
 });

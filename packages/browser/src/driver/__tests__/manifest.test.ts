@@ -284,3 +284,48 @@ describe('detectChallengePresence', () => {
 		expect(detectChallengePresence([row(host, `/${rest.join('/')}`)])).toEqual([]);
 	});
 });
+
+describe('adaptive media is provable without an MSE append', () => {
+	// The primitive is the weaker evidence. `appendBuffer` fires only when the
+	// page demuxes; a player that fetches and appends inside a worker leaves no
+	// MSE event, so a live site streaming video reported this row absent while
+	// its playlist sat in the captured traffic. A discovery agent overrode the
+	// tool by reading the wire — the tool should not have needed overriding.
+	const row = (template, host = 'cdn.test') => ({
+		kind: 'wire',
+		method: 'GET',
+		host,
+		template,
+		params: [],
+		count: 1,
+		example: `https://${host}${template}`,
+	});
+
+	it.each([
+		'/api/v2/channel/hls/abc.m3u8',
+		'/v1/segment/x.mpd',
+		'/hls/stream/index',
+		'/dash/manifest',
+	])('marks HLS/Media present from %s', (template) => {
+		const v = deriveTransports([row(template)]);
+		expect(v.find((t) => t.transport === 'HLS/Media')?.present).toBe(true);
+	});
+
+	it('still recognises an MSE append when the page does demux', () => {
+		const v = deriveTransports(buildManifest([ev({ kind: 'media-append', method: 'DATA' })]));
+		expect(v.find((t) => t.transport === 'HLS/Media')?.present).toBe(true);
+	});
+
+	it('carries the playlist request as evidence', () => {
+		const v = deriveTransports([row('/api/v2/channel/hls/abc.m3u8', 'usher.ttvnw.net')]);
+		expect(v.find((t) => t.transport === 'HLS/Media')?.evidence[0]).toContain('usher.ttvnw.net');
+	});
+
+	// A TypeScript source file ends .ts, and so does an HLS segment. Matching the
+	// extension alone would mark every repo that serves its own sources as
+	// streaming video.
+	it.each(['/static/app.ts', '/assets/main.js', '/api/items'])('does not flag %s', (template) => {
+		const v = deriveTransports([row(template)]);
+		expect(v.find((t) => t.transport === 'HLS/Media')?.present).toBe(false);
+	});
+});

@@ -161,6 +161,13 @@ is not a domain that works.
 node scripts/discover-probe.mjs --mode=coverage --domain=yourdomain --port=XXXX
 ```
 
+**Run this before the restart that loads your domain, not after.** Capture is
+cleared when the server restarts, so a coverage run afterwards scores your
+routes against the handful of calls the checker itself just made — which is
+close to scoring them against themselves, reports high coverage, and means
+nothing. The tool says so when the sample is thinner than your route count;
+heed it rather than pasting the number.
+
 route-spec grades the routes you built. It has no opinion about the ones you
 didn't. This diffs the call shapes the browser actually made — read off the same
 manifest as the elimination table, so there is one answer rather than two that

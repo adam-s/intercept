@@ -386,7 +386,36 @@ export const TRANSPORT_SIGNATURES = {
  * WHY a transport is suspected and weigh it — a `strong` hit is a claim about
  * the code, a `library` hit is a claim about its dependencies.
  */
-export function transportEvidence(source, kind = 'both') {
+/**
+ * Markers of our own instrumentation, so a scan never reads it as the target's.
+ *
+ * The instrument is injected into the page, which means it becomes part of what
+ * a source scan sees. It constructs a `WebTransport`, patches `WebSocket`, and
+ * carries a `callback=` pattern for JSONP detection — so scanning an
+ * instrumented page reported transports that were entirely ours. That is the
+ * observation becoming the observed, and it is worse than a plain false
+ * positive because the evidence looks exactly like a real hit.
+ */
+const OWN_INSTRUMENT =
+	/__ic_egress|instrumentSource|__ic_drain|data-mw-|patchright-init-script|patchCtor\(|rec\(\{\s*kind:|originals\.set\(/;
+
+/**
+ * Remove our own injected source before scanning.
+ *
+ * Line-granular rather than whole-document: the instrument may be inlined
+ * alongside a page's real code, and discarding the whole file would trade a
+ * false positive for a blind spot.
+ */
+export function stripOwnInstrument(source) {
+	if (!OWN_INSTRUMENT.test(source)) return source;
+	return source
+		.split('\n')
+		.filter((line) => !OWN_INSTRUMENT.test(line))
+		.join('\n');
+}
+
+export function transportEvidence(rawSource, kind = 'both') {
+	const source = stripOwnInstrument(rawSource);
 	const out = {};
 	for (const [name, sig] of Object.entries(TRANSPORT_SIGNATURES)) {
 		if (sig.scope !== 'both' && kind !== 'both' && sig.scope !== kind) continue;
@@ -494,7 +523,8 @@ function tidy(text) {
  * digest small enough to read, so near-duplicates are dropped and the total is
  * bounded. Missing a clue costs a probe; dumping a bundle costs the budget.
  */
-export function extractSnippets(source, { window = 90, max = 24 } = {}) {
+export function extractSnippets(rawSource, { window = 90, max = 24 } = {}) {
+	const source = stripOwnInstrument(rawSource);
 	const out = [];
 	const seen = new Set();
 	for (const [transport, sig] of Object.entries(TRANSPORT_SIGNATURES)) {
@@ -1051,6 +1081,25 @@ async function main() {
 		console.log(
 			`${routes.length} route(s) built. ${diff.total} distinct call shape(s) the browser actually made.`,
 		);
+
+		// A thin sample scores well for the wrong reason. Loading a freshly written
+		// domain needs a server restart, the restart clears the capture, and a
+		// coverage run after it scores the routes against the handful of calls the
+		// checker itself just made — which is close to scoring them against
+		// themselves. That reports high coverage and means nothing, and a high
+		// number is exactly what nobody re-examines.
+		if (diff.total > 0 && diff.total < routes.length) {
+			console.log();
+			console.log(
+				`SAMPLE TOO THIN: ${diff.total} call shape(s) against ${routes.length} route(s). This is not a`,
+			);
+			console.log(
+				'coverage measurement. Capture is cleared by a server restart, so run this while the',
+			);
+			console.log(
+				'discovery session traffic is still present — before restarting to load a new domain.',
+			);
+		}
 		console.log(`Recall floor: ~${diff.recallFloor}% — a FLOOR, because interaction-gated`);
 		console.log('endpoints never fire under passive browsing. The real surface is larger.\n');
 

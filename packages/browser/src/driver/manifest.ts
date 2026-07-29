@@ -259,6 +259,11 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 		if (ev && ev.length < 3) ev.push(`${row.method} ${row.host}${row.template}`);
 	}
 
+	// Adaptive media is provable two ways and the primitive is the weaker one.
+	// `appendBuffer` fires only when the page itself demuxes; a player that does
+	// its fetching and appending inside a worker leaves no MSE event in the page,
+	// so a site streaming video reported this row absent while its playlist sat
+	// in the captured traffic. A manifest request settles it whoever made it.
 	// GraphQL rides on fetch/XHR, so it is a body-shape question, not a
 	// primitive question — the only verdict here that reads payloads.
 	const graphql = rows.filter(
@@ -269,6 +274,25 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 		present: evidence.length > 0,
 		evidence,
 	}));
+	// Adaptive media is provable two ways and the primitive is the weaker one.
+	// `appendBuffer` fires only when the page itself demuxes; a player that does
+	// its fetching and appending inside a worker leaves no MSE event in the page,
+	// so a site streaming video reported this row absent while its playlist sat
+	// in the captured traffic. A manifest request settles it whoever made it.
+	const media = rows.filter((r) =>
+		/\.m3u8|\.mpd|\/hls\/|\/dash\/|\/manifest\/video/i.test(r.template),
+	);
+	if (media.length) {
+		const row = out.find((v) => v.transport === 'HLS/Media');
+		if (row) {
+			row.present = true;
+			for (const m of media.slice(0, 3)) {
+				const ev = `${m.method} ${m.host}${m.template}`;
+				if (!row.evidence.includes(ev)) row.evidence.push(ev);
+			}
+		}
+	}
+
 	out.push({
 		transport: 'GraphQL',
 		present: graphql.length > 0,
