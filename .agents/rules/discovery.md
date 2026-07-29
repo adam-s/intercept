@@ -339,6 +339,22 @@ is identical and only the identity differs. When traffic carries a self-
 description, vary it and compare: that is a second axis, and a run that explored
 only paths explored half the surface.
 
+**Same-origin is a convenience, not a credential.** The usual way to make a
+cross-origin call work is to move the document onto the API's own host so the
+request becomes same-origin. That discards `Origin` and `Referer`, and an
+endpoint that checks which page is asking gets a worse answer after the move —
+one refuses the reseated request and answers the cross-origin one from the
+site's own page immediately. Move the page to satisfy CORS; do not move it when
+the API wants to know where the request came from.
+
+**Prefer the rung inside the browser, and know why you left it.** A request
+issued from the runtime carries the runtime's TLS handshake, not a browser's,
+and a site that fingerprints refuses it on that alone while the identical
+request from inside a page succeeds. So direct HTTP is not simply the cheaper
+option — it is a different client wearing a different signature. Use it where
+the endpoint demonstrably needs nothing the browser carries, say so at the call
+site, and treat unexplained failure there as the first thing to move back.
+
 **A description of a resource is not a handle to it.** A site can hand you a
 complete inventory — an id, a codec, a byte length, a duration — with no address
 for any of it, because the bytes are negotiated separately by its own client

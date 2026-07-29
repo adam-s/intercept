@@ -268,3 +268,45 @@ describe('diffShape accepts a set of shapes', () => {
 		expect(diffShape('{a:number}', '{a:string}').verdict).toBe('unexpected-regression');
 	});
 });
+
+describe('a streaming route is asserted on its own terms', () => {
+	// Judging an event stream by the JSON rule reported a working live feed as a
+	// route serving an error page — the checker failing to understand a transport
+	// rather than the route failing. Streaming routes are exemplars now, so the
+	// checker has to know the shape.
+	const sse = 'event: open\ndata: {"symbols":["AAPL"]}\n\nevent: pricing\ndata: {"id":"AAPL"}\n\n';
+
+	it('accepts an event stream that delivered events', () => {
+		expect(checkResponse({ status: 200, contentType: 'text/event-stream', raw: sse })).toEqual([]);
+	});
+
+	it('does not fault it for being non-JSON', () => {
+		const f = checkResponse({ status: 200, contentType: 'text/event-stream', raw: sse });
+		expect(f.map((x) => x.check)).not.toContain('content-type');
+	});
+
+	// The failure that matters for a stream is silence, and a status check cannot
+	// see it: a channel that opens and carries nothing returns 200 with a body.
+	it('fails a stream that opened and delivered nothing', () => {
+		const f = checkResponse({ status: 200, contentType: 'text/event-stream', raw: '' });
+		expect(f.map((x) => x.check)).toContain('stream');
+	});
+
+	it('fails a stream with events but no data lines', () => {
+		const f = checkResponse({
+			status: 200,
+			contentType: 'text/event-stream',
+			raw: 'event: open\n\n',
+		});
+		expect(f[0].detail).toContain('no data line');
+	});
+
+	it.each(['application/x-ndjson', 'application/stream+json'])('handles %s too', (ct) => {
+		expect(checkResponse({ status: 200, contentType: ct, raw: 'data: {"a":1}\n' })).toEqual([]);
+	});
+
+	it('still faults a JSON route that served markup', () => {
+		const f = checkResponse({ status: 200, contentType: 'text/html', body: undefined });
+		expect(f.map((x) => x.check)).toContain('content-type');
+	});
+});

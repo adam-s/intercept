@@ -16,7 +16,7 @@
  */
 
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
-import { DEBUG, withCompleteness } from '@interceptor/shared';
+import { DEBUG, rateLimitedFetch, withCompleteness } from '@interceptor/shared';
 import { decodePricing } from './protobuf';
 
 const STREAMER_URL = 'wss://streamer.finance.yahoo.com/?version=2';
@@ -187,6 +187,202 @@ export const routes: DomainRoute[] = [
 					connection: 'keep-alive',
 				},
 			});
+		},
+	},
+	{
+		method: 'GET',
+		path: '/chart/:symbol',
+		examples: ['/chart/AAPL?range=5d&interval=1d'],
+		upstream: ['query1.finance.yahoo.com/v8/finance/chart/{symbol}'],
+		transport: 'JSON API (XHR)',
+		description: 'Price history. Public — no crumb, no session, no browser.',
+		browserRequired: false,
+		handler: async (c) => {
+			const { symbol } = c.req.param() as Record<string, string>;
+			const url = new URL(c.req.url);
+			const range = url.searchParams.get('range') ?? '5d';
+			const interval = url.searchParams.get('interval') ?? '1d';
+
+			// Direct HTTP, and the reason is narrow: this endpoint answers without a
+			// crumb, a cookie or a session, so there is nothing for the browser to
+			// carry. That is a statement about today, not a guarantee. Anything
+			// issued from the runtime has the runtime's TLS handshake rather than a
+			// browser's, and a site that starts fingerprinting will refuse it while
+			// the same request from inside a page still works. If this route begins
+			// failing without an obvious cause, move it to the browser rung before
+			// looking anywhere else.
+			const res = await rateLimitedFetch(
+				`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`,
+			);
+			if (!res.ok) return c.json({ error: `Chart returned ${res.status}`, symbol }, 502);
+			const body = (await res.json()) as {
+				chart?: { result?: Array<Record<string, unknown>>; error?: unknown };
+			};
+			if (body.chart?.error) return c.json({ error: body.chart.error, symbol }, 502);
+
+			const result = body.chart?.result?.[0];
+			const timestamps = (result?.timestamp as number[] | undefined) ?? [];
+			const quote = (result?.indicators as { quote?: Array<Record<string, number[]>> } | undefined)
+				?.quote?.[0];
+
+			// Zipped into rows rather than passed through as parallel arrays: a caller
+			// that has to index two arrays in step can silently misalign them.
+			const candles = timestamps.map((t, i) => ({
+				time: new Date(t * 1000).toISOString(),
+				open: quote?.open?.[i] ?? null,
+				high: quote?.high?.[i] ?? null,
+				low: quote?.low?.[i] ?? null,
+				close: quote?.close?.[i] ?? null,
+				volume: quote?.volume?.[i] ?? null,
+			}));
+
+			return c.json(
+				withCompleteness({
+					symbol,
+					range,
+					interval,
+					candles,
+					total: candles.length,
+					currency: (result?.meta as { currency?: string } | undefined)?.currency ?? null,
+				}),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/search',
+		examples: ['/search?q=apple'],
+		upstream: ['query1.finance.yahoo.com/v1/finance/search'],
+		transport: 'JSON API (XHR)',
+		description: 'Symbol lookup. Public, and the cheapest way to resolve a name to a ticker.',
+		browserRequired: false,
+		handler: async (c) => {
+			const q = new URL(c.req.url).searchParams.get('q') ?? '';
+			if (!q) return c.json({ error: 'q is required' }, 400);
+			const res = await rateLimitedFetch(
+				`https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}`,
+			);
+			if (!res.ok) return c.json({ error: `Search returned ${res.status}` }, 502);
+			const body = (await res.json()) as {
+				quotes?: Array<Record<string, unknown>>;
+				count?: number;
+			};
+			const quotes = body.quotes ?? [];
+			return c.json(
+				withCompleteness({
+					query: q,
+					quotes: quotes.map((r) => ({
+						symbol: r.symbol,
+						name: r.shortname ?? r.longname,
+						exchange: r.exchDisp,
+						type: r.quoteType,
+					})),
+					// The upstream's own count, kept so the completeness helper can compare
+					// what arrived against what was claimed rather than assuming they match.
+					total: body.count ?? quotes.length,
+				}),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/quote',
+		examples: ['/quote?symbols=AAPL,TSLA'],
+		upstream: [
+			'query1.finance.yahoo.com/v1/test/getcrumb',
+			'query1.finance.yahoo.com/v7/finance/quote',
+		],
+		transport: 'JSON API (XHR)',
+		description: 'Current quotes. Crumb-gated: a token must be harvested from a page first.',
+		handler: async (c, browser) => {
+			const symbols = new URL(c.req.url).searchParams.get('symbols') ?? 'AAPL';
+
+			// The gate this route exists to demonstrate. The crumb is *harvested* — a
+			// value the server hands out to a session and the client copies back — as
+			// distinct from one computed by running the site's code, or one the client
+			// invents. Harvested is the only kind a plain HTTP client can obtain, and
+			// only by holding a session first.
+			// Seating the browser on the site is not the same as holding a session.
+			// The crumb endpoint answers 406 to a page that has merely started
+			// loading and 200 once the session cookies exist, so this waits for the
+			// cookie rather than for a duration — a fixed sleep is a guess that gets
+			// shorter as the machine gets faster.
+			const first = symbols.split(',')[0]?.trim() || 'AAPL';
+			if (!browser.getUrl().includes('finance.yahoo.com')) {
+				await browser.navigate(`https://finance.yahoo.com/quote/${encodeURIComponent(first)}/`);
+			}
+			let established = false;
+			for (let attempt = 0; attempt < 10 && !established; attempt++) {
+				await new Promise((r) => setTimeout(r, 1000));
+				const cookies = (await browser.evaluate(
+					new Function('return document.cookie') as never,
+				)) as string;
+				established = /\bA1S?=/.test(String(cookies ?? ''));
+			}
+			if (!established) {
+				DEBUG('yahoofinance', 'session cookie never appeared; harvesting anyway');
+			}
+			// Fetched from the site's own page, deliberately cross-origin.
+			//
+			// The obvious move is to let the helper reseat the document on the API's
+			// host so the call becomes same-origin. That fails here with 406, and the
+			// reason is worth keeping: reseating discards the `Origin` and `Referer`
+			// the API actually checks. Same-origin is a convenience for CORS, not a
+			// credential — an endpoint that wants to know which page is asking gets a
+			// worse answer once you move the page.
+			//
+			// So the request goes from the page that has the session, across origins,
+			// with credentials. That is also the rung that survives TLS
+			// fingerprinting: a request issued inside the browser carries the
+			// browser's own handshake, where anything issued from the runtime does
+			// not and can be refused on that alone.
+			const crumbRes = (await browser.evaluate(
+				new Function(`return fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
+					credentials: 'include',
+				}).then((r) => r.text().then((t) => ({ status: r.status, body: t })))
+				  .catch((e) => ({ status: 0, body: String(e).slice(0, 120) }))`) as never,
+			)) as { status?: number; body?: string };
+			const crumb = crumbRes?.status === 200 ? String(crumbRes.body ?? '').trim() : '';
+			if (!crumb) {
+				// Reported, not papered over: without the crumb there is no result to
+				// approximate, and an empty quote list would read as "no such symbol".
+				return c.json(
+					{
+						error: 'Could not harvest a crumb',
+						crumbStatus: crumbRes?.status ?? null,
+						sessionEstablished: established,
+						symbols,
+					},
+					502,
+				);
+			}
+
+			const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}&crumb=${encodeURIComponent(crumb)}`;
+			const res = (await browser.evaluate(
+				new Function(`return fetch(${JSON.stringify(url)}, { credentials: 'include' })
+					.then((r) => r.json().then((j) => ({ status: r.status, json: j })))
+					.catch((e) => ({ status: 0, json: { error: String(e).slice(0, 120) } }))`) as never,
+			)) as { status?: number; json?: unknown };
+			if (res?.status !== 200) {
+				return c.json({ error: `Quote returned ${res?.status}`, symbols }, 502);
+			}
+			const body = res.json as { quoteResponse?: { result?: Array<Record<string, unknown>> } };
+			const quotes = body?.quoteResponse?.result ?? [];
+			return c.json(
+				withCompleteness({
+					symbols: symbols.split(','),
+					quotes: quotes.map((q) => ({
+						symbol: q.symbol,
+						price: q.regularMarketPrice,
+						change: q.regularMarketChange,
+						changePercent: q.regularMarketChangePercent,
+						volume: q.regularMarketVolume,
+						marketState: q.marketState,
+					})),
+					total: quotes.length,
+					_gate: 'crumb harvested from a browser session',
+				}),
+			);
 		},
 	},
 ];

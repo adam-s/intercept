@@ -215,11 +215,36 @@ function truncate(s, n) {
 }
 
 /** Every check for one route's response, as a list of findings. Pure. */
-export function checkResponse({ status, contentType, body, baselineShape }) {
+export function checkResponse({ status, contentType, body, raw, baselineShape }) {
 	const findings = [];
 
 	if (status < 200 || status >= 300) {
 		findings.push({ check: 'status', detail: `HTTP ${status}` });
+	}
+
+	// A streaming route is a legitimate shape and its body is not JSON. Judging it
+	// by the JSON rule reported a working live feed as a route serving an error
+	// page — the checker failing to understand a transport rather than the route
+	// failing. It gets its own rule: the framing must be right and at least one
+	// event must have arrived, because an event stream that opens and delivers
+	// nothing is the failure that matters here and it is invisible to a status
+	// check.
+	const isStream = /event-stream|x-ndjson|stream\+json/i.test(contentType ?? '');
+	if (isStream) {
+		// A stream body is never JSON, so `body` is undefined here by design; the
+		// raw text is the only thing that carries the frames.
+		const text = typeof raw === 'string' ? raw : typeof body === 'string' ? body : '';
+		const events = [...text.matchAll(/^event:\s*(\S+)/gm)].map((m) => m[1]);
+		const payloads = [...text.matchAll(/^data:\s*(.+)$/gm)].length;
+		if (!events.length && !payloads) {
+			findings.push({
+				check: 'stream',
+				detail: 'opened but delivered no event — a channel that carries nothing',
+			});
+		} else if (!payloads) {
+			findings.push({ check: 'stream', detail: `events ${events.join(',')} but no data line` });
+		}
+		return findings;
 	}
 
 	const isJson = /json/i.test(contentType ?? '');
@@ -499,6 +524,7 @@ async function main() {
 				status: res.status,
 				contentType: res.contentType,
 				body: res.body,
+				raw: res.raw,
 				// In --record mode the shape check is vacuous by construction, so
 				// skip it rather than assert a value against itself.
 				baselineShape: opts.record ? shape : existing[route],
