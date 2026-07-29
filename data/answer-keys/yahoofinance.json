@@ -24,8 +24,14 @@
 			"endpoints": [
 				"wss://streamer.finance.yahoo.com/"
 			],
-			"note": "Frames are base64-wrapped protobuf. Reading them as text yields noise, so a reader who does not decode concludes the socket carries nothing.",
+			"note": "Frames are base64-wrapped protobuf against a PricingData schema. Neither JSON nor text, so a reader who does not decode concludes the socket carries nothing.",
 			"detectableBy": "observation"
+		}
+	],
+	"gates": [
+		{
+			"name": "crumb + cookie",
+			"note": "The crumb has to be harvested from a page before any query endpoint will answer."
 		}
 	]
 }

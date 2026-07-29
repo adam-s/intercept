@@ -14,7 +14,8 @@
 				"www.reddit.com/svc/shreddit/community-more-posts/{sort}/",
 				"www.reddit.com/svc/shreddit/more-comments/{id}"
 			],
-			"note": "Served as content-type text/vnd.reddit.partial+html \u2014 the body is <shreddit-*> custom elements carrying fields as attributes, not JSON. This is the front end's actual data transport, and a JSON-shaped scan reports the endpoint as a page."
+			"note": "Served as content-type text/vnd.reddit.partial+html \u2014 the body is <shreddit-*> custom elements carrying fields as attributes, not JSON. This is the front end's actual data transport, and a JSON-shaped scan reports the endpoint as a page.",
+			"pagination": "cursor in the more-posts-cursor attribute on <shreddit-post>"
 		},
 		{
 			"transport": "GraphQL",
@@ -22,14 +23,15 @@
 				"www.reddit.com/svc/shreddit/graphql",
 				"gql.reddit.com"
 			],
-			"note": "The front end's own path. Two distinct hosts.",
+			"note": "Two distinct hosts. Our run observed only ExposeVariant (A/B tracking) on the svc host across three page types \u2014 present, but not a content query. gql.reddit.com is unconfirmed by us.",
 			"detectableBy": "observation"
 		},
 		{
 			"transport": "JSON API (XHR)",
 			"endpoints": [
-				"gateway.reddit.com/desktopapi/v1/",
-				"www.reddit.com/{path}.json"
+				"gateway.reddit.com/desktopapi/v1/subreddits/{sub}/posts",
+				"www.reddit.com/{path}.json",
+				"oauth.reddit.com"
 			],
 			"note": "The .json suffix is a documented public API, so wrapping it satisfies the letter of a discovery task while learning nothing about the front end. The gateway host is the internal one.",
 			"detectableBy": "observation"

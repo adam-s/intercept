@@ -4,7 +4,8 @@
 	"sources": [
 		"https://tyrrrz.me/blog/reverse-engineering-youtube-revisited",
 		"https://github.com/zerodytrash/YouTube-Internal-Clients",
-		"https://pypi.org/project/innertube/"
+		"https://pypi.org/project/innertube/",
+		"https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide"
 	],
 	"transports": [
 		{
@@ -17,7 +18,8 @@
 				"www.youtube.com/youtubei/v1/guide",
 				"www.youtube.com/youtubei/v1/updated_metadata",
 				"www.youtube.com/youtubei/v1/live_chat/get_live_chat",
-				"www.youtube.com/api/timedtext"
+				"www.youtube.com/youtubei/v1/live_chat/get_live_chat_replay",
+				"www.youtube.com/youtubei/v1/reel/reel_item_watch"
 			],
 			"note": "updated_metadata polls and live_chat long-polls. Both are ordinary POSTs, so a table with no long-poll row records them as plain endpoints and reports the site as having no realtime transport.",
 			"encoding": "Caption tracks are a signed-URL payload, not a distinct transport.",
@@ -44,7 +46,40 @@
 	"axes": [
 		{
 			"axis": "client identity",
-			"note": "The same endpoint returns different data for different context.client values. Varying the client is a discovery dimension distinct from varying the URL, and no amount of endpoint enumeration finds it."
+			"values": [
+				"web",
+				"web_safari",
+				"web_embedded",
+				"web_music",
+				"web_creator",
+				"mweb",
+				"ios",
+				"android",
+				"android_vr",
+				"tv",
+				"tv_simply",
+				"tv_embedded"
+			],
+			"note": "Twelve clients, same URL, different data and different requirements per client. This is a discovery dimension, not a parameter \u2014 no amount of endpoint enumeration finds it, because the path is identical and only context.client differs."
+		}
+	],
+	"gates": [
+		{
+			"name": "proof-of-origin token",
+			"contexts": [
+				"GVS (the media itself)",
+				"Player (format URLs)",
+				"Subs (subtitles)"
+			],
+			"note": "Required per client per context, not globally: web_safari HLS needs none, web does, android_vr has no restriction, tv is DRM throughout. Missing where required gives HTTP 403 or an IP/account block."
+		},
+		{
+			"name": "visitorData",
+			"note": "From the VISITOR_INFO1_LIVE cookie. A value minted by a bare POST returns UNPLAYABLE \u2014 it has to come from a browser that navigated the specific watch page."
+		},
+		{
+			"name": "signature / n-sig",
+			"note": "Format URLs carry a signature descrambled by running a function out of the player JS, keyed by player version as signature_timestamp@hash. Computation, not extraction \u2014 neither a header to copy nor an endpoint to call."
 		}
 	]
 }

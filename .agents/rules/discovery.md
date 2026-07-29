@@ -304,6 +304,28 @@ than a JSON blob, a long-poll that is indistinguishable from a slow GET, an
 the page cannot see — a worker, a service worker, an iframe answering over
 postMessage.
 
+**A transport table answers *which*, never *as whom*.** The same endpoint can
+return different data to different client identities — a header, a client
+string, an app id, a build number the front end sends about itself. Nothing in
+a URL shows it and no amount of endpoint enumeration finds it, because the path
+is identical and only the identity differs. When traffic carries a self-
+description, vary it and compare: that is a second axis, and a run that explored
+only paths explored half the surface.
+
+**Some access values are computed, not carried.** A signature descrambled by
+running the page's own player code, a token minted by a widget, a hash derived
+from a build artefact — none is a header to copy or an endpoint to call, and no
+amount of replaying captured traffic produces one. These are the cases the
+browser is for: run the page's own code and take the result. A value you cannot
+obtain by replay and cannot compute is a reported give-up, not a gap to paper
+over.
+
+**A constant borrowed from a running site expires.** Persisted-query hashes,
+client ids, schema descriptors and player versions are all values the site may
+rotate without notice. Where code depends on one, say so at that line — a
+constant that reads as permanent gets debugged as a logic error when it turns
+over.
+
 **Do not write this table from memory — derive it.** The capture layer patches
 every browser egress primitive and reduces what it saw into the table directly,
 so each ✓ carries the call shape that produced it. Reasoning about traffic
