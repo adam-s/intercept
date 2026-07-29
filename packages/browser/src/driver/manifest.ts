@@ -220,7 +220,15 @@ export function buildManifest(
 		add(e.kind, e.method, e.url, { body: e.body, initiator: e.initiator, at: e.t });
 	}
 	for (const w of wire) {
-		add('wire', w.method, w.url, { shape: w.body === undefined ? undefined : shapeOfBody(w.body) });
+		// A string body keeps a short prefix rather than being reduced to the word
+		// "string": for a script response the first characters *are* the verdict.
+		const shape =
+			w.body === undefined
+				? undefined
+				: typeof w.body === 'string'
+					? w.body.slice(0, 120)
+					: shapeOfBody(w.body);
+		add('wire', w.method, w.url, { shape });
 	}
 
 	// Frequent first, but a shape seen once still has a row — a once-only call is
@@ -390,8 +398,15 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 	// site that builds the element some other way slips past it — a live run found
 	// a suggest endpoint by hand after the sweep filed it as an ordinary GET. A
 	// callback parameter is the transport regardless of how the element was made.
-	const jsonp = rows.filter((r) =>
-		r.params.some((k) => /^(?:callback|jsonp|jsonpcallback|cb)$/i.test(k)),
+	// Two tells, because the strict form has only one of them. A callback
+	// parameter names the wrapper in the request; a response that is a bare
+	// function invocation *is* the wrapper. A live check found a suggest endpoint
+	// with no callback parameter at all, answering `window.google.ac.h([...])` —
+	// nothing in that request distinguishes it from any other script.
+	const jsonp = rows.filter(
+		(r) =>
+			r.params.some((k) => /^(?:callback|jsonp|jsonpcallback|cb)$/i.test(k)) ||
+			(r.shape ? /^"?[\w$]+(?:\.[\w$]+)*\(/.test(String(r.shape).trim()) : false),
 	);
 	if (jsonp.length) {
 		const row = out.find((v) => v.transport === 'JSONP');

@@ -28,6 +28,8 @@ prompts/.app-spec.md
 # Domain plugins (created by agents, only boardshop is the reference example)
 domains/*/
 !domains/boardshop/
+!domains/youtube/
+!domains/yahoofinance/
 !domains/chatgpt/
 !domains/nvidia-build
 !domains/build-nvidia

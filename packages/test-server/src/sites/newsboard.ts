@@ -307,6 +307,69 @@ export function createNewsboardSite(): Hono {
 		c.json({ page: Number(c.req.param('n')), stories: STORIES.slice(0, 1), total: 3 }),
 	);
 
+	/**
+	 * A media element whose bytes are never handed over as a URL.
+	 *
+	 * This is the shape a large video site actually uses: the page is served a
+	 * description of the available formats — an id, a codec, a byte length — and
+	 * no URL on any of them, because the media is negotiated separately. There is
+	 * nothing to fetch and nothing to replay, so the only honest way to consume it
+	 * is to drive the player that can. A route built against this page has to
+	 * report that, not return an empty list.
+	 */
+	app.get('/player', (c) =>
+		c.html(`<!doctype html><html><head><meta charset="utf-8"><title>newsboard player</title></head>
+<body>
+<video id="v" width="320" height="180" muted></video>
+<script>
+// Formats described, not addressed — exactly what a modern player response looks like.
+window.playerResponse = {"playabilityStatus":{"status":"OK"},"streamingData":{"expiresInSeconds":"21540","adaptiveFormats":[{"itag":137,"mimeType":"video/mp4; codecs=avc1.640028","qualityLabel":"1080p","contentLength":"1048576"},{"itag":140,"mimeType":"audio/mp4; codecs=mp4a.40.2","audioQuality":"AUDIO_QUALITY_MEDIUM","contentLength":"262144"}]}};
+// A synthetic source so the element is a real, controllable player: seekable,
+// pausable, with a duration — the surface a consumer of a stream actually wants.
+const canvas = document.createElement('canvas');
+canvas.width = 320; canvas.height = 180;
+const ctx = canvas.getContext('2d');
+let frame = 0;
+setInterval(() => { ctx.fillStyle = 'hsl(' + (frame++ % 360) + ',60%,50%)'; ctx.fillRect(0,0,320,180); }, 100);
+const stream = canvas.captureStream(10);
+const rec = new MediaRecorder(stream);
+const chunks = [];
+rec.ondataavailable = (e) => chunks.push(e.data);
+rec.onstop = () => { document.getElementById('v').src = URL.createObjectURL(new Blob(chunks)); };
+rec.start(); setTimeout(() => rec.stop(), 2000);
+</script>
+</body></html>`),
+	);
+
+	/**
+	 * A price stream in the shape the real one uses: a JSON envelope whose payload
+	 * is base64-wrapped binary. Read as text it is noise, which is how a socket
+	 * carrying the most valuable data on a site comes to be recorded as empty.
+	 */
+	app.get('/pricing/frames', (c) => {
+		// Hand-built protobuf: field 1 (string id), field 2 (double price).
+		const frames = [
+			{ id: 'DECK-001', price: 71.54 },
+			{ id: 'DECK-005', price: 46.49 },
+		].map(({ id, price }) => {
+			const idBuf = Buffer.from(id, 'utf8');
+			const buf = Buffer.alloc(2 + idBuf.length + 9);
+			let o = 0;
+			buf[o++] = 0x0a; // field 1, length-delimited
+			buf[o++] = idBuf.length;
+			idBuf.copy(buf, o);
+			o += idBuf.length;
+			buf[o++] = 0x11; // field 2, 64-bit
+			buf.writeDoubleLE(price, o);
+			return { type: 'pricing', message: buf.toString('base64') };
+		});
+		return c.json({
+			frames,
+			encoding: 'base64 protobuf',
+			_note: 'Decode before deciding it is empty.',
+		});
+	});
+
 	app.post('/collect', (c) => c.body(null, 204));
 	app.get('/px.gif', (c) => c.body(null, 204));
 

@@ -2406,4 +2406,154 @@ export const routes: DomainRoute[] = [
 			});
 		},
 	},
+	{
+		method: 'GET',
+		path: '/player-example/:videoId',
+		examples: ['/player-example/demo'],
+		upstream: ['localhost:4444/sites/newsboard/player'],
+		transport: 'HLS/Media',
+		description:
+			'Media a route cannot fetch: formats described without URLs, so the player is the API.',
+		browserRequired: true,
+		handler: async (c, browser) => {
+			// The shape a large video site actually serves: a list of formats with an
+			// id, a codec and a byte length, and no URL on any of them, because the
+			// media is negotiated separately. There is nothing to fetch and nothing
+			// to replay. A route that returned the empty URL list would read as "this
+			// video has no formats", which is a different and wrong fact — so the
+			// give-up is reported, and control of the real player is offered instead.
+			await browser.navigate(`${NEWSBOARD_URL}/player`);
+			await new Promise((r) => setTimeout(r, 3500));
+
+			// Read out of the DOM, not off the page's globals. `evaluate` runs in an
+			// isolated world that shares the DOM and not the globals, so reaching for
+			// `window.playerResponse` returns undefined with nothing thrown — the
+			// element resolves, the data does not, and the page appears to have no
+			// formats. The markup is common ground, so the script tag can be read
+			// from either side. That is also more robust than the bridge here: no
+			// injection, so a content-security policy cannot refuse it.
+			const info = (await browser.evaluate(
+				new Function(`return (() => {
+					const m = document.documentElement.innerHTML.match(/window\\.playerResponse\\s*=\\s*(\\{[\\s\\S]*?\\});/);
+					let pr = {};
+					if (m) { try { pr = JSON.parse(m[1]); } catch (e) { pr = {}; } }
+					const fmts = (pr.streamingData || {}).adaptiveFormats || [];
+					const v = document.querySelector('video');
+					return {
+						playability: (pr.playabilityStatus || {}).status || null,
+						formats: fmts.map((f) => ({
+							itag: f.itag, mimeType: f.mimeType,
+							quality: f.qualityLabel || f.audioQuality,
+							contentLength: f.contentLength,
+							hasUrl: !!f.url, hasCipher: !!f.signatureCipher,
+						})),
+						player: v ? { duration: +(v.duration || 0).toFixed(2), paused: v.paused, readyState: v.readyState } : null,
+					};
+				})()`) as never,
+			)) as { formats?: Array<{ hasUrl?: boolean }>; player?: unknown; playability?: string };
+
+			const fetchable = (info.formats ?? []).filter((f) => f.hasUrl).length;
+			return c.json({
+				videoId: (c.req.param() as Record<string, string>).videoId,
+				playability: info.playability ?? null,
+				formats: info.formats ?? [],
+				directlyFetchable: fetchable,
+				player: info.player ?? null,
+				_pattern: 'described-not-addressed',
+				_note:
+					fetchable > 0
+						? 'Some formats carry a URL and can be fetched.'
+						: 'No format carries a URL. The media cannot be fetched or replayed — drive the player instead, which is what the control route demonstrates.',
+			});
+		},
+	},
+	{
+		method: 'POST',
+		path: '/player-example/:videoId/control',
+		examples: ['/player-example/demo/control'],
+		upstream: ['localhost:4444/sites/newsboard/player'],
+		transport: 'HLS/Media',
+		description: 'Play, pause and seek the real player, then report the state it reached.',
+		browserRequired: true,
+		handler: async (c, browser) => {
+			// Named actions rather than a script from the request body: a caller may
+			// drive playback and may not reach past it into the page.
+			const body = (await c.req.json().catch(() => ({}))) as { action?: string; seconds?: number };
+			const action = String(body.action ?? 'state');
+			const scripts: Record<string, string> = {
+				play: `document.querySelector('video').play()`,
+				pause: `document.querySelector('video').pause()`,
+				seek: `document.querySelector('video').currentTime = ${Number(body.seconds ?? 0)}`,
+				state: '0',
+			};
+			if (!(action in scripts)) {
+				return c.json({ error: `Unknown action "${action}"`, allowed: Object.keys(scripts) }, 400);
+			}
+
+			if (!browser.getUrl().includes('/newsboard/player')) {
+				await browser.navigate(`${NEWSBOARD_URL}/player`);
+				await new Promise((r) => setTimeout(r, 3500));
+			}
+			await browser.evaluate(new Function(`return ${scripts[action]}`) as never);
+			// Play and seek take effect asynchronously; reading before the player has
+			// moved would report a state that never existed.
+			await new Promise((r) => setTimeout(r, action === 'state' ? 0 : 900));
+
+			const state = await browser.evaluate(
+				new Function(`return (() => { const v = document.querySelector('video');
+					return v ? { paused: v.paused, currentTime: +v.currentTime.toFixed(2),
+						duration: +(v.duration || 0).toFixed(2), readyState: v.readyState } : null; })()`) as never,
+			);
+			return c.json({ action, ...(state as object), _pattern: 'drive-the-player' });
+		},
+	},
+	{
+		method: 'GET',
+		path: '/pricing-stream-example',
+		examples: ['/pricing-stream-example'],
+		upstream: ['localhost:4444/sites/newsboard/pricing/frames'],
+		transport: 'Encoded/Binary',
+		description: 'Frames whose payload is base64-wrapped binary — noise until decoded.',
+		browserRequired: false,
+		handler: async (c) => {
+			// The shape a real price socket uses. Read as text these frames are
+			// gibberish, which is how a stream carrying the most valuable data on a
+			// site gets recorded as empty. Decoding is the whole job.
+			const res = await rateLimitedFetch(`${NEWSBOARD_URL}/pricing/frames`);
+			if (!res.ok) return c.json({ error: `Frames returned ${res.status}` }, 502);
+			const body = (await res.json()) as { frames?: Array<{ message?: string }> };
+
+			const decoded = (body.frames ?? []).map((f) => {
+				const buf = Buffer.from(String(f.message ?? ''), 'base64');
+				const out: Record<string, unknown> = {};
+				let i = 0;
+				try {
+					while (i < buf.length) {
+						const key = buf[i++];
+						const field = key >> 3;
+						const wire = key & 7;
+						if (wire === 2) {
+							const len = buf[i++];
+							out[field === 1 ? 'id' : `field${field}`] = buf.subarray(i, i + len).toString('utf8');
+							i += len;
+						} else if (wire === 1) {
+							out[field === 2 ? 'price' : `field${field}`] = buf.readDoubleLE(i);
+							i += 8;
+						} else break;
+					}
+				} catch {
+					// A truncated frame yields what decoded before it ran out.
+				}
+				return out;
+			});
+
+			return c.json(
+				withCompleteness({
+					frames: decoded,
+					total: decoded.length,
+					_pattern: 'decode-before-judging',
+				}),
+			);
+		},
+	},
 ];

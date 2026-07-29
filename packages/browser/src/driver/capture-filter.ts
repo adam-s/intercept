@@ -68,6 +68,24 @@ export function isTelemetry(url: string): boolean {
 	return TELEMETRY_HOSTS.some((host) => url.includes(host));
 }
 
+/**
+ * True when a script response is worth reading rather than skipping.
+ *
+ * Bundles are page furniture and there are hundreds of them. A script carrying
+ * a query string is usually not furniture though — it is a call, and classic
+ * JSONP is exactly that: a `<script src>` whose response is a bare function
+ * invocation wrapping the data. The strictest form has no callback parameter at
+ * all, just a hardcoded global, so nothing in the request distinguishes it and
+ * only the body does. Skipping every script meant that transport could not be
+ * seen at all.
+ */
+export function isCandidateScript(url: string): boolean {
+	if (!url.includes('?')) return false;
+	// Cache-busting on a real bundle: a hashed filename with a version param is
+	// still furniture.
+	return !/\.(?:js|mjs)\?(?:v|ver|version|hash|t|cb)=[\w.-]+$/i.test(url);
+}
+
 /** True when a content type carries API data rather than page furniture. */
 export function isDataContentType(contentType: string): boolean {
 	const ct = contentType.toLowerCase();
@@ -89,6 +107,13 @@ export function captureDecision(input: {
 	if (isTelemetry(input.url)) return { capture: false, reason: 'telemetry host' };
 
 	if (input.resourceType && !DATA_RESOURCE_TYPES.includes(input.resourceType as 'xhr' | 'fetch')) {
+		// A script carrying a query string is a call, not furniture. JSONP in its
+		// strictest form has no callback parameter — the response is a bare
+		// invocation of a hardcoded global — so nothing in the request marks it and
+		// skipping every script made the transport undetectable.
+		if (input.resourceType === 'script' && isCandidateScript(input.url)) {
+			return { capture: true };
+		}
 		return { capture: false, reason: `resource type "${input.resourceType}"` };
 	}
 	if (!isDataContentType(input.contentType ?? '')) {

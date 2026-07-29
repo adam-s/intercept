@@ -152,5 +152,11 @@
 	],
 	"GET /api/boardshop/polling-example": [
 		"{_pattern:string,gapsMs:[number],rounds:number,updates:[{id:number,points:number}]}"
+	],
+	"GET /api/boardshop/player-example/demo": [
+		"{_note:string,_pattern:string,directlyFetchable:number,formats:[{contentLength:string,hasCipher:boolean,hasUrl:boolean,itag:number,mimeType:string,quality:string}],playability:string,player:{duration:number,paused:boolean,readyState:number},videoId:string}"
+	],
+	"GET /api/boardshop/pricing-stream-example": [
+		"{_pattern:string,frames:[{id:string,price:number}],total:number}"
 	]
 }
