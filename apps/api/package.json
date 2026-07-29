@@ -16,7 +16,9 @@
 		"hono": "^4.12.8",
 		"ws": "^8.19.0",
 		"@interceptor/domain-youtube": "workspace:*",
-		"@interceptor/domain-yahoofinance": "workspace:*"
+		"@interceptor/domain-yahoofinance": "workspace:*",
+		"@interceptor/domain-reddit": "workspace:*",
+		"@interceptor/domain-hackernews": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "25.5.0",

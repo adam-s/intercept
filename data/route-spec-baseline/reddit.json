@@ -1,0 +1,17 @@
+{
+	"GET /api/reddit/r/AskReddit": [
+		"{hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string,subreddit:string}"
+	],
+	"GET /api/reddit/r/interesting": [
+		"{hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string,subreddit:string}"
+	],
+	"GET /api/reddit/popular": [
+		"{hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string}"
+	],
+	"GET /api/reddit/post/interesting/1v9qi7a": [
+		"{comments:[{author:string,body:string,createdAt:string,depth:number,id:string,permalink:string,score:number}],hasMore:boolean,moreCursor:string,post:{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string},returned:number,subreddit:string}"
+	],
+	"GET /api/reddit/video/m0vorh4e41gh1": [
+		"{hasMore:boolean,id:string,masterUrl:string,returned:number,variants:[{bandwidth:number,codecs:string,resolution:string,uri:string}]}"
+	]
+}

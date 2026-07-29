@@ -60,6 +60,12 @@ importers:
       '@interceptor/domain-boardshop':
         specifier: workspace:*
         version: link:../../domains/boardshop
+      '@interceptor/domain-hackernews':
+        specifier: workspace:*
+        version: link:../../domains/hackernews
+      '@interceptor/domain-reddit':
+        specifier: workspace:*
+        version: link:../../domains/reddit
       '@interceptor/domain-yahoofinance':
         specifier: workspace:*
         version: link:../../domains/yahoofinance
@@ -195,6 +201,44 @@ importers:
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
+  domains/hackernews:
+    dependencies:
+      '@interceptor/browser':
+        specifier: workspace:*
+        version: link:../../packages/browser
+      '@interceptor/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      cheerio:
+        specifier: ^1.2.0
+        version: 1.2.0
+    devDependencies:
+      '@types/node':
+        specifier: 25.5.0
+        version: 25.5.0
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
+  domains/reddit:
+    dependencies:
+      '@interceptor/browser':
+        specifier: workspace:*
+        version: link:../../packages/browser
+      '@interceptor/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      cheerio:
+        specifier: ^1.2.0
+        version: 1.2.0
+    devDependencies:
+      '@types/node':
+        specifier: 25.5.0
+        version: 25.5.0
       typescript:
         specifier: 5.9.3
         version: 5.9.3

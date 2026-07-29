@@ -29,6 +29,8 @@ prompts/.app-spec.md
 domains/*/
 !domains/boardshop/
 !domains/youtube/
+!domains/reddit/
+!domains/hackernews/
 !domains/yahoofinance/
 !domains/chatgpt/
 !domains/nvidia-build
