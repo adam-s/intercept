@@ -423,7 +423,27 @@ export function undeclared(routes = []) {
 }
 
 export function probeTargets(routes = [], examples = []) {
-	const exampleTargets = examples.filter((e) => e.startsWith('GET ')).map((e) => e.slice(4));
+	// Every declared example is probed, whatever its verb.
+	//
+	// Filtering to GET left one route per domain permanently unchecked — a player
+	// control, a comment page, a fixture — each of which declares a concrete
+	// example and answers 200 with real data. "A route nothing calls is not a
+	// route this tier has checked" applied to them as much as to any other, and
+	// reporting them as unprobed forever is a gap, not a policy.
+	//
+	// Declaring an example IS the safety assertion. An example is required to be a
+	// real, callable invocation, so writing one for a non-GET route is the author
+	// saying this call is safe to make unattended. A route that changes state must
+	// therefore declare no example — and then it shows up as unprobed, which is
+	// the honest outcome rather than an accident.
+	const exampleTargets = examples
+		.map((e) => {
+			const sp = e.indexOf(' ');
+			return sp === -1
+				? { method: 'GET', path: e }
+				: { method: e.slice(0, sp), path: e.slice(sp + 1) };
+		})
+		.filter((t) => t.path.startsWith('/'));
 
 	// Coverage is a claim about a specific route, so it is matched on method AND
 	// path. Stripping the method first made every example cover every same-stem
@@ -436,16 +456,22 @@ export function probeTargets(routes = [], examples = []) {
 	// exists to prevent, reintroduced one line lower down.
 	const covered = new Set();
 	for (const target of exampleTargets) {
-		const base = target.split('?')[0];
+		const base = target.path.split('?')[0];
 		for (const route of routes) {
-			if (!route.startsWith('GET ')) continue;
-			const path = route.slice(4);
+			// Method must agree. See the note above: matching on path alone let one
+			// verb's example vouch for another's route.
+			if (!route.startsWith(`${target.method} `)) continue;
+			const path = route.slice(target.method.length + 1);
 			const stem = path.split('/:')[0].split('/*')[0];
 			if (base === path || base.startsWith(`${stem}/`) || base === stem) covered.add(route);
 		}
 	}
 
-	const bare = routes.filter((r) => isProbeable(r) && !covered.has(r)).map((r) => r.slice(4));
+	const bare = routes
+		.filter((r) => isProbeable(r) && !covered.has(r))
+		.map((r) => ({ method: 'GET', path: r.slice(4) }));
+	// What remains is genuinely uncheckable: a parameterised or non-GET route that
+	// declared no example, so there is no invocation to make.
 	const skipped = routes.filter((r) => !covered.has(r) && !isProbeable(r));
 
 	return { targets: [...exampleTargets, ...bare], skipped };
@@ -461,11 +487,14 @@ const HELP = `route-spec — assert every domain proxy route against its contrac
 
 Read the header docblock in this file for the bounds this run will respect.`;
 
-async function fetchJson(url, timeout) {
+async function fetchJson(url, timeout, method = 'GET') {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeout);
 	try {
-		const res = await fetch(url, { signal: controller.signal });
+		// No body is sent. A declared example is a complete invocation on its own,
+		// and inventing a payload here would be asserting against a request no
+		// route author wrote down.
+		const res = await fetch(url, { method, signal: controller.signal });
 		const contentType = res.headers.get('content-type');
 		const text = await res.text();
 		let body;
@@ -590,7 +619,7 @@ async function main() {
 		skippedUnprobeable += skipped.length;
 
 		for (const target of targets) {
-			const route = `GET ${target}`;
+			const route = `${target.method} ${target.path}`;
 			if (probed >= opts.budget) {
 				skippedForBudget++;
 				continue;
@@ -600,13 +629,13 @@ async function main() {
 				break outer;
 			}
 
-			const path = target;
+			const path = target.path;
 			probed++;
 
 			const t0 = Date.now();
 			let res;
 			try {
-				res = await fetchJson(`${base}${path}`, opts.timeout);
+				res = await fetchJson(`${base}${path}`, opts.timeout, target.method);
 			} catch (err) {
 				results.push({
 					domain: domain.name,

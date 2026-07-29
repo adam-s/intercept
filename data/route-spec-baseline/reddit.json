@@ -23,6 +23,9 @@
 	"GET /api/reddit/post/aww/1v96p9o?limit=20": [
 		"{comments:[{author:string,body:string,createdUtc:number,depth:number,id:string,moreChildrenCount:null,score:number}],hasMore:boolean,indicatedTotal:number,post:{author:string,createdUtc:number,hlsUrl:string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string},returned:number,subreddit:string}"
 	],
+	"POST /api/reddit/post/aww/1v96p9o/comments/more": [
+		"{comments:[{author:string,body:string,createdAt:string,depth:number,id:string,permalink:string,score:number}],hasMore:boolean,moreCursor:null,returned:number,subreddit:string}"
+	],
 	"GET /api/reddit/json/r/aww?limit=25": [
 		"{dist:number,hasMore:boolean,items:[{author:string,createdUtc:number,hlsUrl:null,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string}],nextAfter:string,returned:number,sort:string,subreddit:string}"
 	],

@@ -156,6 +156,9 @@
 	"GET /api/boardshop/player-example/demo": [
 		"{_note:string,_pattern:string,directlyFetchable:number,formats:[{contentLength:string,hasCipher:boolean,hasUrl:boolean,itag:number,mimeType:string,quality:string}],playability:string,player:{duration:number,paused:boolean,readyState:number},videoId:string}"
 	],
+	"POST /api/boardshop/player-example/demo/control": [
+		"{_pattern:string,action:string,currentTime:number,duration:number,paused:boolean,readyState:number}"
+	],
 	"GET /api/boardshop/pricing-stream-example": [
 		"{_pattern:string,frames:[{id:string,price:number}],total:number}"
 	]

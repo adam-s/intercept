@@ -2,6 +2,9 @@
 	"GET /api/youtube/watch/jNQXAC9IVRw/state": [
 		"{bufferedTo:number,currentTime:number,duration:number,ended:boolean,height:number,muted:boolean,paused:boolean,playbackRate:number,readyState:number,video:boolean,videoId:string,volume:number,width:number}"
 	],
+	"POST /api/youtube/watch/jNQXAC9IVRw/control": [
+		"{action:string,bufferedTo:number,currentTime:number,duration:number,ended:boolean,height:number,muted:boolean,paused:boolean,playbackRate:number,readyState:number,video:boolean,videoId:string,volume:number,width:number}"
+	],
 	"GET /api/youtube/watch/jNQXAC9IVRw/formats": [
 		"{_note:string,directlyFetchable:number,expiresInSeconds:string,formats:[{hasCipher:boolean,hasUrl:boolean,itag:number,mimeType:string,quality:string}],playability:string,videoId:string}",
 		"{_note:string,directlyFetchable:number,expiresInSeconds:string,formats:[{contentLength?:string,hasCipher:boolean,hasUrl:boolean,itag:number,mimeType:string,quality:string}],playability:string,videoId:string}"

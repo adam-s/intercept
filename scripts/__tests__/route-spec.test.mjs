@@ -209,7 +209,7 @@ describe('probeTargets', () => {
 
 	it('probes bare paths when no examples are declared', () => {
 		const { targets, skipped } = probeTargets(routes, []);
-		expect(targets).toEqual(['/api/y/search', '/api/y/stream']);
+		expect(targets.map((t) => t.path)).toEqual(['/api/y/search', '/api/y/stream']);
 		// The parameterized GET and the POST are both uncallable as declared.
 		expect(skipped).toEqual(['GET /api/y/chart/:symbol', 'POST /api/y/order']);
 	});
@@ -221,14 +221,14 @@ describe('probeTargets', () => {
 			'GET /api/y/chart/MSFT?range=5d',
 			'GET /api/y/search?q=tesla',
 		]);
-		expect(targets).toContain('/api/y/chart/MSFT?range=5d');
-		expect(targets).toContain('/api/y/search?q=tesla');
+		expect(targets.map((t) => t.path)).toContain('/api/y/chart/MSFT?range=5d');
+		expect(targets.map((t) => t.path)).toContain('/api/y/search?q=tesla');
 		expect(skipped).toEqual(['POST /api/y/order']);
 	});
 
 	it('does not also probe a route bare once an example covers it', () => {
 		const { targets } = probeTargets(routes, ['GET /api/y/search?q=tesla']);
-		expect(targets).not.toContain('/api/y/search');
+		expect(targets.map((t) => t.path)).not.toContain('/api/y/search');
 	});
 
 	it('probes every example when a route declares several', () => {
@@ -236,12 +236,17 @@ describe('probeTargets', () => {
 			['GET /api/y/page/:n'],
 			['GET /api/y/page/1', 'GET /api/y/page/2'],
 		);
-		expect(targets).toEqual(['/api/y/page/1', '/api/y/page/2']);
+		expect(targets.map((t) => t.path)).toEqual(['/api/y/page/1', '/api/y/page/2']);
 	});
 
-	it('ignores non-GET examples', () => {
-		const { targets } = probeTargets(routes, ['POST /api/y/order?x=1']);
-		expect(targets).not.toContain('/api/y/order?x=1');
+	// Superseded deliberately: this used to assert that non-GET examples were
+	// ignored, which left one route per domain permanently unchecked. A declared
+	// example is now probed whatever its verb — see the group at the end of this
+	// file for why declaring one is the safety assertion.
+	it('probes a non-GET example rather than ignoring it', () => {
+		const { targets, skipped } = probeTargets(routes, ['POST /api/y/order?x=1']);
+		expect(targets).toContainEqual({ method: 'POST', path: '/api/y/order?x=1' });
+		expect(skipped).not.toContain('POST /api/y/order');
 	});
 
 	it('returns nothing for a domain with no routes', () => {
@@ -331,7 +336,7 @@ describe('coverage is a claim about one route, not one path', () => {
 		const routes = ['GET /api/x/post/:sub/:id'];
 		const examples = ['GET /api/x/post/aww/1v96p9o'];
 		const { targets, skipped } = probeTargets(routes, examples);
-		expect(targets).toEqual(['/api/x/post/aww/1v96p9o']);
+		expect(targets).toEqual([{ method: 'GET', path: '/api/x/post/aww/1v96p9o' }]);
 		expect(skipped).toEqual([]);
 	});
 
@@ -476,5 +481,39 @@ describe('a failing response never becomes the expected shape', () => {
 
 	it.each([301, 400, 403, 404, 429, 500, 502, 503])('refuses HTTP %i', (status) => {
 		expect(isRecordableStatus(status)).toBe(false);
+	});
+});
+
+describe('a declared example is probed whatever its verb', () => {
+	/**
+	 * Filtering to GET left one route per domain permanently unprobed — a player
+	 * control, a comment page, a fixture — each of which declares a concrete
+	 * example and answers 200 with real data. "A route nothing calls is not a
+	 * route this tier has checked" applied to those too.
+	 *
+	 * Declaring the example is the safety assertion: an example must be a real
+	 * callable invocation, so writing one for a non-GET route says this call is
+	 * safe unattended. A state-changing route declares none, and then correctly
+	 * reports as unprobed.
+	 */
+	it('probes a POST route that declares a POST example', () => {
+		const routes = ['POST /api/x/player/:id/control'];
+		const examples = ['POST /api/x/player/demo/control'];
+		const { targets, skipped } = probeTargets(routes, examples);
+		expect(targets).toEqual([{ method: 'POST', path: '/api/x/player/demo/control' }]);
+		expect(skipped).toEqual([]);
+	});
+
+	it('still reports a non-GET route that declares nothing', () => {
+		const { targets, skipped } = probeTargets(['DELETE /api/x/thing/:id'], []);
+		expect(targets).toEqual([]);
+		expect(skipped).toEqual(['DELETE /api/x/thing/:id']);
+	});
+
+	// The method-agreement rule from the fix above must survive this change.
+	it('does not let a POST example vouch for a same-stem GET route', () => {
+		const routes = ['GET /api/x/player/:id', 'POST /api/x/player/:id/control'];
+		const { skipped } = probeTargets(routes, ['POST /api/x/player/demo/control']);
+		expect(skipped).toContain('GET /api/x/player/:id');
 	});
 });
