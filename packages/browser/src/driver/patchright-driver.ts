@@ -12,6 +12,7 @@
  * @module browser/driver/patchright-driver
  */
 
+import { platform } from 'node:os';
 import { DEBUG } from '@interceptor/shared';
 import { startTrafficCapture } from './traffic-capture.js';
 import type {
@@ -44,6 +45,69 @@ const CAPABILITIES: DriverCapabilities = {
  */
 export function stripHeadlessMarker(userAgent: string): string {
 	return userAgent.replace(/HeadlessChrome/g, 'Chrome');
+}
+
+/**
+ * Chromium flags that remove the standard automation tells.
+ *
+ * Verified 2026-07-29 against live Twitch and YouTube, which both refused the
+ * previous configuration and both render fully under this one. Matched to the
+ * newest working implementation across these repos
+ * (~/Projects/job-hunter-video/scripts/lib/patchright.mjs).
+ */
+export const HARDENED_ARGS = [
+	'--disable-infobars',
+	'--disable-blink-features=AutomationControlled',
+	'--disable-background-timer-throttling',
+	'--disable-backgrounding-occluded-windows',
+	'--disable-renderer-backgrounding',
+	'--no-first-run',
+	'--no-default-browser-check',
+];
+
+/**
+ * Full launch args for a run, including the platform-conditional ones. Pure, so
+ * a test pins the combination without launching anything.
+ *
+ * Headless macOS forces ANGLE/Metal because the headless default reports a
+ * different WebGL renderer than the same machine reports headed, and that
+ * mismatch is itself the signal. Measured: with the pin the renderer reads
+ * "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Pro)" in both modes.
+ */
+export function buildLaunchArgs(
+	headless: boolean,
+	extra: string[] = [],
+	hostPlatform: string = platform(),
+): string[] {
+	return [
+		...HARDENED_ARGS,
+		...(headless && hostPlatform === 'darwin' ? ['--use-angle=metal'] : []),
+		...extra,
+	];
+}
+
+/**
+ * Client-hint metadata matching a de-headlessed user agent.
+ *
+ * Setting `userAgent` alone is not enough: `navigator.userAgentData` is read
+ * independently of the UA string and still reports the headless brand list, so
+ * a stack that rewrites only the string advertises headless to anything that
+ * looks at the hints. Both have to move together.
+ */
+export function headedUserAgentMetadata(userAgent: string) {
+	const major = userAgent.split('Chrome/')[1]?.split('.')[0] ?? '145';
+	return {
+		platform: 'macOS',
+		platformVersion: '15.0',
+		architecture: 'arm',
+		model: '',
+		mobile: false,
+		brands: [
+			{ brand: 'Google Chrome', version: major },
+			{ brand: 'Chromium', version: major },
+			{ brand: 'Not)A;Brand', version: '24' },
+		],
+	};
 }
 
 /**
@@ -124,19 +188,26 @@ export const patchrightDriver: BrowserDriver = {
 			`launching patchright (headless=${headless}, profile=${profileDir ?? 'ephemeral'})`,
 		);
 
+		const ua = headless ? await headedUserAgent(chromium) : null;
+
 		// An empty userDataDir gives Chromium a throwaway profile, so one call
 		// covers both the persistent and ephemeral cases.
 		const context = await chromium.launchPersistentContext(profileDir ?? '', {
 			headless,
+			// Patchright's stealth patches live in its OWN bundled binary, which is
+			// what 'chromium' selects. 'chrome' launches the system Google Chrome,
+			// which patchright never patched — the call still reads as legitimate
+			// for naming a real browser while every guarantee is silently gone.
 			channel: 'chromium',
-			args: ['--disable-blink-features=AutomationControlled', ...args],
+			args: buildLaunchArgs(headless, args),
+			// Playwright adds --enable-automation by default, and it sets
+			// navigator.webdriver regardless of the flags above.
+			ignoreDefaultArgs: ['--enable-automation'],
 			// Headless Chromium advertises itself in the user agent
-			// ("HeadlessChrome/145.0.0.0") — measured 2026-07-28 by
-			// scripts/waf-probe.mjs, and the single automation tell this stack
-			// still presents. Nothing else has to look for it: the string is
-			// right there in navigator.userAgent. Strip the marker so the UA
-			// matches the headed build it otherwise is.
-			...(headless ? { userAgent: await headedUserAgent(chromium) } : {}),
+			// ("HeadlessChrome/145.0.0.0") and, independently, in the sec-ch-ua
+			// client hints. Rewriting only the string leaves the hints still
+			// announcing headless, so both move together.
+			...(ua ? { userAgent: ua, userAgentMetadata: headedUserAgentMetadata(ua) } : {}),
 			...(timeout ? { timeout } : {}),
 		});
 

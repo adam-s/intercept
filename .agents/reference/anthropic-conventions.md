@@ -212,7 +212,7 @@ re-verify the rest against the tree before relying on them.
 | `.agents/skills/dashboard-builder/` | ✓ aligned | Next.js pages against domain proxy routes |
 | `.agents/skills/debug-logs/` | ✓ aligned | Targeted-log debugging loop; reads are bounded (grep-first, `tail -n`) |
 | `.agents/skills/ec2-deploy/` | ✓ aligned | Outward-facing; behind the human checkpoint |
-| `.agents/skills/instruction-dashboard-tuning/` | ✓ aligned | Sub-agents as test subjects for the dashboard instructions |
+| `.agents/skills/instruction-dashboard-tuning/` | ✓ aligned | A written description as the contract for the dashboard instructions; runs solo, sub-agent only as a tiebreaker |
 | `.agents/skills/instruction-tuning/` | ✓ aligned | Sub-agents as test subjects for the discovery instructions |
 | `.agents/skills/recorder-capture/` | ✓ aligned | Last-rung escalation: record a human flow, replay its real motion. Keystroke content is never captured |
 | `.agents/skills/red-team-review/` | ✓ aligned | Bug hunt over production code (proxy routes, session handling, pagination) |

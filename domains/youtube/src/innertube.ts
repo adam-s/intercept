@@ -95,12 +95,95 @@ function metadataParts(meta: unknown): string[] {
 }
 
 /**
+ * The widest picture a card carries, or null when it carries none.
+ *
+ * The two renderers nest their images differently and under different keys —
+ * `thumbnails` on the classic one, `sources` on the view-model one — so this
+ * searches for either by key rather than by path, the same reason
+ * `collectRenderers` exists. Widest rather than first: the arrays are not
+ * ordered consistently across surfaces, and the smallest entry is a placeholder
+ * that renders as a blur.
+ *
+ * A card with no picture returns null and says so. Composing the URL from the
+ * video id instead would produce a link that works, and would be a fact this
+ * response never contained.
+ */
+export function thumbnailOf(node: unknown, depth = 0): string | null {
+	if (depth > 12 || node === null || typeof node !== 'object') return null;
+	let best: { url: string; width: number } | null = null;
+	const consider = (list: unknown) => {
+		if (!Array.isArray(list)) return;
+		for (const entry of list) {
+			if (!entry || typeof entry !== 'object') continue;
+			const { url, width } = entry as { url?: unknown; width?: unknown };
+			if (typeof url !== 'string' || !url) continue;
+			const w = typeof width === 'number' ? width : 0;
+			if (!best || w > best.width) best = { url, width: w };
+		}
+	};
+
+	if (Array.isArray(node)) {
+		for (const item of node) {
+			const found = thumbnailOf(item, depth + 1);
+			if (found) return found;
+		}
+		return null;
+	}
+	for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+		if (k === 'thumbnails' || k === 'sources') consider(v);
+		else if (!best) {
+			const found = thumbnailOf(v, depth + 1);
+			if (found) return found;
+		}
+	}
+	return best ? (best as { url: string }).url : null;
+}
+
+/**
+ * Whether the upstream held back a continuation.
+ *
+ * This is the only honest source for "there is more". A count comparison cannot
+ * supply it here: the response states no total, so comparing the returned count
+ * against anything derived from the same response compares a number with itself
+ * and always agrees.
+ */
+export function hasContinuation(payload: unknown): boolean {
+	return collectRenderers(payload, 'continuationItemRenderer').length > 0;
+}
+
+/**
+ * The upstream's own count of matching videos, when it states one.
+ *
+ * Returns null rather than a substitute. A search that reports its own page size
+ * as the total is indistinguishable from a search that found exactly one page of
+ * matches, and the second is almost never true.
+ *
+ * UNVERIFIED BY PROBE (2026-07-29): `estimatedResults` is read defensively
+ * because this key's presence has not been confirmed against a live search
+ * response in this repo. Absent, the route reports no total — which is the
+ * correct outcome either way, and is why this is safe to ship unprobed.
+ */
+export function estimatedResults(payload: unknown): number | null {
+	if (!payload || typeof payload !== 'object') return null;
+	const raw = (payload as { estimatedResults?: unknown }).estimatedResults;
+	if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+	// InnerTube sends 64-bit counts as strings; Number() on a huge one is still
+	// the right order of magnitude, which is all a "of about N" line needs.
+	if (typeof raw === 'string' && /^\d+$/.test(raw)) return Number(raw);
+	return null;
+}
+
+/**
  * A video card, from whichever renderer carries it.
  *
  * Two shapes are in circulation — the long-standing `videoRenderer` and the
  * newer `lockupViewModel` — and a surface may serve either. Reading only the
  * one you first met returns an empty list on the other, which looks exactly
  * like a page with no videos.
+ *
+ * The two do not carry the same fields, and the difference is passed through
+ * rather than smoothed over: a card with no channel name omits the key, so a
+ * consumer can tell "this surface does not say" from "the channel is empty".
  */
 export function videoCards(payload: unknown): Array<Record<string, unknown>> {
 	const classic = collectRenderers(payload, 'videoRenderer').map((v) => ({
@@ -112,6 +195,7 @@ export function videoCards(payload: unknown): Array<Record<string, unknown>> {
 		published: textOf(v.publishedTimeText),
 		views: textOf(v.viewCountText),
 		duration: textOf(v.lengthText),
+		thumbnail: thumbnailOf(v.thumbnail),
 		_renderer: 'videoRenderer',
 	}));
 	const modern = collectRenderers(payload, 'lockupViewModel').map((v) => {
@@ -123,8 +207,9 @@ export function videoCards(payload: unknown): Array<Record<string, unknown>> {
 			title: textOf(lockup?.title),
 			// Matched by content, not by index: these parts arrive unlabelled and a
 			// surface may add one without warning, which would shift every position.
-			views: parts.find((part: string) => /view/i.test(part)) ?? null,
+			views: parts.find((part: string) => /view|watching/i.test(part)) ?? null,
 			published: parts.find((part: string) => /ago$/i.test(part)) ?? null,
+			thumbnail: thumbnailOf(v.contentImage),
 			_renderer: 'lockupViewModel',
 		};
 	});

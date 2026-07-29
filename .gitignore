@@ -52,6 +52,11 @@ apps/api/data/
 .claude/dashboard-tuning-handoff.md
 .agents/user-consent.md
 
+# Visual captures from scripts/snapshot.mjs. Large binaries, and a capture of a
+# live third-party site is spent material with a short life — it is deleted once
+# its description is written, never committed.
+.snapshots/
+
 # Route-spec baselines are shape fingerprints only — no captured data.
 !/data/route-spec-baseline/
 # Grader-held transport keys. Version-controlled because they are durable

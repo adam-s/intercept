@@ -11,9 +11,10 @@ long unattended sweep. The maintainer reads each result before the next starts.
 
 The two tuning skills test different things and stay separate:
 `instruction-tuning` measures whether a sub-agent follows the discovery
-protocol; `instruction-dashboard-tuning` measures the dashboard build. Both
-produce throwaway artifacts — the instruction and framework fixes are the
-product.
+protocol; `instruction-dashboard-tuning` measures whether a written description
+of a real screen is sufficient to build from. Both produce throwaway artifacts —
+the instruction and framework fixes are the product. The skill itself records
+why the seam exists, so neither gets merged into the other later.
 
 Two changes from this session that the next tuning run should exercise, because
 both altered what an agent is told to do:
@@ -24,39 +25,25 @@ both altered what an agent is told to do:
 - AGENTS.md is principles-only. A tuning run shows whether an agent still finds
   the facts it needs in `docs/` and the script docblocks.
 
-## UI skills — later, adopt the `ui-explore/loop` method
+## The product UI is still unbuilt
 
-**Decided:** replace the current screenshot-and-judge loop with the
-spec-driven method from `~/Projects/callbench/packages/ui-explore/loop`.
+`apps/web` has three pages and makes no call to `/api` — six domains' worth of
+routes exist and nothing consumes them. This is the "shipped means reachable"
+gap AGENTS.md names: every part passes its tests, reads as done, and changes
+nothing.
 
-**Why it should be cheaper.** The present loop renders a page, looks at the
-image, judges it, and iterates — every cycle pays for image analysis, and the
-judgment is not reproducible between runs. The `ui-explore` method inverts it: a
-frame is read *once* into a written description, the build is made from that
-description alone, and the comparison is description-against-build. The contract
-is text, so a cycle costs a text diff rather than a picture, and a disagreement
-points at a specific line someone can correct.
+It stays open deliberately. The dashboard-building instructions are being tuned
+first, by `instruction-dashboard-tuning`, so the product UI gets built by
+instructions that have already been corrected against real screens rather than
+becoming the thing we correct them on. A shipping dashboard cannot be the
+tuning loop's subject — rebuild-don't-patch is load-bearing to the loop and
+cannot be applied to a permanent page.
 
-`loop/README.md` there is the method plus the accumulated rules that came out of
-running it; `loop/descriptions/` holds one description per frame, and every
-screen cites the description it was built from and nothing else.
-
-**What to port when we get to it:**
-
-- The description format, and the rule that a build cites exactly one
-  description
-- The comparison step — build-versus-description, not build-versus-picture
-- The accumulated rules section, which is the part that compounds
-
-**What not to port:** the ownership block at the top of that README is a
-standing instruction specific to callbench's arrangement, not a general rule.
-Also that package's research corpus stays where it is.
-
-**Open question for the maintainer:** intercept2's dashboards are generated from
-discovered APIs rather than read from reference frames, so "the description" has
-a different source here — a route's response shape rather than a screenshot.
-Whether the method survives that substitution is the first thing to test, and it
-is cheap to test on one page before committing to the port.
+Open when it is built: whether a route should declare a render hint alongside
+`transport`, `examples`, and `upstream`. Decided for now as no — the UI keys off
+`transport` and adapts to what a response actually contains, because a field
+every future domain must fill in correctly is worse absent than wrong. Revisit
+only if the description format's data-slot section keeps straining against it.
 
 ## Deferred before the next tuning round — watch for instruction-induced regressions
 

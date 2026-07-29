@@ -21,7 +21,9 @@
 import { parseAsString, parseAsStringLiteral, useQueryState } from 'nuqs';
 
 const VIEW_OPTIONS = ['list', 'detail', 'search'] as const;
-type View = (typeof VIEW_OPTIONS)[number];
+
+/** The views `useView` can hold. Exported so a page can type its own switch. */
+export type View = (typeof VIEW_OPTIONS)[number];
 
 /** Current view — defaults to 'list'. Maps to ?view= URL param. */
 export function useView() {

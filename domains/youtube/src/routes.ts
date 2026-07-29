@@ -19,8 +19,8 @@
  */
 
 import type { DomainRoute } from '@interceptor/browser/handler/domain-loader';
-import { DEBUG, rateLimitedFetch, withCompleteness } from '@interceptor/shared';
-import { innertubeBody, videoCards } from './innertube';
+import { DEBUG, rateLimitedFetch } from '@interceptor/shared';
+import { estimatedResults, hasContinuation, innertubeBody, videoCards } from './innertube';
 
 /** Reads the player response the page was served, from the page itself. */
 const PLAYER_RESPONSE = `(() => {
@@ -210,9 +210,20 @@ export const routes: DomainRoute[] = [
 				return c.json({ error: `Search returned ${res?.status}`, query: q }, 502);
 			}
 			const videos = videoCards(res.json);
-			return c.json(
-				withCompleteness({ query: q, videos, total: videos.length, _transport: 'innertube' }),
-			);
+			// `total: videos.length` was what this returned before, and it was a
+			// completeness signal that could not fail: the count was compared with
+			// itself, so every search reported itself complete. The upstream's own
+			// estimate is the only number here that means anything, and its absence
+			// is reported as absence rather than filled in.
+			const indicatedTotal = estimatedResults(res.json);
+			return c.json({
+				query: q,
+				videos,
+				returned: videos.length,
+				indicatedTotal,
+				hasMore: hasContinuation(res.json),
+				_transport: 'innertube',
+			});
 		},
 	},
 	{
@@ -249,7 +260,14 @@ export const routes: DomainRoute[] = [
 				return c.json({ error: `Browse returned ${res?.status}`, channelId }, 502);
 			}
 			const videos = videoCards(res.json);
-			return c.json(withCompleteness({ channelId, videos, total: videos.length }));
+			return c.json({
+				channelId,
+				videos,
+				returned: videos.length,
+				// A browse response states no total, so the continuation is the only
+				// evidence either way — see the search route above.
+				hasMore: hasContinuation(res.json),
+			});
 		},
 	},
 	{
@@ -297,9 +315,16 @@ export const routes: DomainRoute[] = [
 			const suggestions = rows
 				.map((r) => (Array.isArray(r) ? String(r[0] ?? '') : ''))
 				.filter(Boolean);
-			return c.json(
-				withCompleteness({ query: q, suggestions, total: suggestions.length, _transport: 'jsonp' }),
-			);
+			// Autocomplete hands over everything it intends to; `returned` with no
+			// total is the whole truth, and the `total` this used to send was the
+			// same number under a name that claimed more.
+			return c.json({
+				query: q,
+				suggestions,
+				returned: suggestions.length,
+				hasMore: false,
+				_transport: 'jsonp',
+			});
 		},
 	},
 	{

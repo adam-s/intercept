@@ -1,383 +1,259 @@
 ---
 name: instruction-dashboard-tuning
-description: Use sub-agents to iteratively improve dashboard-building instructions. Three-phase pipeline — discover APIs, build dashboard matching a wireframe, review code + UI with a SOTA reviewer agent. The dashboards are throwaway; instruction improvements and framework code fixes are the product.
+description: Improve the dashboard-building instructions by reading a real screen once into a written description, building from that description alone, and comparing the two. The screens are training data; this document is the product. Use when tuning how UI gets built, or when the user says "tune the dashboard instructions".
 ---
 
-> **DO NOT write memory files.** All learnings go into `.agents/skills/`, `.agents/agents/`, `.agents/rules/`, or framework code — NOT into memory.
+> Durable knowledge goes in `.agents/`, the docs, or the code. Never a memory file.
 
-# Instruction Dashboard Tuning via Sub-Agent Testing
-
-## Consent check — **CRITICAL · MANDATORY**
-
-**Check if `.agents/user-consent.md` exists with `ACCEPTED: true`.** If yes, display: `Prior consent on file (DATE). Proceeding.` and skip to "Before Starting."
-
-If not, present the 3 warnings from `.agents/skills/instruction-tuning/SKILL.md` (ToS, autonomous agents, resource consumption). All 3 must be accepted. Write `.agents/user-consent.md` on acceptance. This file is shared across both tuning skills.
-
-## How This Works
-
-You are not building dashboards. You are writing instructions that make other agents build correct dashboards.
-
-1. **Capture a wireframe** — screenshot a real website (any data-rich site with lists, tables, or dashboards). This is the design target.
-2. **Launch a discovery agent** — discovers ALL transports via the already-tuned discovery protocol.
-3. **Launch a builder agent** — builds a dashboard matching the wireframe using the discovered API routes.
-4. **Launch a reviewer agent** — a SOTA frontier LLM that reviews the code + screenshots and produces structured findings.
-5. **Apply findings** — instruction improvements go to `.claude/`, framework code fixes go to `packages/`, `apps/`, etc.
-6. **Discard the worktree** — the dashboard is throwaway. The instruction and code improvements are the product.
-
-## Before Starting — Ask the User
-
-**Turn 1:** Ask how many discovery passes — 1 or 2? Default to 1.
-- **1 pass:** Full breadth discovery, then build dashboard.
-- **2 passes:** Pass 1 = breadth. Pass 2 = deep dive on missed transports. Then build dashboard with the combined routes.
-
-**Turn 2:** Ask which websites to use as wireframes. The user picks the sites.
-
-**Turn 3:** Ask what to do when agents finish. Pick one:
-- **A) Full cleanup** (default) — kill processes, delete worktrees, revert shared files.
-- **B) Keep worktrees** — kill processes but preserve worktree directories for reuse.
-- **C) Keep agents alive** — don't stop running agents, allow continuation or redirection.
-- **D) Keep both** — preserve worktrees AND keep agents alive.
-
-Do NOT launch agents until the user answers all questions.
-
-## The Three-Phase Pipeline
+# The loop, and the document it keeps sharpening
 
 ```
-SCREENSHOT of real website = the "wireframe"
-                │
-    ┌───────────┼───────────┐
-    ▼           ▼           ▼
- Phase 1     Phase 2     Phase 3
- DISCOVERY   BUILD        REVIEW
- (worktree)  (same wt)   (read-only)
-    │           │           │
-    ▼           ▼           ▼
- Domain      Dashboard   Findings
- plugin      matching    report
- w/ routes   wireframe     │
-                      ┌────┴────┐
-                      ▼         ▼
-                  .claude/   packages/
-                  skills/    apps/ etc.
-                      │
-                      ▼
-               WORKTREE DELETED
-               IMPROVEMENTS KEPT
+describe ──▶ build ──▶ compare ──▶ generalize ──▶ PRUNE ──▶ describe the next
 ```
 
-## The Loop
+**THE INSTRUCTIONS ARE THE PRODUCT. The screens are training data.** A screen
+exists to stress this file and may be thrown away. An iteration succeeds when the
+guidance moved and a fresh agent would start closer — not when the screen came
+out well.
 
-```
-1.  Clean: bash .agents/hooks/cleanup-agents.sh
-    Also: for port in $(seq 3031 3049); do lsof -ti:"$port" | xargs kill -9 2>/dev/null; done
-    Also: rm -rf /tmp/dashboard-tuning/
-2.  Verify commit: ensure worktrees branch from latest committed instructions
-3.  Capture wireframe:
-    mkdir -p /tmp/dashboard-tuning
-    Screenshot target website at 1280x800 → /tmp/dashboard-tuning/wireframe-desktop.png
-    Screenshot at 375x800 → /tmp/dashboard-tuning/wireframe-mobile.png
-4.  Launch Phase 1 (Discovery) in worktree (run_in_background: true)
-5.  LIVE MONITOR every 60s until discovery completes
-6.  Verify: elimination table filled, routes return data via curl
-7.  Launch Phase 2 (Build) in SAME worktree (run_in_background: true)
-8.  LIVE MONITOR every 60s until build completes
-8b. VERIFY PROXY — before screenshots, confirm the web proxy reaches the API:
-    curl -s http://localhost:$WEB_PORT/api/$DOMAIN/ROUTE | head -c 200
-    If this fails (500, empty), the web server was started without API_PORT=$API_PORT.
-    Kill, restart with API_PORT=$API_PORT PORT=$WEB_PORT, re-verify.
-8c. VERIFY PLACEMENT — check page is in (dashboard)/ group:
-    ls apps/web/src/app/\(dashboard\)/PAGE_NAME/page.tsx
-    If the page is at apps/web/src/app/PAGE_NAME/ instead, that's a finding.
-9.  Capture dashboard screenshots at 4 viewports (375, 768, 1280, 1920):
-    mkdir -p /tmp/dashboard-tuning/screenshots
-    node scripts/snapshot.mjs --path=/PAGE --port=$WEB_PORT --label=iter-$ITER
-10. Launch Phase 3 (Review) — reviewer reads worktree + screenshots (run_in_background: true)
-11. MONITOR until reviewer produces findings report
-12. Process findings:
-    a. Apply GENERALIZED=yes instruction improvements to .claude/
-    b. Apply framework code fixes to packages/, apps/, services/, scripts/, tests/
-    c. CONSISTENCY CHECK — grep all .claude/ for the concept you changed
-13. PRUNE .claude/ — run `wc -l .agents/skills/dashboard-builder/SKILL.md .agents/agents/dashboard-agent.md`.
-    If any file exceeds 300 lines, extract the bottom third to a `reference/` subdirectory.
-    Keep the main file focused on: architecture, build steps, states, wireframe fidelity, responsive, errors.
-    Niche patterns (comment trees, video, sparklines, CRUD) go in reference files.
-14. Process cleanup: kill servers, remove worktree
-15. Commit fixes to main
-16. Write handoff (.claude/dashboard-tuning-handoff.md, gitignored)
-17. Start fresh Claude Code session, repeat
-```
+**The rules here are an INPUT to the build, not only an output of the
+comparison.** Repeating a mistake already written down proves this document is
+text nobody reads back.
 
-## Phase 1: Discovery
+**Rebuild, don't patch.** A repaired build proves the repair; only a build made
+again from the description alone proves the guidance.
 
-Reuses the already-tuned discovery protocol. No new instructions needed.
+**Two halves, and the first gets neglected.** Part 1 is how the screen is READ;
+Part 3 is how the build is MADE. Most gaps trace to something the description
+never said, and no build rule recovers a fact never recorded. Ask which half
+failed before writing anything.
 
-**Agent:** `discovery-agent` (`.agents/agents/discovery-agent.md`)
+## Consent
 
-**Prompt template:**
-```
-Discover ALL transport types that [site] uses. Build a route for EVERY transport found.
-Target: [url]
-Follow .agents/rules/discovery.md — GATHER→SCAN→CLASSIFY→BUILD.
-In GATHER: connect to HOMEPAGE first and browse naturally (scroll, click) to warm up cookies before navigating to target pages. Intercept pagination traffic. If you see an API endpoint with pagination params in traffic, test it directly via /browser/mcp/fetch. For cross-origin APIs, credentials are forwarded automatically.
-In CLASSIFY: name the site's core data and verify your transports cover it.
-In BUILD: auth-gated endpoints (Gap=Y) go directly to session harvest. Read the session harvest reference file BEFORE writing any harvest code.
-Fill ALL 8 elimination rows before writing code.
-After building routes, register your domain and test EVERY route through the API server proxy.
-Before finishing: run `pnpm biome check --write --unsafe .` and fix any remaining lint or type errors. CI must be clean.
-Budget: ~150 tool calls. Plan: ~30 GATHER, ~10 SCAN/CLASSIFY, ~80 BUILD, ~30 testing.
-Your port is XXXX.
-```
+This drives a browser at live third-party sites — outward-facing, so it runs
+attended. Check `.agents/user-consent.md` for `ACCEPTED: true`; if absent,
+present the three warnings from `instruction-tuning/SKILL.md` and write the file.
 
-**Port:** 3031+N (API only — discovery doesn't need a web server)
+---
 
-## Phase 2: Build
+## Part 0 — How guidance is written
 
-**Agent:** `dashboard-agent` (`.agents/agents/dashboard-agent.md`)
+**EVERY INSTRUCTION IS GENERALIZED, NEVER SPECIFIC.** A specific may appear only
+as labelled support. A rule that cannot be written without naming the site that
+produced it is not yet a rule.
 
-**Prompt template:**
-```
-Build a dashboard that matches the wireframe screenshot at /tmp/dashboard-tuning/wireframe-desktop.png.
+**A rule needs a CLASS, not an instance.** One screen doing something is an
+observation and belongs in that description. It becomes a rule here when a
+second, unrelated subject does the same.
 
-API routes are already working in this worktree:
-[paste output of curl -s http://localhost:API_PORT/api]
+**Length is itself a defect.** Every rule added makes every other rule less
+likely to be consulted. Four ways to improve this file, and the last two get
+forgotten: added to · corrected · **merged** · **pruned**. An iteration that adds
+without merging or cutting has made it worse even when the new rule is true.
 
-Read these skill files before starting:
-1. .agents/skills/dashboard-builder/SKILL.md — the build process
-2. .agents/skills/visual-dev/SKILL.md — screenshot + judge loop
-3. .agents/skills/debug-logs/SKILL.md — when data doesn't flow
-4. .agents/skills/systematic-testing/SKILL.md — verify API routes first
+---
 
-Your wireframe: Read /tmp/dashboard-tuning/wireframe-desktop.png
-This is a real website screenshot. Match its:
-- Layout structure (grid, sidebar, header)
-- Information density (items per row, spacing)
-- Typography hierarchy (title vs metadata sizing)
-- Component patterns (cards, badges, thumbnails)
+## Part 1 — Reading a screen so a build can be correct
 
-The gap between your dashboard screenshot and the wireframe IS the bug.
+**A build can only be as correct as its description.**
 
-Structural requirements:
-- Place page in (dashboard)/ group: apps/web/src/app/(dashboard)/<page-name>/page.tsx
-- If the wireframe has its own header/footer/nav, add a layout.tsx opt-out:
-  export default function Layout({ children }: { children: React.ReactNode }) { return <>{children}</>; }
-- Use shadcn/ui Button (not raw <button>), Alert (not raw <div>), for ALL interactive/status elements
-- Override visual tokens (className + style), not component choice
-- If API returns HTML fragments, sanitize with DOMPurify before dangerouslySetInnerHTML
+### Open with what the screen is FOR
 
-When starting servers, set ports explicitly:
-  PORT=$API_PORT pnpm --filter @interceptor/api dev
-  API_PORT=$API_PORT PORT=$WEB_PORT pnpm --filter @interceptor/web dev
+Whose job, and what they came to do. One sentence, first. **Every trade-off the
+description cannot settle is decided by it** — what may be truncated, what must
+stay visible, which property gives way. Omit it and the builder defaults, and a
+default is never deliberate.
 
-Before finishing: run `pnpm biome check --write --unsafe .` and fix any remaining lint or type errors. CI must be clean.
-API port: XXXX. Web port: YYYY.
-Budget: 80 tool calls.
-```
+### Separate the product from the capture
 
-**Ports:** API 3031+N, Web 3041+N
+A frame is a recording, so it carries what the software never drew: browser
+chrome, a pointer, a hover tooltip, a scroll position, a private-window badge.
+Name them before describing anything.
 
-**Before launching:** Kill the discovery agent's API server, then restart with both API and Web servers in the same worktree.
+Two are dangerous. A **pointer halo** is indistinguishable from a deliberate
+accent, so it gets copied and the copy looks intentional. A **scroll position**
+clips a region part-way, which looks exactly like a region designed with a flat
+edge — say it was scrolled, or the build ships that edge forever.
 
-## Phase 3: Review
+**Say whether the frame was signed in.** A supplied frame usually is, and every
+personalized region in it is unbuildable from a public route.
 
-**Agent:** `reviewer-agent` (`.agents/agents/reviewer-agent.md`)
+### Write it as a tree, from the bottom up
 
-**Prompt template:**
-```
-Review the dashboard built by another agent.
+**Atoms first, the screen last.** Attention decays along a description and the
+fragile facts are at the bottom — a unit's height in lines, a radius as a
+fraction of it, which of two things yields.
 
-Worktree code: [WORKTREE_PATH]
-Dashboard screenshots: /tmp/dashboard-tuning/screenshots/
-Wireframe: /tmp/dashboard-tuning/wireframe-desktop.png
+1. **Atoms** — indivisible marks. Described once and referred back to.
+2. **Compounds** — a few atoms reading as one object. Parts in order, the gaps,
+   which flexes, which gives way first.
+3. **Assemblies** — arrangements and repetitions. Counts, the repeating unit,
+   how many visible.
+4. **The screen** — assemblies against each other, and **which single region
+   scrolls**. A screen whose body scrolls and one whose panel scrolls look
+   identical at rest.
 
-Read ALL component files in the dashboard directory.
-Read ALL screenshots (4 viewports) and the wireframe.
-Read the .claude/ instruction files the builder was supposed to follow.
+Then for the whole: the **type ramp** (distinct sizes, largest first, what uses
+each) · **colour** (every distinct one and the single job it does) · **which
+states the frame shows and which it does not** — anything absent is a decision
+the build must make.
 
-Score on the 12-point review. Compare wireframe to dashboard — name SPECIFIC differences.
-Produce Section A (instruction improvements) and Section B (framework code fixes).
-Only include GENERALIZED=yes findings.
+### What to record at each node
 
-Budget: 40 tool calls.
-```
+- **Count everything that repeats.** "Several" is not a count, and a wrong one
+  survives everything. Recount off the source once the build renders.
+- **The repeating unit's height in lines**, and how many fit a container. Built
+  two lines tall where the source was one, it holds half as much and still looks
+  intentional.
+- **Every text element** — role · weight against neighbours · rank in the ramp ·
+  one line or wraps · how it reads when absent.
+- **Every box, relationally** — radius as a fraction of its own height. What
+  reads as a crisp edge on a card reads as a pill on a one-line strip.
+- **Every control — its label and its options, never its position.**
 
-**Runs from main repo** (not a worktree). Reads the worktree path but writes nothing.
+### Never hedge · stay relational · cite no evidence
 
-## Live Monitoring
+"Appears to", "roughly", "seems" — a hedge becomes a silent defect, because the
+builder must choose and has nothing to choose by. If a detail cannot be read,
+write **"cannot be determined from this frame"** and say which reading was taken
+and why. That is checkable; a hedge is not.
 
-Parse the agent output file every 60 seconds:
+**Every comparison names its reference, and the reference is something else in
+the same description** — never a pixel, never a hex. A frame has no reliable
+scale and our theme overwrites every ramp anyway. The test: could someone else
+check it without you?
 
-```bash
-FILE="$AGENT_OUTPUT_FILE"
-cat "$FILE" | python3 -c "
-import sys, json
-tool_calls = 0; screenshots = 0; skill_reads = 0; writes = 0; edits = 0
-files_written = []; last_texts = []
-for line in sys.stdin:
-    try:
-        d = json.loads(line)
-        if d.get('type') == 'assistant':
-            for c in d.get('message',{}).get('content',[]):
-                if isinstance(c,dict):
-                    if c.get('type')=='text' and len(c.get('text',''))>20:
-                        last_texts.append(c['text'][:200])
-                        if len(last_texts) > 3: last_texts.pop(0)
-                    elif c.get('type')=='tool_use':
-                        tool_calls += 1
-                        n=c.get('name','');inp=c.get('input',{})
-                        if n=='Bash':
-                            cmd = inp.get('command','')
-                            if 'screenshot' in cmd.lower(): screenshots += 1
-                        elif n=='Write':
-                            writes += 1; files_written.append(inp.get('file_path','').split('/')[-1])
-                        elif n=='Edit': edits += 1
-                        elif n=='Read':
-                            fp = inp.get('file_path','')
-                            if 'SKILL.md' in fp or 'visual-dev' in fp: skill_reads += 1
-        if d.get('type') == 'result': print('*** AGENT COMPLETE ***')
-    except: pass
-print(f'Calls: {tool_calls}/80 | Screenshots: {screenshots} | Skills read: {skill_reads} | Writes: {writes} | Edits: {edits}')
-print(f'Files: {files_written}')
-for t in last_texts: print(t[:150]); print('---')
-"
-```
+**A description cites no evidence** — no URL, no capture path, no vendor in the
+body. Written from a frame, it stands alone, which is what makes it checkable by
+someone who lacks the picture.
 
-At each check, update the monitoring table:
+### Three sections this project adds
 
-| Agent | Calls | Screenshots | Skills | Files | Notes |
-|-------|-------|-------------|--------|-------|-------|
+We read a frame into a screen *bound to a discovered route*, rendered *inside an
+existing shell*. That is three facts a pure-UI format has no place for.
 
-**Phase 1 watch for:**
-- Elimination table progress
-- Route count
-- Infrastructure waste (pnpm retries, sleep loops)
+- **Data slots** — per compound, which route field fills it, named exactly, and
+  which are nullable with what the screen does then. The frame supplies shape,
+  the route supplies data, and the description is the only place they meet.
+- **Structure versus skin** — structure transfers, skin does not. Region order,
+  hierarchy, density, spacing rhythm, which states exist: take them. Hex values,
+  brand fonts, wordmarks, the signature accent: leave them. One page cloned
+  skin-and-all looks convincing; several in one app put that many clashing brand
+  identities in adjacent tabs of one product.
+- **Host context** — which shell the screen lands in and what it already
+  provides. **Every captured frame is standalone; every screen we build is not,**
+  and nothing in a frame can show that join. Chrome the shell already provides is
+  cut, not stacked.
 
-**Phase 2 watch for:**
-- Screenshot frequency — 20+ calls without a screenshot = building blind
-- State enumeration — should happen in first 5-10 calls
-- Skill file reads — should read dashboard-builder + visual-dev early
-- Component granularity — one 500-line file vs multiple small files
-- Route group placement — page should be under `(dashboard)/`, not top-level `/app/`
-- shadcn/ui coverage — check for raw `<button>` or raw `<div>` for errors
-- API_PORT set correctly when web server started
+Then **out of scope**, resolved against the tree: for every assembly named, say
+what survives. An assembly reduced to nothing is a finding about the tree, not a
+footnote.
 
-**Phase 3 watch for:**
-- Did reviewer read all component files?
-- Did reviewer read all 4 viewport screenshots + wireframe?
-- Are findings GENERALIZED or site-specific?
+---
 
-**Budget overrun:** If an agent exceeds its budget, let it finish its current output but note the overrun. In findings, check whether the overrun was caused by a monolith rewrite (instruction gap) or unnecessary retries (agent error).
+## Part 2 — Comparing what was built
 
-## Scorecards
+**The rendered screen is the only evidence this loop admits.** Format, render,
+then look. Put it beside the description, section by section — not beside the
+frame, which by then is deleted.
 
-### Discovery Scorecard
+Every divergence resolves to exactly one row, and a divergence filed under the
+wrong row installs a rule that fixes nothing:
 
-Same as `.agents/skills/instruction-tuning/SKILL.md` — the existing 18-check table.
+| What happened | Fix goes to |
+|---|---|
+| The description never said it | Part 1, as a new or widened instruction |
+| It said it ambiguously | Part 1, that section's wording |
+| It said it plainly and the build ignored it | Part 3 |
+| It said it and the build could not do it | `apps/`, `packages/` |
 
-### Builder Scorecard
+**The test separating rows two and three:** re-read the line cold. If a competent
+reader could have built the wrong thing from that text, it is a description
+defect. Do this before writing the fix — the two feel identical from inside the
+cycle that produced both.
 
-| Check | Pass/Fail |
-|-------|-----------|
-| Read all 4 skill files before starting | |
-| API routes verified via curl before UI work | |
-| States enumerated BEFORE writing component code | |
-| Built component-by-component, not whole page blind | |
-| Screenshot taken after EVERY visual change | |
-| 7 judgment criteria applied to each screenshot | |
-| Wireframe compared against dashboard screenshot | |
-| Fixed issues one at a time between screenshots | |
-| All states rendered: idle, loading, populated, empty, error, detail | |
-| Mobile viewport (375px) screenshot taken and judged | |
-| Data flows through /api/ proxy — no hardcoded URLs | |
-| Used shadcn/ui components — no reinvented primitives | |
-| Component files under 200 lines each | |
-| No @interceptor/shared imports in client components | |
-| Biome auto-fix run before manual lint cleanup | |
-| Stayed under 80 tool calls | |
+### Which frame next
 
-### Reviewer Scorecard
+**Pick by missing archetype, never by rotation.** The corpus is worth having for
+the SHAPES it covers, so the next frame is the one whose arrangement the
+collection does not yet hold. Rotating subjects produces four subjects' versions
+of one shape and calls it breadth.
 
-| Check | Pass/Fail |
-|-------|-----------|
-| Read all worktree source files (components, routes, types) | |
-| Read dashboard screenshots at all 4 viewports | |
-| Read the wireframe screenshot | |
-| Compared wireframe to dashboard (named specific differences) | |
-| Produced Section A with >= 3 instruction improvement findings | |
-| All Section A findings are GENERALIZED=yes | |
-| Produced Section B with >= 1 framework code fix | |
-| Did NOT suggest changes to the worktree code | |
-| Each finding includes specific file path and exact text change | |
-| Scored the dashboard on the 12-point review | |
+**Never twice running from one subject**, and derive what is covered by reading
+the existing descriptions rather than keeping a list — a maintained inventory
+rots on its first addition.
 
-## Findings Flow
+---
 
-```
-REVIEWER produces findings report
-         │
-    ┌────┴────┐
-    ▼         ▼
-Section A:   Section B:
-Instructions Code Fixes
-    │         │
-    ▼         ▼
-.claude/     packages/
-skills/      apps/ etc.
-    │         │
-    └────┬────┘
-         ▼
-CONSISTENCY CHECK
-(grep .claude/ for contradictions)
-         │
-         ▼
-   COMMIT + HANDOFF
-```
+## Part 3 — The accumulated guidance
 
-The orchestrator is the ONLY entity that writes to `.claude/`. The reviewer produces a report. The builder writes to the worktree. No agent ever writes to `.claude/` directly.
+Rules for the build. Each earned its place from two or more unrelated subjects.
 
-## Consistency Check
+### G1 — Walk the description's lists before calling anything finished
 
-When you change an instruction, the same concept appears in multiple files. A fix in `dashboard-builder/SKILL.md` means nothing if `dashboard-agent.md` still uses the old language.
+Stated counts are contracts. Stated order is a contract. A build that renders a
+subset of a stated list, in a different order, looks finished.
 
-**Before committing any instruction change:**
-```bash
-grep -rn "CONCEPT" .agents/rules/ .agents/agents/ .agents/skills/
-```
-Every hit must be consistent with your change.
+### G2 — A route reports what it actually got, and so does the screen
 
-## Port Allocation
+Every response carries what it returned against what exists upstream. When they
+disagree the screen says so in words a reader understands. **A screen that
+renders N items silently is indistinguishable from a source that has N items** —
+and that is the defect, not the short page. Where the route explains the
+shortfall, show the explanation.
 
-| Worktree | API Port | Web Port |
-|----------|----------|----------|
-| dash-1   | 3031     | 3041     |
-| dash-2   | 3032     | 3042     |
-| dash-3   | 3033     | 3043     |
+### G3 — Render no control that cannot act
 
-Avoids collision with discovery agents (3011-3021) and user dev (3000-3001).
+A control implies an action. Where the route exposes no write, the affordance is
+cut and the underlying figure survives as text. An arrow that cannot vote is
+worse than no arrow.
 
-## Session Handoff
+### G4 — A stated responsive rule appears as a real breakpoint
 
-After committing all fixes, write `.claude/dashboard-tuning-handoff.md` (gitignored) with:
+One unconditional value satisfies the wide reading of the rule and silently
+fails the narrow one — and the wide screenshot looks correct, so the defect
+survives any check that stops at one viewport. Render both.
 
-1. **Iteration number**
-2. **Wireframe used** — what website was the target
-3. **Phase 1 results** — routes discovered, transports found, tool calls used
-4. **Phase 2 results** — components built, screenshots taken, tool calls used
-5. **Phase 3 results** — reviewer score (out of 24), findings count
-6. **Findings applied** — which instruction changes were committed
-7. **Findings deferred** — which findings need more data
-8. **What's next** — specific items for the next iteration
+### G5 — An empty collection shows a field exists, never what it holds
 
-## Generalization Rule
+A sample where every instance of a field is empty or null gives its name and
+nothing else. Guess the element shape and the guess type-checks, because a cast
+asserts rather than validates — the failure arrives at runtime, in the branch
+that only fires on the populated case. Find a non-empty instance in the sample
+and read it; if there is none, the description says **"cannot be determined"**
+and the build renders the collection only once its shape is known.
 
-Every instruction change must work for ANY website. If a fix only helps for a specific site, it's overfitting. The reviewer must mark GENERALIZED=yes on every finding. The orchestrator drops GENERALIZED=no findings.
+### G6 — Absence has kinds, and they are distinct
 
-## Convergence
+Nothing-matched, request-failed, and not-yet-loaded are three different facts.
+Rendering them identically throws away the only information the reader needed.
+Loading holds the populated rhythm so the page does not reflow when data lands.
 
-The dashboard tuning loop converges when fresh builder agents (clean session, no hints):
-1. Read all skill files and follow prescribed phases in order
-2. Enumerate all visual states before writing code
-3. Screenshot after every visual change and apply 7 judgment criteria
-4. Compare against wireframe, identify and fix layout gaps
-5. Build component by component, keep files under 200 lines
-6. Score 20+ on the reviewer's 12-point review
-7. Stay near 80 tool calls
+---
+
+## Artifacts
+
+| Artifact | Where | Lifetime |
+|---|---|---|
+| Frame | `.snapshots/<label>/` (gitignored) | deleted once described, before the build |
+| Description | beside the frame | deleted when the cycle closes |
+| Built screen | `apps/web/` | discarded with the cycle |
+| This file, build fixes, framework fixes | committed | permanent |
+
+Deleting the frame before building is the gate. A solo run has already read the
+image into context, so deletion stops it being re-consulted for detail but
+cannot unsee the layout — a clean solo comparison proves the description is
+**consistent**, not that it is **sufficient**. Sufficiency needs a fresh reader:
+hand one the description alone, in a clean session, when a specific line is
+suspected of being clear only to its author.
+
+## Capture
+
+`node scripts/snapshot.mjs --help`. A protected site serves an interstitial that
+screenshots perfectly, so **read the exit code** — a challenge is a finding, not
+a retry. Changing engine or profile is a rung; changing a header is a retry.
+
+**When captures start being refused, probe the routes before climbing another
+rung.** Reputation is shared between the capture browser and the domain routes,
+and only the routes show the bill — a route degrading in step means further
+attempts make it worse. Ask the maintainer for a frame instead.

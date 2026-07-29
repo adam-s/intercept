@@ -93,7 +93,7 @@ Type `/` in Claude Code to see available commands:
 | `/debug-logs` | Iterative debugging with targeted logs |
 | `/ci-check` | Run lint, build, typecheck, and tests |
 | `/instruction-tuning` | Improve the discovery instructions by testing agents on real sites |
-| `/instruction-dashboard-tuning` | Improve dashboard-building instructions the same way |
+| `/instruction-dashboard-tuning` | Improve dashboard-building instructions by building from a written description of a real screen |
 | `/ec2-deploy` | Deploy to production |
 
 ## How It Works
