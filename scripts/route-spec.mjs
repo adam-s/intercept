@@ -185,12 +185,24 @@ export function diffShape(baselineShape, actualShape) {
 	if (baselineShape === undefined) {
 		return { verdict: 'new-route', detail: 'no baseline recorded' };
 	}
-	if (baselineShape === actualShape) {
+	// A baseline is a SET of accepted shapes, not one shape. Some routes vary
+	// legitimately — an escalation route returns the API's shape on a first call
+	// and its fallback's shape once the upstream rate-limits. Pinning such a
+	// route to whichever shape got recorded first turns designed behavior into a
+	// permanent red. Record mode accumulates; assert passes on any member.
+	const accepted = Array.isArray(baselineShape) ? baselineShape : [baselineShape];
+	if (accepted.includes(actualShape)) {
 		return { verdict: 'no-signal-flipped' };
+	}
+	if (accepted.length > 1) {
+		return {
+			verdict: 'unexpected-regression',
+			detail: `shape matches none of ${accepted.length} recorded shapes\n      now: ${truncate(actualShape, 300)}`,
+		};
 	}
 	return {
 		verdict: 'unexpected-regression',
-		detail: `shape changed\n      was: ${truncate(baselineShape, 300)}\n      now: ${truncate(actualShape, 300)}`,
+		detail: `shape changed\n      was: ${truncate(accepted[0], 300)}\n      now: ${truncate(actualShape, 300)}`,
 	};
 }
 
@@ -233,6 +245,33 @@ export function checkResponse({ status, contentType, body, baselineShape }) {
 /** Routes this tier can probe unattended: GET, no path parameters. */
 export function isProbeable(route) {
 	return route.startsWith('GET ') && !route.includes(':') && !route.includes('*');
+}
+
+/**
+ * The concrete URLs to probe for a domain, and what got left out.
+ *
+ * A declared example always wins: a route with a path parameter or a required
+ * query parameter is not callable from its declaration alone, and skipping it
+ * silently is how a checker reports green over routes nothing ever called.
+ * Examples are matched to their route by path prefix so a route that declares
+ * one is never also probed bare.
+ */
+export function probeTargets(routes = [], examples = []) {
+	const exampleTargets = examples.filter((e) => e.startsWith('GET ')).map((e) => e.slice(4));
+	const covered = new Set();
+	for (const target of exampleTargets) {
+		const base = target.split('?')[0];
+		for (const route of routes) {
+			const path = route.replace(/^[A-Z]+ /, '');
+			const stem = path.split('/:')[0].split('/*')[0];
+			if (base === path || base.startsWith(`${stem}/`) || base === stem) covered.add(route);
+		}
+	}
+
+	const bare = routes.filter((r) => isProbeable(r) && !covered.has(r)).map((r) => r.slice(4));
+	const skipped = routes.filter((r) => !covered.has(r) && !isProbeable(r));
+
+	return { targets: [...exampleTargets, ...bare], skipped };
 }
 
 // ─── Runner ──────────────────────────────────────────────────────────
@@ -314,11 +353,11 @@ async function main() {
 		const recorded = opts.record ? baselines[domain.name] : null;
 		const existing = opts.record ? readBaseline(domain.name) : baselines[domain.name];
 
-		for (const route of domain.routes ?? []) {
-			if (!isProbeable(route)) {
-				skippedUnprobeable++;
-				continue;
-			}
+		const { targets, skipped } = probeTargets(domain.routes ?? [], domain.examples ?? []);
+		skippedUnprobeable += skipped.length;
+
+		for (const target of targets) {
+			const route = `GET ${target}`;
 			if (probed >= opts.budget) {
 				skippedForBudget++;
 				continue;
@@ -328,7 +367,7 @@ async function main() {
 				break outer;
 			}
 
-			const path = route.slice('GET '.length);
+			const path = target;
 			probed++;
 
 			const t0 = Date.now();
@@ -346,7 +385,19 @@ async function main() {
 			}
 
 			const shape = res.body === undefined ? null : shapeOf(res.body);
-			if (recorded && shape) recorded[route] = shape;
+			if (recorded && shape) {
+				const seen = new Set(
+					Array.isArray(recorded[route])
+						? recorded[route]
+						: recorded[route]
+							? [recorded[route]]
+							: [],
+				);
+				const prior = existing[route];
+				for (const v of Array.isArray(prior) ? prior : prior ? [prior] : []) seen.add(v);
+				seen.add(shape);
+				recorded[route] = [...seen];
+			}
 
 			const findings = checkResponse({
 				status: res.status,
@@ -409,7 +460,7 @@ async function main() {
 	}
 	if (skippedUnprobeable > 0) {
 		console.log(
-			`⊘ ${skippedUnprobeable} route(s) not probed — not GET, or path parameters required.`,
+			`⊘ ${skippedUnprobeable} route(s) not probed — not GET, or a path/query parameter is required and the route declares no \`examples\`. A route nothing calls is not a route this tier has checked.`,
 		);
 	}
 

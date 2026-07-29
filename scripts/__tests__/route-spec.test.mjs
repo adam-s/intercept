@@ -11,6 +11,7 @@ import {
 	diffShape,
 	isProbeable,
 	parseArgs,
+	probeTargets,
 	shapeOf,
 } from '../route-spec.mjs';
 
@@ -191,5 +192,76 @@ describe('isProbeable', () => {
 		['GET /api/boardshop/files/*', false],
 	])('%s → %s', (route, expected) => {
 		expect(isProbeable(route)).toBe(expected);
+	});
+});
+
+describe('probeTargets', () => {
+	const routes = [
+		'GET /api/y/search',
+		'GET /api/y/chart/:symbol',
+		'GET /api/y/stream',
+		'POST /api/y/order',
+	];
+
+	it('probes bare paths when no examples are declared', () => {
+		const { targets, skipped } = probeTargets(routes, []);
+		expect(targets).toEqual(['/api/y/search', '/api/y/stream']);
+		// The parameterized GET and the POST are both uncallable as declared.
+		expect(skipped).toEqual(['GET /api/y/chart/:symbol', 'POST /api/y/order']);
+	});
+
+	// The whole point: a route whose bare path is a 400 or not a URL is
+	// invisible without an example, and invisible reads as passing.
+	it('uses declared examples to reach otherwise unprobeable routes', () => {
+		const { targets, skipped } = probeTargets(routes, [
+			'GET /api/y/chart/MSFT?range=5d',
+			'GET /api/y/search?q=tesla',
+		]);
+		expect(targets).toContain('/api/y/chart/MSFT?range=5d');
+		expect(targets).toContain('/api/y/search?q=tesla');
+		expect(skipped).toEqual(['POST /api/y/order']);
+	});
+
+	it('does not also probe a route bare once an example covers it', () => {
+		const { targets } = probeTargets(routes, ['GET /api/y/search?q=tesla']);
+		expect(targets).not.toContain('/api/y/search');
+	});
+
+	it('probes every example when a route declares several', () => {
+		const { targets } = probeTargets(
+			['GET /api/y/page/:n'],
+			['GET /api/y/page/1', 'GET /api/y/page/2'],
+		);
+		expect(targets).toEqual(['/api/y/page/1', '/api/y/page/2']);
+	});
+
+	it('ignores non-GET examples', () => {
+		const { targets } = probeTargets(routes, ['POST /api/y/order?x=1']);
+		expect(targets).not.toContain('/api/y/order?x=1');
+	});
+
+	it('returns nothing for a domain with no routes', () => {
+		expect(probeTargets([], [])).toEqual({ targets: [], skipped: [] });
+	});
+});
+
+describe('diffShape accepts a set of shapes', () => {
+	// An escalation route returns its API's shape, then its fallback's once the
+	// upstream rate-limits. Both are correct; pinning one makes the other red.
+	it('passes any recorded shape', () => {
+		const accepted = ['{a:number}', '{b:string}'];
+		expect(diffShape(accepted, '{a:number}').verdict).toBe('no-signal-flipped');
+		expect(diffShape(accepted, '{b:string}').verdict).toBe('no-signal-flipped');
+	});
+
+	it('still fails a shape in neither', () => {
+		const r = diffShape(['{a:number}', '{b:string}'], '{c:boolean}');
+		expect(r.verdict).toBe('unexpected-regression');
+		expect(r.detail).toContain('none of 2');
+	});
+
+	it('keeps the single-shape form working', () => {
+		expect(diffShape('{a:number}', '{a:number}').verdict).toBe('no-signal-flipped');
+		expect(diffShape('{a:number}', '{a:string}').verdict).toBe('unexpected-regression');
 	});
 });

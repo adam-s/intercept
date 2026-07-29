@@ -227,6 +227,7 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/product/:sku',
+		examples: ['/product/DECK-001'],
 		description: 'Product detail via embedded JSON extraction.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -322,6 +323,7 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/inventory/:sku',
+		examples: ['/inventory/DECK-001'],
 		description: 'Warehouse inventory with custom headers discovered from traffic.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -344,6 +346,7 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/catalog/page/:page',
+		examples: ['/catalog/page/1', '/catalog/page/2'],
 		description: 'POST pagination with CSRF + session token extraction.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -378,7 +381,7 @@ export const routes: DomainRoute[] = [
 				body: JSON.stringify({ page: pageNum, pageSize: 20, filterSessionId, csrf }),
 			});
 			if (!res.ok) return c.json({ error: `Pagination returned ${res.status}` }, 502);
-			return c.json(await res.json());
+			return c.json(withCompleteness(await res.json()));
 		},
 	},
 
@@ -786,6 +789,7 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/chart/:sku',
+		examples: ['/chart/DECK-001'],
 		description: 'Rate-limited chart: tries API first, falls back to embedded JSON.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -931,6 +935,7 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/captions-example/:sku',
+		examples: ['/captions-example/DECK-001?lang=en'],
 		description: 'Captions: structured timed text from media endpoint.',
 		browserRequired: false,
 		handler: async (c) => {
@@ -1390,6 +1395,7 @@ export const routes: DomainRoute[] = [
 	{
 		method: 'GET',
 		path: '/collection/:id/listings',
+		examples: ['/collection/COL-001/listings'],
 		description: 'Encoded pricing: session harvest + indirect price refs + JS decode + pagination.',
 		browserRequired: false,
 		handler: async (c) => {

@@ -270,5 +270,14 @@ total, and an explicit incomplete signal when they disagree. The framework's
 completeness helper derives this; a route that passes an upstream body straight
 through runs it through that helper.
 
+**Every route declares `examples`** — concrete invocations relative to the domain
+mount, like `['/chart/MSFT?range=5d']`. A route with a path parameter or a
+required query parameter cannot be called from its declaration alone, so without
+an example the checker skips it, and a skipped route reads exactly like a
+passing one. Use real identifiers: an example naming an id the site does not
+have fails the route for a reason that has nothing to do with the route.
+
 **Test each route before building the next**, then assert the whole set with
-`node scripts/route-spec.mjs`.
+`node scripts/route-spec.mjs`. Its "not probed" line is a coverage report, not a
+footnote — a domain whose routes are mostly unprobed has mostly not been
+checked.

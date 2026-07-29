@@ -45,6 +45,8 @@ export type DomainRoute =
 			description?: string;
 			/** When false, proxy skips the browser-connected check. Use for routes that do direct fetch() without Patchright. Default: true */
 			browserRequired?: boolean;
+			/** Concrete invocations that exercise this route. See `examples` on the handler variant. */
+			examples?: string[];
 	  }
 	| {
 			method: 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -54,6 +56,18 @@ export type DomainRoute =
 			description?: string;
 			/** When false, proxy skips the browser-connected check. Use for routes that do direct fetch() without Patchright. Default: true */
 			browserRequired?: boolean;
+			/**
+			 * Concrete invocations that exercise this route, relative to the domain
+			 * mount — e.g. `['/search?q=tesla', '/chart/MSFT?range=5d']`.
+			 *
+			 * A route with a path parameter or a required query parameter cannot be
+			 * probed from its declaration alone: `/search` without `?q=` is a 400 by
+			 * design, and `/chart/:symbol` is not a URL. Without an example such a
+			 * route is simply skipped, so the checker reports green over a route
+			 * nothing ever called. Declaring one example makes the route testable;
+			 * declaring several covers its interesting cases.
+			 */
+			examples?: string[];
 	  };
 
 /**

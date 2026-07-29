@@ -134,6 +134,12 @@ app.get('/api', (c) => {
 			name,
 			routeCount: plugin?.routes?.length ?? 0,
 			routes: plugin?.routes?.map((r) => `${r.method} /api/${name}${r.path}`) ?? [],
+			// Concrete invocations, so a checker can exercise routes whose bare path
+			// is not callable (path params, required query params).
+			examples:
+				plugin?.routes?.flatMap((r) =>
+					(r.examples ?? []).map((e) => `${r.method} /api/${name}${e}`),
+				) ?? [],
 		};
 	});
 	return c.json({ domains, browserConnected: getActiveBrowser() !== null });
