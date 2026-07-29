@@ -503,3 +503,31 @@ describe('the drain channel crosses worlds without injecting anything', () => {
 		expect(() => install({ document: undefined })).not.toThrow();
 	});
 });
+
+describe('the worker is recorded, not rewritten', () => {
+	// Instrumenting worker scope was tried and reverted. Loading a blob that
+	// installs this instrument and then pulls the real script in with
+	// `importScripts` works — and breaks the worker, because a blob has no
+	// meaningful base URL, so every relative request the worker makes resolves
+	// against the blob and fails. The site's own worker stopped fetching. An aid
+	// that breaks what it observes is not a trade this instrument may make.
+	it('constructs the worker with the URL it was given', () => {
+		const h = install();
+		const built = h.run(`(() => { const w = new Worker('./worker.js'); return w.url })()`);
+		expect(built).toBe('./worker.js');
+	});
+
+	it('does not substitute a blob for the worker script', () => {
+		const h = install();
+		h.run(`new Worker('/scripts/streamer.worker.js')`);
+		const e = h.drain().find((x) => x.kind === 'worker');
+		expect(e?.url).toBe('/scripts/streamer.worker.js');
+		expect(String(e?.url)).not.toContain('blob:');
+	});
+
+	it('records a shared worker the same way', () => {
+		const h = install();
+		h.run(`new SharedWorker('/sw-shared.js')`);
+		expect(h.drain().find((x) => x.kind === 'worker')?.detail).toBe('shared');
+	});
+});

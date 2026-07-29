@@ -82,7 +82,12 @@ export const INSTRUMENT_LIMITS = { maxEvents: 2000, maxBodyChars: 512 } as const
  * Runs inside the page. Self-contained by construction: `toString()` is what
  * ships, so a reference to anything in module scope would arrive undefined.
  */
-function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, globalName: string) {
+function instrumentSource(
+	limits: { maxEvents: number; maxBodyChars: number },
+	globalName: string,
+	/** This function's own text, so a worker bootstrap can install it in worker scope. */
+	_selfSource: string,
+) {
 	// biome-ignore lint/suspicious/noExplicitAny: patching foreign globals
 	const g: any = globalThis;
 
@@ -488,13 +493,39 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 
 	// ─── Workers ────────────────────────────────────────────────────────
 	// A worker gets its own global scope, so nothing patched here sees its
-	// traffic. Recording the script URL is what tells a reader to go look.
+	// traffic — and that is where real sites put the interesting work. A finance
+	// site's entire price feed and a video site's media fetching both live in
+	// one, invisible across every instrumented pass until someone read the
+	// worker's source by hand.
+	//
+	// So the worker is instrumented too. Rather than loading the site's script
+	// directly, it loads a bootstrap that installs this same source into the
+	// worker's scope and then pulls the original in — the worker runs unchanged,
+	// with the patches already in place. Events come back over a BroadcastChannel
+	// rather than postMessage, because postMessage is the worker's own protocol
+	// with the page and injecting into it would corrupt the site's messages.
+	// Recording the script URL, not rewriting the worker.
+	//
+	// Instrumenting worker scope was tried and reverted. The approach — load a
+	// blob that installs this instrument and then pulls the real script in with
+	// `importScripts` — works, and breaks the worker: a blob has no meaningful
+	// base URL, so every relative request the worker makes resolves against the
+	// blob and fails. The site's own worker stopped fetching entirely. An aid
+	// that breaks what it observes is not a trade this instrument may make,
+	// whatever it would otherwise have shown.
+	//
+	// The workable version rewrites the worker's response body while it keeps its
+	// real URL, which means request routing rather than a page-side patch. Until
+	// then the gap is covered by reading: the manifest fetches each worker script
+	// and reports the transports in its source, which is how a live run found a
+	// price feed no capture could see.
 	patchCtor('Worker', (_inst, args) =>
 		rec({ kind: 'worker', method: 'OPEN', url: urlOf(args[0]), detail: 'dedicated' }),
 	);
 	patchCtor('SharedWorker', (_inst, args) =>
 		rec({ kind: 'worker', method: 'OPEN', url: urlOf(args[0]), detail: 'shared' }),
 	);
+
 	patch(g, 'importScripts', (args) =>
 		rec({ kind: 'importscripts', method: 'GET', url: urlOf(args[0]) }),
 	);
@@ -612,9 +643,19 @@ const BUILD_HELPER_PROLOGUE =
  * The installable source. Wrapped so `addInitScript` can evaluate it directly,
  * and so the same string works in a page, an iframe, and a worker.
  */
-export const INSTRUMENT_SOURCE = `(function(){${BUILD_HELPER_PROLOGUE}return (${instrumentSource.toString()})(${JSON.stringify(
+/**
+ * The installable source.
+ *
+ * The function receives its own text as an argument so a worker bootstrap can
+ * install the same instrument in worker scope — the one place a page-side patch
+ * cannot reach, and the place real sites put their price feeds and their media
+ * fetching. Passing it along again means a worker that spawns its own worker is
+ * covered too.
+ */
+const SELF = instrumentSource.toString();
+export const INSTRUMENT_SOURCE = `(function(){${BUILD_HELPER_PROLOGUE}return (${SELF})(${JSON.stringify(
 	INSTRUMENT_LIMITS,
-)}, ${JSON.stringify(EGRESS_GLOBAL)})})()`;
+)}, ${JSON.stringify(EGRESS_GLOBAL)}, ${JSON.stringify(SELF)})})()`;
 
 /**
  * Reads and clears the buffer from *outside* the page's world.

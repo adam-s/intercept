@@ -112,3 +112,31 @@ out (they are documents, so they survived a filter aimed at data content types).
 The general form is in AGENTS.md: two tools are duplication only when they do
 the same job, and a seam nobody wrote down gets deleted by the next reader as
 redundant.
+
+## Worker scope: read, not instrumented — and why the obvious fix is wrong
+
+A worker has its own globals, so a page-side patch never sees its requests. That
+is not a corner case: a finance site's entire price feed and a video site's media
+fetching both live in one, invisible to every instrumented pass until someone
+read the worker's source.
+
+Instrumenting the worker directly was tried. Patch the `Worker` constructor to
+load a blob that installs the instrument and then pulls the real script in with
+`importScripts`. It runs — and it breaks the worker. A blob URL has no
+meaningful base, so every relative request the worker makes resolves against the
+blob and fails; the benchmark's worker stopped fetching entirely. Reverted, and
+pinned, because an aid that breaks what it observes is not a trade this
+instrument may make.
+
+The workable version keeps the worker's real URL and rewrites its response body
+on the way in, which means request routing rather than a page-side patch: route
+the request whose URL was passed to `new Worker(...)`, fetch it, prepend the
+instrument, fulfil. The ordering is the awkward part — the route has to be
+registered before the constructor fires — so it belongs in the driver rather
+than in the injected source.
+
+Until then the gap is covered by reading rather than capturing: the manifest
+fetches each worker script and reports the transports and hosts in its source.
+That is how a live run found a socket no capture could see, and it is honest
+about what it is — a transport named there fired somewhere nothing observed.
+
