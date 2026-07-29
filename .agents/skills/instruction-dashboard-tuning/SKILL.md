@@ -214,20 +214,58 @@ One unconditional value satisfies the wide reading of the rule and silently
 fails the narrow one — and the wide screenshot looks correct, so the defect
 survives any check that stops at one viewport. Render both.
 
-### G5 — An empty collection shows a field exists, never what it holds
+### G5 — Read the field before designing the slot, and say what the response lacks
 
 A sample where every instance of a field is empty or null gives its name and
 nothing else. Guess the element shape and the guess type-checks, because a cast
 asserts rather than validates — the failure arrives at runtime, in the branch
-that only fires on the populated case. Find a non-empty instance in the sample
-and read it; if there is none, the description says **"cannot be determined"**
-and the build renders the collection only once its shape is known.
+that only fires on the populated case.
+
+The mirror of that is worse because it looks finished: **every atom the tree
+names is resolved against the response, or declared decorative in writing.** An
+atom with no field behind it ships as an empty well — a blank circle where a
+picture belongs, a chip with nothing in it — and reads as a styling bug rather
+than as missing data. Where the response genuinely lacks it, the fix is the
+route, not a placeholder: the screen is the first consumer that proves a field
+was never returned.
 
 ### G6 — Absence has kinds, and they are distinct
 
-Nothing-matched, request-failed, and not-yet-loaded are three different facts.
-Rendering them identically throws away the only information the reader needed.
-Loading holds the populated rhythm so the page does not reflow when data lands.
+Nothing-matched, request-failed, not-yet-loaded, and **nothing-asked-yet** are
+four different facts. The last belongs to any screen whose subject is a query,
+and it is the state such a screen opens in: collapsing it into empty tells a
+reader their search failed before they have searched. Rendering any two of the
+four identically throws away the only information the reader needed. Loading
+holds the populated rhythm so the page does not reflow when data lands.
+
+### G7 — A count that agrees with itself is not a completeness signal
+
+A response field named for a total, whose value is the length of the array beside
+it, cannot ever disagree with that array — so the screen's "showing N of M" line
+is true by construction and stays green while the route silently serves one page
+of thousands. Read the upstream's own total, or report that there is none. **"14
+of 14" and "14, total unknown" are different claims**, and substituting the first
+for the second is the defect, not a formatting choice.
+
+### G8 — A state the upstream will not produce on demand is a state nobody looked at
+
+Empty, refused, partial and in-flight are the states most likely to be wrong,
+because a healthy upstream serves none of them when asked. Built once against a
+guess and never rendered, they survive every review: the screenshot that got
+looked at was populated. So the states are made reachable locally — served from
+the recorded response shapes, selected through the same identifier the screen
+already takes from its URL — and each one is rendered and looked at before the
+screen is called finished. An in-flight fixture must actually hold, since a
+stand-in that answers instantly cannot exhibit a behaviour defined by waiting.
+
+### G9 — State the constraint at the code site; never cite the description
+
+The description is deleted when the cycle closes and the screen is not, so a
+comment reading "see §5 of the description" is a dangling reference the day it is
+written — and the next reader cannot tell whether the rule still holds or was
+superseded. Write what the constraint *is* and why the naive thing fails. The
+build then carries its own reasons, and the description stays free to be thrown
+away, which is what keeps it honest as training data rather than documentation.
 
 ---
 
@@ -249,11 +287,20 @@ suspected of being clear only to its author.
 
 ## Capture
 
-`node scripts/snapshot.mjs --help`. A protected site serves an interstitial that
-screenshots perfectly, so **read the exit code** — a challenge is a finding, not
-a retry. Changing engine or profile is a rung; changing a header is a retry.
+`node scripts/snapshot.mjs --help` for frames and for rendering the build.
+`node scripts/fixture-api.mjs --help` serves the recorded response shapes on
+their own port, which is what makes G8 practical: point the app at it and every
+state is reachable, repeatable and free of outbound requests.
+
+A protected site serves an interstitial that screenshots perfectly, so **read the
+exit code** — a challenge is a finding, not a retry. Changing engine or profile is
+a rung; changing a header is a retry.
 
 **When captures start being refused, probe the routes before climbing another
 rung.** Reputation is shared between the capture browser and the domain routes,
 and only the routes show the bill — a route degrading in step means further
 attempts make it worse. Ask the maintainer for a frame instead.
+
+**Frame capture is outward-facing and runs attended.** Rendering the build is
+not: against the fixture it touches nothing external, which is the half of this
+loop that is safe to iterate on unsupervised.

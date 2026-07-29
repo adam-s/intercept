@@ -1,22 +1,23 @@
 'use client';
 
 /**
- * Hacker News list, built from .snapshots/frame-1-hn/description.md and nothing
- * else. Every layout decision here traces to a numbered section of that file.
+ * Hacker News list: one dense ranked column.
  *
- * §8 keeps this a rendering of our route's data in the frame's visual language
- * rather than a copy of the site: no login, no submit, no search, no hide, and
- * only the list types the route actually serves.
+ * This renders our route's data in the source's visual language rather than
+ * copying the site. Anything the route cannot serve is cut rather than mocked —
+ * no login, no submit, no search, no hide — because a control that cannot act is
+ * worse than no control, and only the list types the route actually serves get a
+ * tab.
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import { useUrlParam } from '@/lib/url-state';
 import { type Story, StoryRow, StoryRowSkeleton } from './story-row';
 
-/** §8: only the tabs the route serves. `past`/`ask`/`show`/`jobs` have no route. */
+/** Only the tabs the route serves. `past`/`ask`/`show`/`jobs` have no route. */
 const LIST_TYPES = ['top', 'new', 'best'] as const;
 
-/** §6: the loading state holds 30 rows, matching what a page actually returns. */
+/** Loading holds 30 rows, matching what a page returns, so nothing reflows. */
 const SKELETON_KEYS = Array.from({ length: 30 }, (_, i) => `skeleton-${i + 1}`);
 
 type ListResponse = {
@@ -55,11 +56,12 @@ export default function HackerNewsPage() {
 	}, [type, fetchList]);
 
 	return (
-		// §2: one centered column. §7: full width at the narrow viewport, ~85% above
-		// it — a real breakpoint, not one unconditional width.
+		// One centered column: full width at the narrow viewport, ~85% above it. A
+		// real breakpoint, because one unconditional width satisfies the wide
+		// reading of the rule and silently fails the narrow one.
 		<div className="mx-auto w-full min-w-0 rounded-md border bg-card text-[13px] md:w-[85%]">
-			{/* §2/§3: a full-width header band; the wordmark is the only bold text.
-			    §8: the band's shape carries over from the frame, its orange does not. */}
+			{/* A full-width header band; the wordmark is the only bold text. The
+			    band's shape carries over from the source, its brand hue does not. */}
 			<header className="flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-t-md border-b bg-muted px-3 py-2 leading-[15px]">
 				<span className="font-semibold text-foreground">Hacker News</span>
 				<nav className="flex flex-wrap gap-x-3 text-[11px]">
@@ -82,7 +84,7 @@ export default function HackerNewsPage() {
 
 			<div className="px-2 py-1">
 				{load.status === 'loading' ? (
-					// §6: 30 skeleton rows at the populated rhythm, so nothing reflows.
+					// 30 skeleton rows at the populated rhythm, so nothing reflows.
 					<ol className="list-none">
 						{SKELETON_KEYS.map((k) => (
 							<StoryRowSkeleton key={k} />
@@ -90,8 +92,9 @@ export default function HackerNewsPage() {
 					</ol>
 				) : null}
 
-				{/* §6: error and empty must be distinguishable — different words, and
-				    error names what failed. */}
+				{/* Error and empty are different facts, so they get different words —
+				    and the error names what failed, because a refusal a reader takes
+				    for an empty list is a refusal nobody retries. */}
 				{load.status === 'error' ? (
 					<p className="py-2 text-[13px] text-destructive">
 						Could not load the {type} list. {load.message}
@@ -108,20 +111,20 @@ export default function HackerNewsPage() {
 					<>
 						<ol className="list-none">
 							{load.data.items.map((s) => (
-								// §5: keyed by id, never the array index.
+								// Keyed by id, never the array index: the list reorders.
 								<StoryRow key={s.id} story={s} />
 							))}
 						</ol>
 
-						{/* §6 Partial: a count that disagrees with `returned` is reported,
-						    never silently truncated. */}
+						{/* A count that disagrees with `returned` is reported. Rendering N
+						    rows silently is indistinguishable from a source holding N. */}
 						{load.data.returned !== load.data.items.length ? (
 							<p className="py-1 text-[11px] text-destructive">
 								Showing {load.data.items.length} of {load.data.returned} reported.
 							</p>
 						) : null}
 
-						{/* §2/§5: the "More" link appears only when hasMore is true. */}
+						{/* "More" appears only when the route says more exists. */}
 						{load.data.hasMore ? (
 							<p className="py-1 pl-[38px] text-[13px]">
 								<a
@@ -136,9 +139,9 @@ export default function HackerNewsPage() {
 				) : null}
 			</div>
 
-			{/* §2 named a footer of links and a search row; §10 puts both out of scope, so
-			    nothing survives the subtraction. Recorded as a §2/§10 contradiction in
-			    cycle 1 — the format now requires §10 to be resolved against §2. */}
+			{/* The source's footer links and search row are both out of scope — every
+			    one needs a route this domain does not expose — so nothing survives
+			    the subtraction and no empty footer is rendered in their place. */}
 		</div>
 	);
 }

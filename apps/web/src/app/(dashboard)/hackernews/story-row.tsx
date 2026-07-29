@@ -3,13 +3,14 @@
 /**
  * One story, two lines: title line and metadata line.
  *
- * Built from .snapshots/frame-1-hn/description.md §5, which pins the two item
- * variants that exist in the route's real data — a job post whose `points` and
- * `author` are null, and a story whose `commentCount` is 0. Rendering
- * "null points by null" is the defect this component exists to prevent.
+ * Two item variants exist in the route's real data and both are handled here: a
+ * job post whose `points` and `author` are null, and a story whose
+ * `commentCount` is 0. Rendering "null points by null" is the defect this
+ * component exists to prevent, and it only appears on the variant a populated
+ * sample is least likely to contain.
  *
- * §8: the frame's density and two-line rhythm carry over; its palette does not.
- * Colors are semantic tokens so the row stays legible in either theme mode.
+ * The source's density and two-line rhythm carry over; its palette does not.
+ * Colours are semantic tokens so the row stays legible in either theme.
  */
 
 export type Story = {
@@ -34,7 +35,7 @@ function itemHref(commentsUrl: string) {
 export function StoryRow({ story }: { story: Story }) {
 	const { rank, title, url, site, points, author, ageISO, ageText, commentCount } = story;
 
-	// A job post carries neither score nor submitter. §5: the metadata line
+	// A job post carries neither score nor submitter, so the metadata line
 	// collapses to age alone rather than rendering empty slots.
 	const hasByline = points !== null && author !== null;
 

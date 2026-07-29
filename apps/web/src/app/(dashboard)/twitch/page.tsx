@@ -1,18 +1,19 @@
 'use client';
 
 /**
- * A category of live streams, built from
- * .snapshots/frame-twitch/description.md and nothing else.
+ * A category of live streams: a uniform grid of picture-first cards.
  *
- * §7: the source's left rail and top bar duplicate the app shell, so they are
- * cut rather than stacked.
+ * The source's left rail and top bar duplicate the app shell, so they are cut
+ * rather than stacked. What a reader came for is what is happening on screen and
+ * how many people are already there, so the picture is never sacrificed to fit
+ * more text and the viewer count never elides.
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import { useUrlParam } from '@/lib/url-state';
 import { type Stream, StreamCard, StreamCardSkeleton } from './stream-card';
 
-/** §3: two rows of three is what a screenful holds. */
+/** Two rows of three is what a screenful holds at the wide viewport. */
 const SKELETON_KEYS = ['s1', 's2', 's3', 's4', 's5', 's6'];
 
 type CategoryResponse = {
@@ -54,12 +55,12 @@ export default function TwitchPage() {
 
 	return (
 		<div className="min-w-0">
-			{/* §3: the header block spans the grid and sits clear of the first row
-			    by more than one card gap. */}
+			{/* The header block spans the grid and sits clear of the first row by
+			    more than one card gap, so it reads as a header and not as a card. */}
 			<header className="mb-6 flex flex-wrap items-baseline gap-x-3 gap-y-1">
 				<h1 className="text-xl font-semibold">{load.status === 'ok' ? load.data.game : slug}</h1>
 				{load.status === 'ok' ? (
-					// §3: a run of figures separated by a middle dot.
+					// A run of figures separated by a middle dot.
 					<p className="text-[13px] text-muted-foreground">
 						{load.data.returned} live {load.data.returned === 1 ? 'stream' : 'streams'} shown
 						{load.data.hasMore ? ' · more exist upstream' : ''}
@@ -86,8 +87,9 @@ export default function TwitchPage() {
 				</form>
 			</header>
 
-			{/* §5: _note is content. A grid of N with no explanation is
-			    indistinguishable from a category holding N streams. */}
+			{/* `_note` is content, not diagnostics: the route sets it when the
+			    upstream refused deeper paging, and a grid of N with no explanation
+			    is indistinguishable from a category holding N streams. */}
 			{load.status === 'ok' && load.data._note ? (
 				<p className="mb-4 rounded border border-border bg-muted/40 px-3 py-2 text-[12px] text-muted-foreground">
 					{load.data._note}
@@ -106,7 +108,8 @@ export default function TwitchPage() {
 				</p>
 			) : null}
 
-			{/* §4/§7 of the skill (G4): a real breakpoint per stated column count. */}
+			{/* A real breakpoint per stated column count. One unconditional value
+			    looks correct in the wide screenshot and fails the narrow one. */}
 			<div className="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
 				{load.status === 'loading'
 					? SKELETON_KEYS.map((k) => <StreamCardSkeleton key={k} />)

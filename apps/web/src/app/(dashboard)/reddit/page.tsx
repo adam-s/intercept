@@ -1,19 +1,19 @@
 'use client';
 
 /**
- * Reddit feed, built from .snapshots/frame-reddit/description.md and nothing
- * else.
+ * Reddit feed: one uniform column of mixed post types.
  *
- * §9: the frame's own header and left nav are cut rather than stacked — the app
- * shell already provides navigation. What survives from the header is the sort
- * control, which is screen state rather than site chrome.
+ * The source's own header and left nav are cut rather than stacked, because the
+ * app shell already provides navigation and a captured frame cannot show that
+ * join. What survives from the header is the subreddit control, which is screen
+ * state rather than site chrome.
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import { useUrlParam } from '@/lib/url-state';
 import { type Post, PostRow, PostRowSkeleton } from './post-row';
 
-/** §6: five skeleton posts, matching the frame's per-screenful density. */
+/** Five skeleton posts, matching the populated per-screenful density. */
 const SKELETON_KEYS = ['s1', 's2', 's3', 's4', 's5'];
 
 type FeedResponse = {
@@ -54,8 +54,9 @@ export default function RedditPage() {
 	}, [subreddit, fetchFeed]);
 
 	return (
-		// §2/§7: the feed is the only region that survives §10. Full width narrow,
-		// constrained above — the right rail and left nav were cut, not shrunk.
+		// The feed is the only region that survives the subtraction. Full width
+		// narrow, constrained above — the right rail and left nav were cut, not
+		// shrunk into a column too thin to read.
 		<div className="mx-auto w-full min-w-0 max-w-3xl">
 			<div className="mb-3 flex flex-wrap items-center gap-2">
 				<h1 className="text-base font-semibold">{subreddit ? `r/${subreddit}` : 'Popular'}</h1>
@@ -96,7 +97,7 @@ export default function RedditPage() {
 
 			{load.status === 'loading' ? SKELETON_KEYS.map((k) => <PostRowSkeleton key={k} />) : null}
 
-			{/* §6: error and empty are visibly distinct. */}
+			{/* Error and empty are visibly distinct: different words, different ink. */}
 			{load.status === 'error' ? (
 				<p className="py-3 text-[13px] text-destructive">
 					Could not load {subreddit ? `r/${subreddit}` : 'the popular feed'}. {load.message}
@@ -110,13 +111,13 @@ export default function RedditPage() {
 			{load.status === 'ok' && load.data.posts.length > 0 ? (
 				<>
 					{load.data.posts.map((p) => (
-						// §5: keyed by id, never the array index.
+						// Keyed by id, never the array index: the feed reorders.
 						<PostRow key={p.id} post={p} />
 					))}
 
-					{/* §6 Partial — the state that matters on this route. Rendering N
-					    posts silently is indistinguishable from a quiet day, so the
-					    screen says what it actually received whenever more exists. */}
+					{/* The state that matters on this route. Rendering N posts silently
+					    is indistinguishable from a quiet day, so the screen says what it
+					    actually received whenever the route says more exists. */}
 					{load.data.hasMore ? (
 						<p className="py-3 text-[12px] text-muted-foreground">
 							Showing {load.data.posts.length} post

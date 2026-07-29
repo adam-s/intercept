@@ -1,13 +1,11 @@
 'use client';
 
 /**
- * One feed post: context line, title, muted action row, thumbnail left.
+ * One feed post: context line, title, muted action row, thumbnail leading.
  *
- * Built from .snapshots/frame-reddit/description.md.
- *
- * §10 is why there are no vote arrows here. Our route exposes no write action,
- * and an arrow that cannot vote is worse than no arrow — score and comment count
- * survive as text, because they are data.
+ * There are no vote arrows here because our route exposes no write action, and
+ * an arrow that cannot vote is worse than no arrow. Score and comment count
+ * survive as text, because those are data rather than affordances.
  */
 
 export type Post = {
@@ -25,7 +23,7 @@ export type Post = {
 	nsfw: boolean;
 };
 
-/** `createdAt` is ISO; the frame shows it relative, so the screen converts. */
+/** `createdAt` is ISO; the source shows it relative, so the screen converts. */
 export function relativeAge(iso: string, now = Date.now()) {
 	const ms = now - new Date(iso).getTime();
 	if (!Number.isFinite(ms) || ms < 0) return '';
@@ -36,7 +34,7 @@ export function relativeAge(iso: string, now = Date.now()) {
 	return `${Math.floor(hours / 24)}d ago`;
 }
 
-/** Compact score/comment counts, the way the frame shows them. */
+/** Compact score and comment counts, the way the source shows them. */
 export function compactCount(n: number) {
 	if (!Number.isFinite(n)) return '0';
 	if (Math.abs(n) < 1000) return String(n);
@@ -44,8 +42,9 @@ export function compactCount(n: number) {
 }
 
 /**
- * §5: `nsfw` is load-bearing. The frame showed no blur because that session had
- * it disabled; a logged-out render must not display flagged media.
+ * `nsfw` is load-bearing. The captured frame showed no blur because that session
+ * had the setting disabled — a property of the recording, not of the product —
+ * and a signed-out render must not display flagged media.
  */
 function showsMedia(post: Post) {
 	return !post.nsfw && (post.postType === 'image' || post.postType === 'video');
@@ -56,7 +55,7 @@ export function PostRow({ post }: { post: Post }) {
 
 	return (
 		<article className="flex gap-3 border-b py-3">
-			{/* §3: fixed square thumbnail, roughly three lines tall. §5: postType
+			{/* Fixed square thumbnail, roughly three lines tall; postType
 			    decides what fills it. */}
 			<div className="size-[72px] shrink-0 overflow-hidden rounded bg-muted">
 				{showsMedia(post) && post.contentHref ? (
@@ -70,7 +69,7 @@ export function PostRow({ post }: { post: Post }) {
 			</div>
 
 			<div className="min-w-0 flex-1">
-				{/* §3: context line above the title. */}
+				{/* Context line above the title. */}
 				<div className="flex flex-wrap items-center gap-x-1.5 text-[12px] text-muted-foreground">
 					<span className="font-medium text-foreground">{post.subreddit}</span>
 					<span>·</span>
@@ -88,7 +87,7 @@ export function PostRow({ post }: { post: Post }) {
 					</a>
 				</h2>
 
-				{/* §3/§10: one muted row, data only — no arrows, no award, no share. */}
+				{/* One muted row, data only — no arrows, no award, no share. */}
 				<div className="mt-1.5 flex flex-wrap gap-x-4 text-[12px] text-muted-foreground">
 					<span>{compactCount(post.score)} points</span>
 					<a href={href} className="hover:underline">
@@ -101,7 +100,7 @@ export function PostRow({ post }: { post: Post }) {
 	);
 }
 
-/** §6: five skeleton posts at the populated rhythm. */
+/** A skeleton post at the populated row's rhythm. */
 export function PostRowSkeleton() {
 	return (
 		<div className="flex gap-3 border-b py-3">

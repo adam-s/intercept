@@ -3,10 +3,9 @@
 /**
  * One stream card: a still, then a caption of title / channel / tags.
  *
- * Built from .snapshots/frame-twitch/description.md.
- *
- * §1: the still is its own edge — no border, no shadow, radius a small fraction
- * of its height. §2: the title yields first, eliding before the channel name.
+ * The still is its own edge — no border, no shadow, radius a small fraction of
+ * its height — and the title yields first, eliding before the channel name does,
+ * because two elements competing for one row must have a stated loser.
  */
 
 import { useState } from 'react';
@@ -22,7 +21,7 @@ export type Stream = {
 	contentClassificationLabels?: { id: string }[] | null;
 };
 
-/** §1: viewer counts are read at a glance, so they shorten rather than wrap. */
+/** Viewer counts are read at a glance, so they shorten rather than wrap. */
 export function compactViewers(n: number) {
 	if (!Number.isFinite(n)) return '0';
 	if (n < 1000) return String(n);
@@ -38,11 +37,12 @@ export function StreamCard({ stream }: { stream: Stream }) {
 
 	return (
 		<article className="min-w-0">
-			{/* §1: 16:9, rigid in aspect — absorbs width by scaling. */}
+			{/* 16:9, rigid in aspect — absorbs width by scaling. */}
 			<a href={href} className="relative block aspect-video overflow-hidden rounded-sm bg-muted">
 				{stillFailed ? (
-					// §5: a failed still keeps the card's shape and shows the channel
-					// instead. A grid that reflows while being read is worse.
+					// A failed still keeps the card's shape and shows the channel
+					// instead. A grid that reflows while being read is worse than a
+					// card with no picture in it.
 					<div className="flex size-full items-center justify-center px-2 text-center text-[13px] text-muted-foreground">
 						{stream.broadcaster.displayName}
 					</div>
@@ -57,21 +57,21 @@ export function StreamCard({ stream }: { stream: Stream }) {
 					/>
 				)}
 
-				{/* §1: leading-top, inset by less than its own height. */}
+				{/* Leading-top, inset by less than its own height. */}
 				{stream.type === 'live' ? (
 					<span className="absolute top-1 left-1 rounded-[2px] bg-destructive px-1 text-[11px] font-semibold uppercase leading-[16px] text-white">
 						Live
 					</span>
 				) : null}
 
-				{/* §1: leading-bottom, same inset. The scrim exists because this text
-				    sits over unpredictable video. */}
+				{/* Leading-bottom, same inset. The scrim exists because this text sits
+				    over unpredictable video. */}
 				<span className="absolute bottom-1 left-1 rounded-[2px] bg-black/70 px-1 text-[11px] leading-[16px] text-white">
 					{compactViewers(stream.viewersCount)} viewers
 				</span>
 			</a>
 
-			{/* §2: avatar leading, a two-line stack taking the rest. */}
+			{/* Avatar leading, a two-line stack taking the rest. */}
 			<div className="mt-2 flex gap-2">
 				<div className="mt-0.5 size-8 shrink-0 rounded-full bg-muted" aria-hidden />
 				<div className="min-w-0 flex-1">
@@ -93,7 +93,7 @@ export function StreamCard({ stream }: { stream: Stream }) {
 				</div>
 			</div>
 
-			{/* §2: pills wrapping to at most one extra line; overflow dropped. */}
+			{/* Pills wrapping to at most one extra line; overflow dropped. */}
 			{tags.length > 0 || labels.length > 0 ? (
 				<div className="mt-1.5 flex max-h-[44px] flex-wrap gap-1 overflow-hidden">
 					{labels.map((l) => (
@@ -118,7 +118,7 @@ export function StreamCard({ stream }: { stream: Stream }) {
 	);
 }
 
-/** §6 of the skill: loading holds the populated rhythm so nothing reflows. */
+/** Loading holds the populated rhythm so nothing reflows when data lands. */
 export function StreamCardSkeleton() {
 	return (
 		<div className="min-w-0">
