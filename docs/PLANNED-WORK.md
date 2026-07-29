@@ -75,14 +75,14 @@ new guidance is a suspect and not merely an innocent bystander. Suppress one
 rule at a time to find out, the same way aids come off one at a time — the first
 removal that restores the old behaviour names the cause.
 
-| # | Item | Why it was deferred |
+| # | Item | State |
 |---|---|---|
-| 5 | The interaction sweep has never run against a real site | Its safety refusals are tested only against mocks written by the same author as the sweep. Needs one attended run before it runs unattended against five targets. |
-| 6 | `--record` replaces a baseline instead of merging | A route with two legitimate shapes loses one. Hit once already on a rate-limit-fallback route; the data was repaired by hand and the tool still has the defect. |
-| 7 | Challenge detection does not invalidate an instrumented run | The detector exists and the two-pass rule says a block during instrumentation proves nothing about the site, but nothing connects them. Should be mechanical, not remembered. |
-| 8 | Worker-scoped traffic is a half-answer | Construction is recorded; the worker's own requests are not. Either capture them or scope the row out explicitly — the present state lets a reader believe it is covered. |
-| 9 | Domains are still ephemeral by rule | Folding them in retires three records that must move together: the ignore rule, the base-branch rule, and the product invariant. A superseded rule left standing gets obeyed. |
-| 10 | `transport` is typed as a bare string | Reconciled only by a repo test against the reference domain. A domain could declare a name nothing knows. |
+| 5 | Interaction sweep validated | **Done.** Measured against a fixture carrying transports that appear only after interaction: 8 transports and 16 call shapes without it, 9 and 22 with it, all three gated endpoints found only with it. The comparison found the sweep's element actions had never worked on any site. |
+| 6 | `--record` replaces a baseline instead of merging | Open. A route with two legitimate shapes loses one. Hit once on a rate-limit-fallback route; the data was repaired by hand and the tool still has the defect. |
+| 7 | Challenge detection | **Done.** The manifest names any bot-protection vendor it saw and states that a refusal from an instrumented run cannot be recorded as the site's policy until repeated clean. |
+| 8 | Worker-scoped traffic | **Done.** Capture runs on Playwright's context-level events, which see a worker's own requests; verified against the fixture and against a live site that fetches media from a worker. |
+| 9 | Domains are still ephemeral by rule | Open. Folding them in retires three records that must move together: the ignore rule, the base-branch rule, and the product invariant. A superseded rule left standing gets obeyed. |
+| 10 | `transport` is typed as a bare string | Open. Reconciled only by a repo test against the reference domain, so a typo fails CI rather than the compiler. Accepted deliberately: the canonical list lives in plain JavaScript the TypeScript cannot import, and duplicating it would create the two-lists drift this project keeps paying for. |
 
 Also known and accepted for now: the camoufox capture path cannot be benchmarked
 unattended, because that driver refuses true headless by design. Its recall was

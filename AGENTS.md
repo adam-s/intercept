@@ -254,11 +254,13 @@ break-it review exists to catch.
   the gate.
 - **Prove a new check fails.** A test that has never been red is a claim, not a
   check.
-- **Read the suite count, not just the failure count.** A test file that fails
-  to load reports no failures, because it reported no tests — so a run can be
-  green while an entire gate never executed. Confirm the number of suites and
-  tests moved in the direction the change implies; a new check that added no
-  tests did not run. Break the thing it guards, watch it go red, restore.
+- **Absence of a result reads exactly like a pass.** A check that never ran, a
+  case that was skipped, a probe cut off by a budget, a suite that failed to
+  load, an action that found nothing to act on — none of them report a failure,
+  because none of them report anything. So anything that can decline to act says
+  so in its output, with the reason; and a count is read for whether it moved
+  the way the change implies, not only for whether it contains failures. A new
+  check that added no cases did not run. Break the thing it guards, watch it go red, restore.
 - **Dynamic scripts are bounded** — a hard cap on requests, wall time, output
   size, or scenarios, stated in the header docblock and enforced in the code. No
   model judgment inside a script. Importing a script runs nothing, so a unit

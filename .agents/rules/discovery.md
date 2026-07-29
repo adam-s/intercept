@@ -98,6 +98,18 @@ protection:
 | Output | the manifest and the elimination table | route responses |
 | If it is blocked | says nothing about the site | a real finding |
 
+In commands: `discover-probe --mode=manifest --sweep` is the instrumented pass —
+it installs the instrument, exercises the page, and prints the elimination table
+derived from what fired. `--mode=uninstall` ends it and hands the page back.
+`route-spec` refuses to run until that has happened, so the clean pass cannot
+start by accident.
+
+Exercising the page is not optional cosmetics. Measured against a fixture
+carrying transports that appear only after interaction, a merely loaded page
+yielded eight transports and sixteen call shapes; the same page exercised
+yielded nine and twenty-two, and every interaction-gated endpoint came only from
+the second. A capture with no sweep behind it is a statement about page load.
+
 The instrumented pass answers *what is here*. The clean pass uses that answer
 and carries no aids at all — the instrument is removed, the sweep does not run,
 and requests go at a human rate. A session that keeps its patches carries a
@@ -189,9 +201,11 @@ honest result. "Complete" without that qualifier is a claim about both.
   concluding the site is empty.
 - **Traffic resets on navigation.** Capture before navigating away; re-capture
   after the new page settles.
-- **WebSocket traffic is not captured** by the traffic interceptor, which
-  records HTTP only. Detect WebSocket by scanning script bundles for its markers
-  (`--mode=bundles`), then confirm the URL directly.
+- **A socket is captured, and its frames are the finding.** The handshake alone
+  says a socket exists; one frame says what rides inside it, and a text protocol
+  or an encrypted envelope looks like an empty result to a reader expecting
+  JSON. A page may also open several sockets for different jobs, so one is not
+  the answer.
 - If the browser connection drops, reconnect once. If that fails, continue with
   what you have and say so — a give-up is a reported outcome.
 - **A rate limit you caused is not a property of the target.** Probing hammers

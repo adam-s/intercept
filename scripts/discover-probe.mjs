@@ -26,6 +26,9 @@
  *                      --url defaults to the site's /graphql.
  *   --mode=bundles     Fetch the page's largest scripts and report which
  *                      real-time transports they reference.
+ *   --mode=coverage    Diff the call shapes the browser actually made against the
+ *                      routes built, and print a recall floor. Reads the
+ *                      manifest without draining it.
  *   --mode=manifest    Install the egress instrument if needed, drain what the
  *                      page's own JS reached for, reduce it to one row per call
  *                      shape, and print the elimination table derived from it.

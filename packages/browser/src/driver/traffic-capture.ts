@@ -5,15 +5,12 @@
  * `Network.*` events — which is Chromium-only. This module rebuilds it on
  * Playwright's own `request`/`response` events, which every engine supports.
  *
- * IT IS NOT YET THE CAPTURE THE RUNNING SYSTEM USES. The remote service still
- * runs its own CDP capture, so there are two implementations of one concern and
- * only the other one executes in production. This was found the way such things
- * are: a live run reported adaptive media absent on a page that was visibly
- * streaming, because the CDP session is bound to the page and the site fetches
- * its segments from a worker. Measured against the benchmark, the context-level
- * listener below does see worker traffic and the page-scoped CDP session does
- * not. Unifying on this module is recorded in docs/PLANNED-WORK.md; until then,
- * read any claim about capture coverage as a claim about the CDP path.
+ * This is the capture the running system uses, for everything except the
+ * top-level document. CDP keeps that one job because Playwright's listener does
+ * not receive a navigation response the page did not initiate — measured, not
+ * assumed. Neither side is a superset of the other: a page-bound CDP session
+ * cannot see a worker's traffic, which is where a real site was found fetching
+ * its media. The boundary is deliberate and is stated at both ends.
  *
  * What changes, honestly:
  *  - Resource typing comes from Playwright's `request.resourceType()` rather
