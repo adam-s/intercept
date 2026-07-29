@@ -10,27 +10,32 @@
 	"transports": [
 		{
 			"transport": "GraphQL",
-			"endpoints": ["gql.twitch.tv/gql"],
-			"note": "Carries most of the site's data; persisted queries by hash."
+			"endpoints": [
+				"gql.twitch.tv/gql"
+			],
+			"note": "Carries most of the site's data; persisted queries by hash.",
+			"detectableBy": "observation"
 		},
 		{
 			"transport": "WebSocket",
 			"endpoints": [
 				"wss://irc-ws.chat.twitch.tv/",
 				"wss://pubsub-edge.twitch.tv/v1",
-				"wss://eventsub.wss.twitch.tv/ws"
+				"wss://eventsub.wss.twitch.tv/ws",
+				"wss://hermes.twitch.tv/v1"
 			],
-			"note": "Three distinct sockets, not one. The chat socket tunnels IRC — a text protocol inside the frames — so a reader expecting JSON concludes the socket carries nothing useful."
+			"note": "Three distinct sockets, not one. The chat socket tunnels IRC \u2014 a text protocol inside the frames \u2014 so a reader expecting JSON concludes the socket carries nothing useful.",
+			"encoding": "The hermes socket carries an encrypted envelope; the IRC socket carries text, not JSON. Encoding is a property of each socket, so neither is a separate transport row.",
+			"detectableBy": "observation"
 		},
 		{
 			"transport": "HLS/Media",
-			"endpoints": ["usher.ttvnw.net/api/channel/hls/{channel}.m3u8", "usher.ttvnw.net/api/vod/{id}.m3u8"],
-			"note": "Playlist needs an access token minted by a GraphQL call first, so the media URL alone looks unauthenticated and fails."
-		},
-		{
-			"transport": "Encoded/Binary",
-			"endpoints": ["hermes"],
-			"note": "Newer pubsub replacement carrying an encrypted envelope."
+			"endpoints": [
+				"usher.ttvnw.net/api/channel/hls/{channel}.m3u8",
+				"usher.ttvnw.net/api/vod/{id}.m3u8"
+			],
+			"note": "Playlist needs an access token minted by a GraphQL call first, so the media URL alone looks unauthenticated and fails.",
+			"detectableBy": "observation"
 		}
 	]
 }

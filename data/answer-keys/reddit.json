@@ -8,18 +8,29 @@
 	"transports": [
 		{
 			"transport": "GraphQL",
-			"endpoints": ["www.reddit.com/svc/shreddit/graphql", "gql.reddit.com"],
-			"note": "The front end's own path. Two distinct hosts."
+			"endpoints": [
+				"www.reddit.com/svc/shreddit/graphql",
+				"gql.reddit.com"
+			],
+			"note": "The front end's own path. Two distinct hosts.",
+			"detectableBy": "observation"
 		},
 		{
 			"transport": "JSON API (XHR)",
-			"endpoints": ["gateway.reddit.com/desktopapi/v1/", "www.reddit.com/{path}.json"],
-			"note": "The .json suffix is a documented public API, so wrapping it satisfies the letter of a discovery task while learning nothing about the front end. The gateway host is the internal one."
+			"endpoints": [
+				"gateway.reddit.com/desktopapi/v1/",
+				"www.reddit.com/{path}.json"
+			],
+			"note": "The .json suffix is a documented public API, so wrapping it satisfies the letter of a discovery task while learning nothing about the front end. The gateway host is the internal one.",
+			"detectableBy": "observation"
 		},
 		{
 			"transport": "Embedded JSON",
-			"endpoints": ["<shreddit-post> element attributes"],
-			"note": "Records live in HTML attributes on custom elements — no script tag, no hydration payload. A scan looking for a JSON blob reports the page as carrying no data while every field is present."
+			"endpoints": [
+				"<shreddit-post> element attributes"
+			],
+			"note": "Records live in HTML attributes on custom elements \u2014 no script tag, no hydration payload. A scan looking for a JSON blob reports the page as carrying no data while every field is present.",
+			"detectableBy": "scan"
 		}
 	],
 	"variants": [

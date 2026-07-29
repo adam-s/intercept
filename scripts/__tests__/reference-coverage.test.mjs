@@ -186,6 +186,27 @@ describe('the answer keys stay out of the exam paper', () => {
 		}
 	});
 
+	// A key declaring a row observable that the classifier cannot emit makes that
+	// row a guaranteed miss, and a key declaring a row scan-only that the
+	// classifier can emit quietly drops it from the denominator. Both make the
+	// score lie, in opposite directions, so the declaration is checked against
+	// what the classifier actually produces rather than trusted.
+	it('every key declares detectability the classifier agrees with', async () => {
+		const { OBSERVABLE_TRANSPORTS } = await import('../../packages/browser/src/driver/manifest.ts');
+		for (const f of readdirSync(resolve(ROOT, 'data/answer-keys'))) {
+			if (!f.endsWith('.json')) continue;
+			const key = JSON.parse(readFileSync(resolve(ROOT, 'data/answer-keys', f), 'utf8'));
+			for (const t of key.transports ?? []) {
+				const declared = t.detectableBy ?? 'observation';
+				const observable = OBSERVABLE_TRANSPORTS.includes(t.transport);
+				expect(
+					declared,
+					`${f}: ${t.transport} is declared ${declared} but the classifier ${observable ? 'can' : 'cannot'} emit it`,
+				).toBe(observable ? 'observation' : 'scan');
+			}
+		}
+	});
+
 	// A key naming a transport the table cannot express would score against a row
 	// that does not exist.
 	it('every key names transports the elimination table knows', () => {

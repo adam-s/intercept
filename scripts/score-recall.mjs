@@ -65,11 +65,21 @@ export function parseArgs(argv) {
  * Both are worth a look, and neither should quietly inflate a score.
  */
 export function score(key, verdicts) {
-	const expected = (key.transports ?? []).map((t) => t.transport);
+	// A manifest is built from primitives the page reached for, so it can never
+	// report a verdict about a payload's *shape* — embedded data, an encoded
+	// body, markup-over-the-wire, gRPC framing. Scoring those against it made
+	// every such row a guaranteed miss: one target's only expected transport was
+	// unscoreable, so it could not have scored above zero however good the run.
+	// They are reported as unscored rather than counted as failures.
+	const all = key.transports ?? [];
+	const scorable = all.filter((t) => (t.detectableBy ?? 'observation') === 'observation');
+	const unscored = all.filter((t) => (t.detectableBy ?? 'observation') !== 'observation');
+
 	const found = new Set((verdicts ?? []).filter((v) => v.present).map((v) => v.transport));
+	const expected = scorable.map((t) => t.transport);
 
 	const hit = expected.filter((t) => found.has(t));
-	const missed = (key.transports ?? []).filter((t) => !found.has(t.transport));
+	const missed = scorable.filter((t) => !found.has(t.transport));
 	const surplus = [...found].filter((t) => !expected.includes(t)).sort();
 
 	return {
@@ -77,6 +87,7 @@ export function score(key, verdicts) {
 		asOf: key.asOf ?? null,
 		hit,
 		missed,
+		unscored,
 		surplus,
 		recall: expected.length ? hit.length / expected.length : 0,
 		// A key is a record of what a source said on a date. A site that migrated
@@ -94,12 +105,22 @@ export function render(result) {
 		if (m.endpoints?.length) lines.push(`             ${m.endpoints.slice(0, 3).join(', ')}`);
 		if (m.note) lines.push(`             why it is easy to miss: ${m.note}`);
 	}
+	if (result.unscored?.length) {
+		lines.push('', '  Not scoreable from a manifest — these are payload-shape verdicts:');
+		for (const u of result.unscored) {
+			lines.push(`    · ${u.transport}${u.note ? ` — ${u.note}` : ''}`);
+		}
+		lines.push('    Check these against the source scan, not against captured primitives.');
+	}
 	if (result.surplus.length) {
 		lines.push('', `  + beyond the key: ${result.surplus.join(', ')}`);
 		lines.push('    Either a real find the key should gain, or a row attributed wrongly.');
 	}
 	const total = result.hit.length + result.missed.length;
-	lines.push('', `  ${result.hit.length}/${total} = ${(result.recall * 100).toFixed(0)}%`);
+	lines.push(
+		'',
+		`  ${result.hit.length}/${total} = ${(result.recall * 100).toFixed(0)}%  (scoreable rows only)`,
+	);
 	if (result.asOf) {
 		lines.push('', `  The key is a record of what sources said on ${result.asOf}, not a fact.`);
 		lines.push('  Re-verify before treating a miss as a failure of the run.');

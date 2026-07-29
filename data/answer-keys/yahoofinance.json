@@ -16,12 +16,16 @@
 				"query1.finance.yahoo.com/v1/finance/search",
 				"query1.finance.yahoo.com/v1/finance/screener"
 			],
-			"note": "Behind a crumb plus cookie pair; the crumb has to be harvested from a page first."
+			"note": "Behind a crumb plus cookie pair; the crumb has to be harvested from a page first.",
+			"detectableBy": "observation"
 		},
 		{
 			"transport": "WebSocket",
-			"endpoints": ["wss://streamer.finance.yahoo.com/"],
-			"note": "Frames are base64-wrapped protobuf. Reading them as text yields noise, so a reader who does not decode concludes the socket carries nothing."
+			"endpoints": [
+				"wss://streamer.finance.yahoo.com/"
+			],
+			"note": "Frames are base64-wrapped protobuf. Reading them as text yields noise, so a reader who does not decode concludes the socket carries nothing.",
+			"detectableBy": "observation"
 		}
 	]
 }

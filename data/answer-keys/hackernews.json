@@ -10,7 +10,8 @@
 		{
 			"transport": "Embedded JSON",
 			"endpoints": [],
-			"note": "Absent. Data is in the markup as ordinary table rows, not as a payload."
+			"note": "Absent. Data is in the markup as ordinary table rows, not as a payload.",
+			"detectableBy": "scan"
 		}
 	],
 	"publicApis": [

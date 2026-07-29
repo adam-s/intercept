@@ -106,3 +106,47 @@ describe('parseArgs', () => {
 		});
 	});
 });
+
+describe('rows the classifier cannot produce are never scored as misses', () => {
+	// The defect this exists for: a manifest is built from primitives a page
+	// reached for, so it can never report a verdict about a payload's shape.
+	// Scoring those against it made every such row a guaranteed miss — one
+	// target's only expected transport was unscoreable, so no run could have
+	// scored above zero on it however good.
+	const mixed = {
+		target: 'x.test',
+		asOf: '2026-07-29',
+		transports: [
+			{ transport: 'GraphQL', detectableBy: 'observation' },
+			{ transport: 'Embedded JSON', detectableBy: 'scan', note: 'in the markup' },
+		],
+	};
+
+	it('excludes a scan-only row from the denominator', () => {
+		const r = score(mixed, [{ transport: 'GraphQL', present: true }]);
+		expect(r.recall).toBe(1);
+		expect(r.missed).toEqual([]);
+	});
+
+	it('reports the scan-only row rather than dropping it', () => {
+		const r = score(mixed, []);
+		expect(r.unscored.map((u) => u.transport)).toEqual(['Embedded JSON']);
+	});
+
+	it('a key of only scan-only rows scores nothing rather than scoring zero', () => {
+		const r = score({ target: 'x', transports: [mixed.transports[1]] }, []);
+		expect(r.missed).toEqual([]);
+		expect(r.unscored).toHaveLength(1);
+	});
+
+	it('says in the report that these need the source scan instead', () => {
+		expect(render(score(mixed, []))).toContain('payload-shape verdicts');
+	});
+
+	// Absent the field, an entry is assumed observable — the common case, and the
+	// safe direction: a wrongly scored row is visible, a silently dropped one is not.
+	it('treats an undeclared row as observable', () => {
+		const r = score({ target: 'x', transports: [{ transport: 'GraphQL' }] }, []);
+		expect(r.missed).toHaveLength(1);
+	});
+});
