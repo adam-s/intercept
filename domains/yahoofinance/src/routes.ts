@@ -12,6 +12,17 @@
  * server-sent events, which suits a caller that wants the stream itself. Both
  * are bounded: an unbounded stream route is a socket nobody closes.
  *
+ * Three more transports came out of reading the wire capture past what the
+ * synthetic sweep ranked first: a predefined screener (JSON API, public,
+ * hundreds of symbols per list — the site's own 100+-item listing), the
+ * homepage's news/video stream (GraphQL, cookie-gated), and per-video HLS
+ * manifests (public, discovered by following a video id the GraphQL route
+ * surfaces). None of the three showed up on a page that was merely loaded;
+ * the screener call fires on homepage load but ranks below ad/analytics
+ * traffic until the capture is read past the sweep's top rows, the GraphQL
+ * call needs a hero-stream widget to mount, and the video id only exists once
+ * something in the stream is a video.
+ *
  * @module domain-yahoofinance/routes
  */
 
@@ -381,6 +392,237 @@ export const routes: DomainRoute[] = [
 					})),
 					total: quotes.length,
 					_gate: 'crumb harvested from a browser session',
+				}),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/screener/:id',
+		examples: ['/screener/MOST_ACTIVES?count=25', '/screener/DAY_GAINERS?count=25&start=25'],
+		upstream: ['query1.finance.yahoo.com/v1/finance/screener/predefined/saved'],
+		transport: 'JSON API (XHR)',
+		description:
+			'A predefined screener list (most actives, day gainers/losers, ...). Public, ' +
+			'no crumb — the same rung as /chart and /search. Discovered by scanning the ' +
+			'homepage traffic rather than a click: the widget that calls it fires on load, ' +
+			'not behind an interaction, but it never showed up until the full wire capture ' +
+			"was read past the sweep's own top-ranked rows. This is the site's own \"100+ " +
+			'items" listing — MOST_ACTIVES alone runs to hundreds of symbols.',
+		browserRequired: false,
+		handler: async (c) => {
+			const { id } = c.req.param() as Record<string, string>;
+			const url = new URL(c.req.url);
+			const count = Math.min(Number(url.searchParams.get('count') ?? 25), 200);
+			const start = Math.max(Number(url.searchParams.get('start') ?? 0), 0);
+
+			const res = await rateLimitedFetch(
+				`https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?count=${count}&start=${start}&formatted=false&scrIds=${encodeURIComponent(id)}&sortField=&sortType=&useRecordsResponse=true&fields=symbol,shortName,regularMarketPrice,regularMarketChangePercent,regularMarketVolume&lang=en-US&region=US`,
+			);
+			if (!res.ok) return c.json({ error: `Screener returned ${res.status}`, id }, 502);
+			const body = (await res.json()) as {
+				finance?: { result?: Array<Record<string, unknown>>; error?: unknown };
+			};
+			if (body.finance?.error) return c.json({ error: body.finance.error, id }, 502);
+
+			const result = body.finance?.result?.[0];
+			// `useRecordsResponse=true` (set below, matching the page's own request) is
+			// not cosmetic — it renames the item array from the classic `quotes` to
+			// `records`. Checked both, in that order, so a route built against a
+			// captured shape that later drops the flag does not silently start
+			// returning zero items with a nonzero total.
+			const quotes =
+				((result?.records ?? result?.quotes) as Array<Record<string, unknown>> | undefined) ?? [];
+			// The upstream's own criteriaMeta.size is the count it was asked for, not
+			// the count that exists — the indicated total lives on the result itself
+			// when present, and falls back to what actually came back rather than to a
+			// request parameter that says nothing about the underlying list.
+			const indicatedTotal =
+				(result?.total as number | undefined) ??
+				(result?.criteriaMeta as { total?: number } | undefined)?.total ??
+				quotes.length;
+
+			return c.json(
+				withCompleteness({
+					screenerId: id,
+					title: result?.title ?? id,
+					start,
+					count,
+					// The `records` shape names fields `ticker`/`companyName`, not the `symbol`/
+					// `shortName` of every other route on this domain — verified by printing
+					// one raw record, because the requested `fields=symbol,shortName,...` list
+					// is silently ignored under `useRecordsResponse=true` rather than filtering
+					// to it. Both are checked so this keeps working if the flag is ever dropped.
+					quotes: quotes.map((q) => ({
+						symbol: q.ticker ?? q.symbol,
+						name: q.companyName ?? q.shortName,
+						price: q.regularMarketPrice,
+						changePercent: q.regularMarketChangePercent,
+						volume: q.regularMarketVolume,
+					})),
+					total: indicatedTotal,
+				}),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/news/home',
+		examples: ['/news/home?start=0&count=10'],
+		upstream: ['nexus-gateway-prod.media.yahoo.com/'],
+		transport: 'GraphQL',
+		description:
+			"The homepage's hero news/video stream. GraphQL, and it needed the browser: a " +
+			'cross-origin replay from the page carrying Yahoo identity cookies (A1/A1S/A3) ' +
+			'answers 200, and elimination never tried a plain HTTP client because the same ' +
+			'gap that makes /quote crumb-gated applies here — no crumb this time, but the ' +
+			'session cookies are still a credential a bare fetch does not have.',
+		handler: async (c, browser) => {
+			const url = new URL(c.req.url);
+			const start = Math.max(Number(url.searchParams.get('start') ?? 0), 0);
+			const count = Math.min(Number(url.searchParams.get('count') ?? 10), 25);
+
+			if (!browser.getUrl().includes('finance.yahoo.com')) {
+				await browser.navigate('https://finance.yahoo.com/');
+			}
+
+			// The persisted query text and fragment set are exactly what the page's own
+			// bundle sent — captured, not reconstructed. `x-yahoo-cg-client-version`
+			// carries a build timestamp the site rotates on deploy; if this route starts
+			// failing where /quote still works, that header is the first thing to refresh
+			// from a fresh capture.
+			// The full fragment set, unedited — GraphQL validates that every declared
+			// variable is used somewhere in the document, so trimming the Image/
+			// Resolutions fragments this route does not care about (it drops
+			// thumbnails from the response) breaks the query with "$imageTransforms
+			// is never used" rather than silently ignoring the dead code.
+			const query =
+				'query FinanceHomeHeroStream($listInput: LightyearListInput!, $clientContext: ClientContext!, $start: Int!, $count: Int!, $imageTransforms: [MysterioTransformsInput]! = [], $includeImageTransforms: Boolean! = true) {\n  lightyearList(\n    list_input: $listInput\n    cc: $clientContext\n    start: $start\n    count: $count\n  ) {\n    ...LightyearListHydratedStream\n  }\n}\nfragment Resolutions on MysterioImage {\n  url\n  height\n  width\n  transformLabel\n}\nfragment Image on Image {\n  type: imgType\n  originalUrl: url\n  originalHeight: height\n  originalWidth: width\n  resolutions: mysterioImages(transformInputs: $imageTransforms) @include(if: $includeImageTransforms) {\n    ...Resolutions\n  }\n}\nfragment ContentAttributes on ContentAttributes {\n  description\n  summary\n  pubDate: publishTime\n  displayTime\n  isHosted\n  canonicalUrl\n  clickthroughUrl\n  provider {\n    displayName\n    url\n    providerContentUrl\n    providerId\n  }\n  thumbnail {\n    ...Image\n  }\n}\nfragment FinanceStockTickers on Finance {\n  stockTickers {\n    symbol\n  }\n}\nfragment StoryData on Story {\n  id: uuid\n  __typename\n  title\n  previewUrl(cc: $clientContext)\n  isPremiumNews\n  isLiveBlog\n  embeddedLiveBlog {\n    status\n  }\n  contentAttributes {\n    ...ContentAttributes\n  }\n  finance {\n    ...FinanceStockTickers\n  }\n}\nfragment VideoData on Video {\n  id: uuid\n  __typename\n  title\n  duration\n  previewUrl(cc: $clientContext)\n  liveEventInfo {\n    scheduledStartTime\n    scheduledStopTime\n    status\n  }\n  contentAttributes {\n    ...ContentAttributes\n  }\n  finance {\n    ...FinanceStockTickers\n  }\n}\nfragment OutlinkData on Outlink {\n  __typename\n  uuid\n  description\n  displayTime\n  headline\n  url\n  provider {\n    displayName\n    url\n    providerContentUrl\n    providerId\n  }\n  contentAttributes {\n    thumbnail {\n      ...Image\n    }\n  }\n}\nfragment HydratedStoryOrVideoAsset on HydratedAsset {\n  __typename\n  asset {\n    __typename\n    ... on Story {\n      ...StoryData\n    }\n    ... on Video {\n      ...VideoData\n    }\n    ... on Outlink {\n      ...OutlinkData\n    }\n  }\n}\nfragment PaginationInfo on PaginationInfo {\n  totalCount\n  start\n  nextPage: hasNextPage\n  count\n}\nfragment LightyearListHydratedStream on LightyearList {\n  main: contentItems {\n    stream: assets {\n      ...HydratedStoryOrVideoAsset\n    }\n    pageInfo {\n      ...PaginationInfo\n    }\n  }\n}';
+			const variables = {
+				clientContext: { device: 'desktop', lang: 'en-US', region: 'US', site: 'finance' },
+				count,
+				imageTransforms: [],
+				includeImageTransforms: false,
+				listInput: {
+					disableDedupe: false,
+					enableBlockedContent: false,
+					enableMab: true,
+					enableQueryTimeLicenseCheck: true,
+					mabPlacementAlias: 'finance.us.en-us',
+					uuid: '8b3fc5c7-6c5d-422d-a821-83f569089c0e',
+				},
+				start,
+			};
+			const requestBody = { operationName: 'FinanceHomeHeroStream', query, variables };
+
+			const gqlRes = (await browser.evaluate(
+				new Function(`return fetch('https://nexus-gateway-prod.media.yahoo.com/', {
+					method: 'POST',
+					credentials: 'include',
+					headers: {
+						'content-type': 'application/json',
+						'accept': 'application/json',
+						'x-yahoo-cg-client-name': 'finance',
+						'x-yahoo-cg-client-version': '0.1.13926.1785359856',
+					},
+					body: JSON.stringify(${JSON.stringify(requestBody)}),
+				}).then((r) => r.json().then((j) => ({ status: r.status, json: j })))
+				  .catch((e) => ({ status: 0, json: { error: String(e).slice(0, 120) } }))`) as never,
+			)) as { status?: number; json?: unknown };
+
+			if (gqlRes?.status !== 200) {
+				return c.json({ error: `News stream returned ${gqlRes?.status}`, start, count }, 502);
+			}
+			const data = gqlRes.json as {
+				data?: {
+					lightyearList?: {
+						main?: {
+							stream?: Array<{ asset?: Record<string, unknown> }>;
+							pageInfo?: { totalCount?: number; nextPage?: boolean };
+						};
+					};
+				};
+			};
+			const main = data.data?.lightyearList?.main;
+			const items = main?.stream ?? [];
+
+			return c.json(
+				withCompleteness({
+					start,
+					count,
+					items: items.map((entry) => {
+						const asset = entry.asset ?? {};
+						return {
+							type: asset.__typename,
+							id: asset.id,
+							title: asset.title,
+							url:
+								(asset.contentAttributes as { canonicalUrl?: string } | undefined)?.canonicalUrl ??
+								asset.url,
+							summary: (asset.contentAttributes as { summary?: string } | undefined)?.summary,
+							tickers: (
+								(asset.finance as { stockTickers?: Array<{ symbol: string }> } | undefined)
+									?.stockTickers ?? []
+							).map((t) => t.symbol),
+						};
+					}),
+					total: main?.pageInfo?.totalCount ?? items.length,
+					hasNextPage: main?.pageInfo?.nextPage ?? false,
+					_gate: 'cross-origin fetch from a page holding Yahoo identity cookies',
+				}),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/video/:id',
+		examples: ['/video/8af61f2d-2734-459a-9f9f-67a1844c179a'],
+		upstream: ['video-api.yql.yahoo.com/v1/video/sapi/streams/{id}'],
+		transport: 'HLS/Media',
+		description:
+			'Video metadata and stream addresses for a Yahoo Finance video (ids surface in ' +
+			'/news/home items where type is "Video"). Public — no crumb, no session. The ' +
+			"resource this returns is a real handle, not a description of one: each stream's " +
+			'host+path is a working master.m3u8 URL, verified end to end by fetching it and ' +
+			'reading actual #EXT-X-STREAM-INF renditions back — HLS/Media reads absent from ' +
+			'the homepage sweep because nothing there plays automatically, and only shows up ' +
+			'once the video id this route needs is followed.',
+		browserRequired: false,
+		handler: async (c) => {
+			const { id } = c.req.param() as Record<string, string>;
+			const res = await rateLimitedFetch(
+				`https://video-api.yql.yahoo.com/v1/video/sapi/streams/${encodeURIComponent(id)}?format=m3u8,mp4,webm&region=US&site=finance&lang=en-US`,
+			);
+			if (!res.ok) return c.json({ error: `Video API returned ${res.status}`, id }, 502);
+			const body = (await res.json()) as {
+				query?: { results?: { mediaObj?: Array<Record<string, unknown>> } };
+			};
+			const media = body.query?.results?.mediaObj?.[0];
+			if (!media) return c.json({ error: 'No media object for id', id }, 404);
+
+			const meta = media.meta as Record<string, unknown> | undefined;
+			const streams = (media.streams as Array<Record<string, unknown>> | undefined) ?? [];
+
+			return c.json(
+				withCompleteness({
+					id,
+					title: meta?.title,
+					description: meta?.description,
+					durationSeconds: meta?.duration,
+					thumbnail: meta?.thumbnail,
+					// bcov_auth is a signed, short-lived JWT the upstream hands out with the
+					// URL itself — harvested, not invented, and it expires (~1hr from the
+					// token's own `iat`). A caller that waits before fetching gets a 403, not
+					// a bug in this route.
+					streams: streams.map((s) => ({
+						url: `${s.host}${s.path}`,
+						format: s.format,
+						mimeType: s.mime_type,
+						bitrate: s.bitrate,
+						width: s.width,
+						height: s.height,
+					})),
+					total: streams.length,
 				}),
 			);
 		},
