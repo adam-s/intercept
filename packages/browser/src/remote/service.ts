@@ -1340,6 +1340,17 @@ export class RemoteBrowserService {
 		detail: string;
 	}> {
 		if (!this.page) throw new Error('Browser not started');
+		// Nothing installed is not a failed restoration. Reporting it as one made
+		// a clean session look un-cleanable, and a gate that fails on a session
+		// that was already fine is a gate people learn to ignore.
+		if (!this.instrumented) {
+			return {
+				clean: true,
+				framesRestored: 0,
+				framesUnreachable: 0,
+				detail: 'No instrument was installed; the session was already clean.',
+			};
+		}
 		const result = await removeEgressInstrument(this.page as never);
 		if (result.clean) this.instrumented = false;
 		return result;
