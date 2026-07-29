@@ -23,7 +23,8 @@ Scoring happens afterwards, by the maintainer, with
   "sources": ["https://…"],          // where each row came from
   "transports": [
     {
-      "transport": "WebSocket",      // an elimination-table row name
+      "transport": "WebSocket",       // an elimination-table row name
+      "detectableBy": "observation",  // or "scan" — see below
       "detectableBy": "observation", // or "scan" — see below
       "endpoints": ["wss://…"],
       "encoding": "optional — what rides inside, if it is not obvious",
@@ -37,20 +38,19 @@ Scoring happens afterwards, by the maintainer, with
 permanent fact — a site that migrates makes a stale key report false misses,
 which is worse than having no key at all.
 
-##  — and why encoding is not a transport
+## `detectableBy` — and why encoding is not a transport
 
 A manifest is built from the primitives a page reached for, so it can report
 that a socket opened and never that the frames inside it were encrypted. Rows
 that are verdicts about a payload's *shape* — embedded data, an encoded body,
-markup-over-the-wire, gRPC framing — are : real, but answerable only
-from the source, so the scorer lists them separately instead of counting them as
-misses. Everything else is .
+markup-over-the-wire, gRPC framing — are `scan`: real, but answerable only from
+the source, so the scorer lists them separately instead of counting them as
+misses. Everything else is `observation`.
 
 Getting this wrong makes the score lie in one of two directions, so a repo test
 checks each declaration against what the classifier can actually emit.
 
 The same distinction settles where a transport belongs. Twitch's hermes socket
 carries an encrypted envelope and its chat socket carries IRC text; both are one
-row, , with the encoding recorded as a property. Filing an encoding
+row, `WebSocket`, with the encoding recorded as a property. Filing an encoding
 as its own expected transport made a socket we did observe score as a miss.
-
