@@ -109,10 +109,19 @@ attempt('sse', () => new EventSource('/sites/newsboard/live/points'));
 attempt('longpoll', () => {
 	let rounds = 0;
 	const poll = () => {
-		if (rounds++ > 2) return;
+		if (rounds++ > 3) return;
 		fetch('/sites/newsboard/poll/updates?since=' + Date.now()).then(poll).catch(() => {});
 	};
 	poll();
+});
+
+// Streamed body: read as it arrives rather than awaited whole.
+attempt('stream', () => {
+	fetch('/sites/newsboard/stream/stories').then((r) => {
+		const reader = r.body.getReader();
+		const pump = () => reader.read().then(({ done }) => { if (!done) pump(); });
+		pump();
+	});
 });
 
 // A worker has its own global scope; nothing patched in the page sees its fetch.
@@ -245,16 +254,35 @@ export function createNewsboardSite(): Hono {
 	 * so the fixture stays fast, and declares the shape in the payload so a
 	 * reader can tell what it is standing in for.
 	 */
-	app.get('/poll/updates', (c) =>
-		c.json({
+	app.get('/poll/updates', async (c) => {
+		// Holds before answering, because that is what a long-poll does and a
+		// fixture that answers instantly does not demonstrate the transport it
+		// claims to. Without the hold the requests arrive as a burst, which is
+		// pagination's shape rather than a cadence — and the detector is right to
+		// refuse it. Short enough to keep the fixture fast.
+		await new Promise((r) => setTimeout(r, 700));
+		return c.json({
 			transport: 'long-poll',
 			since: c.req.query('since') ?? null,
 			updates: [{ id: 101, points: 143 }],
 			reconnect: true,
-		}),
-	);
+		});
+	});
 
 	app.get('/api/trending', (c) => c.json({ trending: STORIES.slice(0, 2), total: 2 }));
+
+	/**
+	 * A response meant to be read as it arrives, not waited for. NDJSON over a
+	 * plain GET: at the wire this is an ordinary request, and only the way the
+	 * caller consumes it makes it a stream — which is why a capture that records
+	 * request starts files a live feed as a slow endpoint.
+	 */
+	app.get('/stream/stories', (c) =>
+		c.body(`${STORIES.map((s) => JSON.stringify(s)).join('\n')}\n`, 200, {
+			'content-type': 'application/x-ndjson',
+			'cache-control': 'no-cache',
+		}),
+	);
 
 	// Its own scope, its own fetch — invisible to anything patched in the page.
 	app.get('/worker.js', (c) =>

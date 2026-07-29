@@ -146,5 +146,11 @@
 	],
 	"GET /api/boardshop/semantic-example": [
 		"{_pattern:string,hasMore:boolean,items:[{author:string,points:number,position:number,title:string}],meta:{og:site_name:string,og:title:string},returned:number,total:number}"
+	],
+	"GET /api/boardshop/stream-example": [
+		"{_pattern:string,contentType:string,hasMore:boolean,items:[{author:string,comments:number,id:number,points:number,title:string}],returned:number,total:number}"
+	],
+	"GET /api/boardshop/polling-example": [
+		"{_pattern:string,gapsMs:[number],rounds:number,updates:[{id:number,points:number}]}"
 	]
 }

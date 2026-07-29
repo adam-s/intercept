@@ -383,6 +383,34 @@ export const TRANSPORT_SIGNATURES = {
 		library: [/segment|amplitude|mixpanel|datadog|sentry/],
 		wire: [/text\/plain/],
 	},
+	// The canonical realtime list is polling, long-polling, WebSocket, SSE and
+	// gRPC-Web. Three of those had rows and two did not, so a site whose feed is
+	// a long-poll or a streamed body was recorded as having no realtime transport
+	// — both are ordinary requests at the wire and only differ in how they are
+	// used.
+	'Polling/Long-poll': {
+		scope: 'both',
+		strong: [
+			/setInterval\s*\([^)]*fetch/,
+			/setTimeout\s*\([^)]*(?:poll|refresh|tick)/i,
+			/\bpoll(?:ing)?\b\s*[({]/i,
+			/[?&](?:since|after|last(?:_|-)?(?:id|seen|update)|timeout|wait)=/i,
+			/long[-_]?poll/i,
+		],
+		library: [/swr\b|react-query|tanstack|@tanstack\/query/],
+		wire: [],
+	},
+	'Streaming response': {
+		scope: 'both',
+		strong: [
+			/\.body\s*\.\s*getReader\s*\(/,
+			/getReader\s*\(\s*\)/,
+			/TextDecoderStream|TransformStream|pipeThrough/,
+			/ReadableStream/,
+		],
+		library: [/eventsource-parser|fetch-event-source/],
+		wire: [/text\/event-stream|application\/x-ndjson|application\/stream\+json/],
+	},
 	'Form-encoded POST': {
 		scope: 'both',
 		// The oldest transport still in use, and the one a JSON-shaped scan misses

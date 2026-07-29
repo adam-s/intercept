@@ -444,3 +444,58 @@ describe('digestLargeBody keeps signal, not position', () => {
 		expect(digestLargeBody(bulk)._embedded).toBeUndefined();
 	});
 });
+
+describe('polling is a cadence, and most cadences are not polling', () => {
+	const at = (kind, url, times) => times.map((t) => ({ kind, method: 'GET', url, t }));
+
+	it('recognises the same address re-requested over time', () => {
+		const v = deriveTransports(
+			buildManifest(at('fetch', 'https://x.test/poll/updates', [0, 2000, 4000, 6000])),
+		);
+		const row = v.find((r) => r.transport === 'Polling/Long-poll');
+		expect(row?.present).toBe(true);
+		expect(row?.evidence[0]).toContain('/poll/updates');
+	});
+
+	// A socket's frames arrive on a cadence by definition; so do stream chunks and
+	// telemetry pings. Counting those marks the row present on any site with a
+	// live feed of any kind, which makes it useless.
+	it.each([
+		'websocket-frame',
+		'eventsource',
+		'stream-response',
+		'beacon',
+	])('does not call %s traffic polling', (kind) => {
+		const v = deriveTransports(
+			buildManifest(at(kind, 'https://x.test/feed', [0, 1000, 2000, 3000])),
+		);
+		expect(v.find((r) => r.transport === 'Polling/Long-poll')?.present).toBe(false);
+	});
+
+	// Polling re-asks one question; pagination asks the next one.
+	it('does not call paginated walking polling', () => {
+		const rows = buildManifest([
+			...at('fetch', 'https://x.test/page/1', [0]),
+			...at('fetch', 'https://x.test/page/2', [1000]),
+			...at('fetch', 'https://x.test/page/3', [2000]),
+			...at('fetch', 'https://x.test/page/4', [3000]),
+		]);
+		expect(deriveTransports(rows).find((r) => r.transport === 'Polling/Long-poll')?.present).toBe(
+			false,
+		);
+	});
+
+	it('does not call a burst of parallel calls polling', () => {
+		const v = deriveTransports(
+			at('fetch', 'https://x.test/a', [0, 10, 20, 30]).reduce((acc, e) => acc.concat(e), []).length
+				? deriveTransports(buildManifest(at('fetch', 'https://x.test/a', [0, 10, 20, 30])))
+				: [],
+		);
+		expect(v.find((r) => r.transport === 'Polling/Long-poll')?.present).toBe(false);
+	});
+
+	it('does not call two calls a cadence', () => {
+		const v = deriveTransports(buildManifest(at('fetch', 'https://x.test/a', [0, 5000])));
+		expect(v.find((r) => r.transport === 'Polling/Long-poll')?.present).toBe(false);
+	});
+});

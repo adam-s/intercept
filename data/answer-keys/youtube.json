@@ -41,6 +41,15 @@
 			],
 			"note": "Gated on a visitorData minted by a browser that navigated the specific watch page; a bare POST's token returns UNPLAYABLE.",
 			"detectableBy": "observation"
+		},
+		{
+			"transport": "Polling/Long-poll",
+			"detectableBy": "observation",
+			"endpoints": [
+				"www.youtube.com/youtubei/v1/live_chat/get_live_chat",
+				"www.youtube.com/youtubei/v1/updated_metadata"
+			],
+			"note": "Both are ordinary POSTs, so a table with no polling row records them as plain endpoints and concludes the site has no realtime transport. The tell is the cadence, not the request."
 		}
 	],
 	"axes": [

@@ -61,6 +61,7 @@ export type EgressKind =
 	| 'websocket'
 	| 'websocket-frame'
 	| 'eventsource'
+	| 'stream-response'
 	| 'beacon'
 	| 'webrtc'
 	| 'webtransport'
@@ -416,6 +417,33 @@ function instrumentSource(limits: { maxEvents: number; maxBodyChars: number }, g
 			/* handshake alone still proves the transport */
 		}
 	});
+
+	// ─── Streaming response bodies ──────────────────────────────────────
+	// Reading `.body` off a Response is the streaming access pattern: a caller
+	// that wanted the whole payload calls `.json()` or `.text()` instead. This is
+	// how token streams, live logs and progressive feeds arrive without SSE or a
+	// socket, and at the wire it is an ordinary request — so a capture that only
+	// records the request start files a live stream as a slow GET.
+	try {
+		const desc = Object.getOwnPropertyDescriptor(g.Response?.prototype ?? {}, 'body');
+		if (desc?.get) {
+			Object.defineProperty(g.Response.prototype, 'body', {
+				...desc,
+				get(this: { url?: string }) {
+					rec({
+						kind: 'stream-response',
+						method: 'GET',
+						url: this?.url ?? '',
+						detail: 'body-read',
+					});
+					return desc.get?.call(this);
+				},
+			});
+			restores.push(() => Object.defineProperty(g.Response.prototype, 'body', desc));
+		}
+	} catch {
+		/* an engine without a patchable Response leaves this row to the scan */
+	}
 
 	// ─── EventSource (SSE) ──────────────────────────────────────────────
 	patchCtor('EventSource', (inst, args) => {

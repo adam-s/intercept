@@ -95,6 +95,8 @@ describe('the test server carries a fixture for every transport', () => {
 		'Cross-frame RPC': /postMessage|BroadcastChannel/,
 		'Beacon/Telemetry': /sendBeacon/,
 		'Form-encoded POST': /x-www-form-urlencoded|FormData/,
+		'Polling/Long-poll': /poll\/updates|long-poll|setInterval/,
+		'Streaming response': /x-ndjson|getReader\(/,
 	};
 
 	it('has a marker defined for every canonical transport', () => {

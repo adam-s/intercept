@@ -45,6 +45,11 @@ export interface ManifestRow {
 	shape?: string;
 	/** Distinct initiating stack frames — which bundles drive this call. */
 	initiators?: string[];
+	/** First and last occurrence, ms since instrument install. Polling is only
+	 *  visible over time: one call is a request, the same call on a cadence is a
+	 *  stream wearing a request's clothes. */
+	firstAt?: number;
+	lastAt?: number;
 }
 
 /** Bounds, so a pathological page cannot produce a pathological manifest. */
@@ -143,7 +148,7 @@ export function buildManifest(
 		kind: ManifestRow['kind'],
 		method: string,
 		url: string,
-		extra: { body?: string; shape?: string; initiator?: string },
+		extra: { body?: string; shape?: string; initiator?: string; at?: number },
 	) => {
 		const t = parseTarget(url);
 		const k = keyOf(kind === 'wire' ? 'wire' : kind, method, t);
@@ -162,6 +167,10 @@ export function buildManifest(
 			rows.set(k, row);
 		}
 		row.count += 1;
+		if (extra.at !== undefined) {
+			row.firstAt = row.firstAt === undefined ? extra.at : Math.min(row.firstAt, extra.at);
+			row.lastAt = row.lastAt === undefined ? extra.at : Math.max(row.lastAt, extra.at);
+		}
 		if (!row.body && extra.body) row.body = extra.body;
 		if (!row.shape && extra.shape) row.shape = extra.shape;
 		if (extra.initiator) {
@@ -176,7 +185,7 @@ export function buildManifest(
 	};
 
 	for (const e of events) {
-		add(e.kind, e.method, e.url, { body: e.body, initiator: e.initiator });
+		add(e.kind, e.method, e.url, { body: e.body, initiator: e.initiator, at: e.t });
 	}
 	for (const w of wire) {
 		add('wire', w.method, w.url, { shape: w.body === undefined ? undefined : shapeOfBody(w.body) });
@@ -209,6 +218,7 @@ const KIND_TO_TRANSPORT: Record<string, string> = {
 	websocket: 'WebSocket',
 	'websocket-frame': 'WebSocket',
 	eventsource: 'SSE',
+	'stream-response': 'Streaming response',
 	beacon: 'Beacon/Telemetry',
 	'image-beacon': 'Beacon/Telemetry',
 	webrtc: 'WebRTC',
@@ -237,6 +247,9 @@ export const OBSERVABLE_TRANSPORTS: string[] = [
 		// they were unreachable and made every such row a guaranteed miss.
 		'GraphQL',
 		'HTML-over-the-wire',
+		// Derived from cadence rather than from a primitive, but derived from
+		// observation all the same.
+		'Polling/Long-poll',
 	]),
 ].sort();
 
@@ -343,6 +356,46 @@ export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 			}
 		}
 	}
+
+	// Polling is a stream wearing a request's clothes: the same call shape on a
+	// cadence, each one an ordinary GET. Nothing about a single request shows it,
+	// which is why a site whose realtime feed is a long-poll gets recorded as
+	// having no realtime transport at all. Repetition alone is not enough —
+	// pagination repeats too — so this asks for repetition spread over time.
+	const POLL_EXCLUDED_KINDS = new Set([
+		'websocket',
+		'websocket-frame',
+		'eventsource',
+		'stream-response',
+		'media-append',
+		'beacon',
+		'image-beacon',
+	]);
+	const polled = rows.filter((r) => {
+		// A socket's frames arrive on a cadence by definition, and so do stream
+		// chunks and telemetry pings. Counting those as polling marks the row
+		// present on any site with a live feed of any kind, which makes it useless.
+		if (POLL_EXCLUDED_KINDS.has(r.kind)) return false;
+		// Polling re-asks one question; pagination asks the next one. A templated
+		// segment means the calls went to different addresses, so a scroll walking
+		// through pages is not a poll however evenly spaced it is.
+		if (/\{/.test(r.template)) return false;
+		if (r.count < 3 || r.firstAt === undefined || r.lastAt === undefined) return false;
+		const span = r.lastAt - r.firstAt;
+		if (span < 1_000) return false; // a burst, not a cadence
+		const gap = span / (r.count - 1);
+		return gap >= 400 && gap <= 120_000;
+	});
+	out.push({
+		transport: 'Polling/Long-poll',
+		present: polled.length > 0,
+		evidence: polled
+			.slice(0, 3)
+			.map(
+				(r) =>
+					`${r.method} ${r.host}${r.template} x${r.count} over ${Math.round(((r.lastAt ?? 0) - (r.firstAt ?? 0)) / 1000)}s`,
+			),
+	});
 
 	out.push({
 		transport: 'GraphQL',

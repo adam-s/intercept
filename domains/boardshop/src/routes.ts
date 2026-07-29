@@ -2331,4 +2331,79 @@ export const routes: DomainRoute[] = [
 			);
 		},
 	},
+	{
+		method: 'GET',
+		path: '/stream-example',
+		examples: ['/stream-example'],
+		upstream: ['localhost:4444/sites/newsboard/stream/stories'],
+		transport: 'Streaming response',
+		description:
+			'A body read as it arrives. NDJSON over a plain GET — a stream only in how it is consumed.',
+		browserRequired: false,
+		handler: async (c) => {
+			// At the wire this is indistinguishable from any other GET: same method,
+			// same status, a body that happens to arrive in pieces. What makes it a
+			// stream is the caller reading it incrementally, which is why a capture
+			// recording request starts files a live feed as a slow endpoint. Reading
+			// it whole here is correct for a route — the point is that the transport
+			// is recognisable at all.
+			const res = await rateLimitedFetch(`${NEWSBOARD_URL}/stream/stories`);
+			if (!res.ok) return c.json({ error: `Stream returned ${res.status}` }, 502);
+
+			const contentType = res.headers.get('content-type') ?? '';
+			const lines = (await res.text()).split('\n').filter(Boolean);
+			const items = lines.map((line) => {
+				try {
+					return JSON.parse(line);
+				} catch {
+					// One malformed record is a fact about the feed, not a reason to
+					// discard the rest of it.
+					return { _unparsed: line.slice(0, 120) };
+				}
+			});
+
+			return c.json(
+				withCompleteness({ items, total: items.length, contentType, _pattern: 'ndjson-stream' }),
+			);
+		},
+	},
+	{
+		method: 'GET',
+		path: '/polling-example',
+		examples: ['/polling-example'],
+		upstream: ['localhost:4444/sites/newsboard/poll/updates'],
+		transport: 'Polling/Long-poll',
+		description: 'A stream wearing a request costume: the same call on a cadence.',
+		browserRequired: false,
+		handler: async (c) => {
+			// Nothing about one of these requests shows what it is. The tell is the
+			// cadence — the same call shape repeating, each response inviting the
+			// next — so a site whose realtime feed is a long-poll gets recorded as
+			// having no realtime transport at all unless something watches over time.
+			const rounds = Math.min(Number(c.req.query('rounds') ?? '3'), 5);
+			const updates: unknown[] = [];
+			const gaps: number[] = [];
+			let since: string | null = null;
+			let last = Date.now();
+
+			for (let i = 0; i < rounds; i++) {
+				const url = `${NEWSBOARD_URL}/poll/updates${since ? `?since=${encodeURIComponent(since)}` : ''}`;
+				const res = await rateLimitedFetch(url);
+				if (!res.ok) return c.json({ error: `Poll returned ${res.status}` }, 502);
+				const body = (await res.json()) as { updates?: unknown[]; reconnect?: boolean };
+				updates.push(...(body.updates ?? []));
+				gaps.push(Date.now() - last);
+				last = Date.now();
+				since = String(Date.now());
+				if (!body.reconnect) break;
+			}
+
+			return c.json({
+				updates,
+				rounds: gaps.length,
+				gapsMs: gaps,
+				_pattern: 'cadence-is-the-tell',
+			});
+		},
+	},
 ];
