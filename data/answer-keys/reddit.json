@@ -3,9 +3,19 @@
 	"asOf": "2026-07-29",
 	"sources": [
 		"https://pypi.org/project/gatered/1.1.0",
-		"https://roundproxies.com/blog/reddit/"
+		"https://roundproxies.com/blog/reddit/",
+		"Verified against an interception run on 2026-07-29, not from documentation."
 	],
 	"transports": [
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"endpoints": [
+				"www.reddit.com/svc/shreddit/community-more-posts/{sort}/",
+				"www.reddit.com/svc/shreddit/more-comments/{id}"
+			],
+			"note": "Served as content-type text/vnd.reddit.partial+html \u2014 the body is <shreddit-*> custom elements carrying fields as attributes, not JSON. This is the front end's actual data transport, and a JSON-shaped scan reports the endpoint as a page."
+		},
 		{
 			"transport": "GraphQL",
 			"endpoints": [
@@ -29,7 +39,7 @@
 			"endpoints": [
 				"<shreddit-post> element attributes"
 			],
-			"note": "Records live in HTML attributes on custom elements \u2014 no script tag, no hydration payload. A scan looking for a JSON blob reports the page as carrying no data while every field is present.",
+			"note": "Records live in HTML attributes on custom elements \u2014 no script tag, no hydration payload. Verified absent as hydration: a direct fetch of the homepage, a subreddit and a post page contained none of the framework markers.",
 			"detectableBy": "scan"
 		}
 	],

@@ -154,8 +154,11 @@ describe('the elimination table and the signature table are one list', () => {
 	});
 
 	// The reverse containment does not hold, and the difference is the point:
-	// these four are verdicts about a payload's shape, not about which primitive
-	// the page reached for, so no runtime patch can produce them. Listing them
+	// these are verdicts about a payload's shape rather than about which
+	// primitive the page reached for, so no runtime patch can produce them.
+	// Markup-over-the-wire used to be among them and is not any more: a
+	// navigation response is observably markup, and calling it unreachable made
+	// it a guaranteed miss on exactly the sites where it is the only transport. Listing them
 	// explicitly keeps "observation cannot see this" distinct from "somebody
 	// forgot to wire it up".
 	it('names the rows only a static scan can reach, so the gap stays deliberate', async () => {
@@ -165,7 +168,7 @@ describe('the elimination table and the signature table are one list', () => {
 		const scanOnly = Object.keys(TRANSPORT_SIGNATURES)
 			.filter((t) => !OBSERVABLE_TRANSPORTS.includes(t))
 			.sort();
-		expect(scanOnly).toEqual(['Embedded JSON', 'Encoded/Binary', 'HTML-over-the-wire', 'gRPC-Web']);
+		expect(scanOnly).toEqual(['Embedded JSON', 'Encoded/Binary', 'gRPC-Web']);
 	});
 
 	// The rule stopped carrying a literal table when the table became derived.

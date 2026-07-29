@@ -717,7 +717,13 @@ export function coverageDiff(entries = [], routes = [], examples = [], upstream 
 
 	const endpoints = new Map();
 	for (const e of entries) {
-		if (e.method === 'DOCUMENT' || e.method === 'WS-FRAME') continue;
+		// A document used to be skipped here on the reasoning that a page is not an
+		// endpoint. On a server-rendered site the page *is* the endpoint — the
+		// records arrive in the markup and there is no other call — so the site's
+		// only real transport was structurally invisible to this diff and recall
+		// read near zero while every endpoint was in fact accounted for. Frames
+		// stay out: a frame is a message on a connection, not an address.
+		if (e.method === 'WS-FRAME') continue;
 		if (NOISE.test(e.url)) continue;
 		const key = normalizeEndpoint(e.url);
 		if (!key || key === '/') continue;

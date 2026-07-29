@@ -229,7 +229,15 @@ const KIND_TO_TRANSPORT: Record<string, string> = {
  * can compare it against the scanner's list.
  */
 export const OBSERVABLE_TRANSPORTS: string[] = [
-	...new Set([...Object.values(KIND_TO_TRANSPORT), 'GraphQL']),
+	...new Set([
+		...Object.values(KIND_TO_TRANSPORT),
+		// Settled from payloads rather than from a primitive, but settled from
+		// observation all the same — a body carrying `"query":`, and a navigation
+		// response carrying markup. Leaving them out of this list told the scorer
+		// they were unreachable and made every such row a guaranteed miss.
+		'GraphQL',
+		'HTML-over-the-wire',
+	]),
 ].sort();
 
 /** A transport row with observation behind it, rather than recollection. */
@@ -251,9 +259,19 @@ export interface TransportVerdict {
 export function deriveTransports(rows: ManifestRow[]): TransportVerdict[] {
 	const seen = new Map<string, string[]>();
 	for (const name of Object.values(KIND_TO_TRANSPORT)) if (!seen.has(name)) seen.set(name, []);
+	// Reachable from a navigation response, so it belongs to the observable set
+	// rather than to the payload-shape rows a scan has to settle.
+	if (!seen.has('HTML-over-the-wire')) seen.set('HTML-over-the-wire', []);
 
 	for (const row of rows) {
-		const name = KIND_TO_TRANSPORT[row.kind];
+		// A wire row's kind says it came off the network, not what it carried. A
+		// navigation response is markup: filing it under the JSON row put a false
+		// ✓ on the row most likely to be believed, while the row it actually
+		// belongs to read absent on a site whose entire transport is that markup.
+		const name =
+			row.kind === 'wire' && row.method === 'DOCUMENT'
+				? 'HTML-over-the-wire'
+				: KIND_TO_TRANSPORT[row.kind];
 		if (!name) continue;
 		const ev = seen.get(name);
 		if (ev && ev.length < 3) ev.push(`${row.method} ${row.host}${row.template}`);

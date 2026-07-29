@@ -321,9 +321,15 @@ describe('coverageDiff — the recall floor', () => {
 		{ method: 'DOCUMENT', url: 'https://x.test/' },
 	];
 
-	it('drops telemetry and documents, keeping only candidate APIs', () => {
+	// Superseded on purpose. Documents used to be dropped here on the reasoning
+	// that a page is not an endpoint. On a server-rendered site the page *is* the
+	// endpoint — the records arrive in the markup and there is no other call — so
+	// dropping them made that site's only real transport invisible to the recall
+	// check, which then reported near zero while every endpoint was accounted for.
+	it('drops telemetry but counts a document, which may be the only endpoint', () => {
 		const d = coverageDiff(entries, [], []);
-		expect(d.total).toBe(2);
+		expect(d.total).toBe(3);
+		expect(d.unaccounted.map((u) => u.endpoint)).toContain('x.test/');
 	});
 
 	// Weak on purpose: a handler's upstream call is declared nowhere, so a
@@ -333,8 +339,9 @@ describe('coverageDiff — the recall floor', () => {
 		expect(d.accounted.map((a) => a.endpoint)).toEqual([
 			'query1.finance.yahoo.com/ws/insights/v3/finance/insights',
 		]);
-		expect(d.unaccounted.map((u) => u.endpoint)).toEqual(['gql.twitch.tv/gql']);
-		expect(d.recallFloor).toBe(50);
+		expect(d.unaccounted.map((u) => u.endpoint)).toEqual(['gql.twitch.tv/gql', 'x.test/']);
+		// A document counts now, so the denominator grew by one.
+		expect(d.recallFloor).toBe(33);
 	});
 
 	it('matches via examples as well as route paths', () => {
