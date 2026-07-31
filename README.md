@@ -8,7 +8,7 @@
 
 > [!WARNING]
 > **Every instruction file here is written for Opus 4.6, and all of them conflict
-> with Opus 5.** On this branch that is everything under `.claude/`.
+> with Opus 5.**
 >
 > **Opus 5 only needs to look at the branch.** Nothing to clone, nothing to
 > configure, no instructions to follow — paste this in, with the site you want
