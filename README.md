@@ -8,10 +8,7 @@
 
 > [!WARNING]
 > **Every instruction file here is written for Opus 4.6, and all of them conflict
-> with Opus 5.** On this branch that is everything under `.claude/`; the
-> `feat/fingerprint-controller` branch adds `AGENTS.md` and `.agents/`. The
-> Getting Started steps below are 4.6-tuned too. Don't have Opus 5 follow any of
-> them.
+> with Opus 5.** On this branch that is everything under `.claude/`.
 >
 > **Opus 5 only needs to look at the branch.** Nothing to clone, nothing to
 > configure, no instructions to follow — paste this in, with the site you want
