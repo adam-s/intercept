@@ -6,6 +6,23 @@
 
 ---
 
+> [!WARNING]
+> **Every instruction file here is written for Opus 4.6, and all of them conflict
+> with Opus 5.** That is `AGENTS.md`, everything under `.agents/`, and the
+> Getting Started steps below — on `main` and on the branch alike. Don't have
+> Opus 5 follow any of them.
+>
+> **Opus 5 only needs to look at the branch.** Nothing to clone, nothing to
+> configure, no instructions to follow — paste this in, with the site you want
+> filled in:
+>
+> ```text
+> look at https://github.com/adam-s/intercept/tree/feat/fingerprint-controller
+> and create a JSON API for <website>
+> ```
+
+---
+
 Reverse-engineers any website by doing a breadth search across every transport (JSON, WebSocket, WebRTC, GraphQL, SSE, HLS, PubSub), listing them all, and generating a typed JSON API that bypasses almost all bot protections — including Turnstile. I didn't include the ability, but it bypassed the most advanced ChatGPT + Turnstile. Built with self-improving Claude Code agents that rewrite their own instructions until fresh agents consistently succeed.
 
 Once connected to a page, it intercepts every byte of network traffic — then actively drives the page to surface endpoints that only fire on interaction. It types into forms, clicks buttons, scrolls, triggers modals, paginates, submits searches, and walks through multi-step flows, watching what each action produces on the wire. Every request gets captured with its method, headers, payload shape, and response, then classified by transport (JSON, WebSocket, WebRTC, GraphQL, SSE, HLS, PubSub). The result is a complete map of the site's real API surface — including the hidden endpoints that only exist behind a click — turned into typed proxy routes you can curl.
