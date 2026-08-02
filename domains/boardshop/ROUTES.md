@@ -19,10 +19,12 @@ Read routes.ts lines 1-130 for the full route index and real-world analogue guid
 **RSS/XML:** Route 27 (line ~1050) — parse with cheerio
 **SSR HTML table:** Route 28 (line ~1090) — parse tables with cheerio
 **JSONP:** Route 22 (line ~870) — strip callback wrapper
+**Captcha-gated (Turnstile-shape):** Route 34 — mint `0.<b64url>` token via in-page widget, replay to verify endpoint
+**Captcha-gated (hCaptcha-shape):** Route 35 — capture `P1_<b64url>.<b64url>.<b64url>` token via postMessage, replay in `x-captcha-token` header
 
 ## Key Files
 
-- `routes.ts` — All 33 routes with inline comments
+- `routes.ts` — All 35 routes with inline comments
 - `session-manager.ts` — GenericSessionManager wrapper (disk-persisted sessions)
 - `config.ts` — InterceptorConfig with headerSchema
 - `interceptor.ts` — Extends GenericInterceptor

@@ -1,0 +1,188 @@
+{
+	"target": "youtube.com",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://tyrrrz.me/blog/reverse-engineering-youtube-revisited",
+		"https://github.com/zerodytrash/YouTube-Internal-Clients",
+		"https://pypi.org/project/innertube/",
+		"https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide",
+		"https://github.com/LuanRT/YouTube.js (Innertube.ts)",
+		"https://github.com/yt-dlp/yt-dlp/wiki/extractors (youtube extractor-args)"
+	],
+	"transports": [
+		{
+			"transport": "JSON API (XHR)",
+			"endpoints": [
+				"www.youtube.com/youtubei/v1/player",
+				"www.youtube.com/youtubei/v1/next",
+				"www.youtube.com/youtubei/v1/browse",
+				"www.youtube.com/youtubei/v1/search",
+				"www.youtube.com/youtubei/v1/guide",
+				"www.youtube.com/youtubei/v1/reel/reel_watch_sequence",
+				"www.youtube.com/youtubei/v1/notification/get_notification_menu",
+				"www.youtube.com/youtubei/v1/notification/get_unseen_count",
+				"www.youtube.com/youtubei/v1/navigation/resolve_url",
+				"www.youtube.com/youtubei/v1/att/get",
+				"www.youtube.com/api/timedtext",
+				"suggestqueries/complete/search"
+			],
+			"note": "att/get is an attestation challenge \u2014 a bot-check exposed as an ordinary endpoint. /complete/search sits on a different host and shape from the rest.",
+			"encoding": "Caption tracks are a signed-URL payload, not a distinct transport.",
+			"detectableBy": "observation"
+		},
+		{
+			"transport": "Embedded JSON",
+			"endpoints": [
+				"ytInitialPlayerResponse",
+				"ytInitialData"
+			],
+			"note": "Byte-identical to the /player payload, so the page alone answers what an API call would.",
+			"detectableBy": "scan"
+		},
+		{
+			"transport": "HLS/Media",
+			"endpoints": [
+				"streamingData.adaptiveFormats"
+			],
+			"note": "Gated on a visitorData minted by a browser that navigated the specific watch page; a bare POST's token returns UNPLAYABLE.",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29. Delivered as UMP/SABR over /videoplayback with a vendor content type, not a playlist extension."
+		},
+		{
+			"transport": "Polling/Long-poll",
+			"detectableBy": "observation",
+			"endpoints": [
+				"www.youtube.com/youtubei/v1/live_chat/get_live_chat",
+				"www.youtube.com/youtubei/v1/updated_metadata"
+			],
+			"note": "Both are ordinary POSTs, so a table with no polling row records them as plain endpoints and concludes the site has no realtime transport. The tell is the cadence, not the request."
+		},
+		{
+			"transport": "Beacon/Telemetry",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Cross-frame RPC",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Form-encoded POST",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Service Worker",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Streaming response",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "JSONP",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end. suggestqueries host returns a function-call wrapper; the sweep filed it as an ordinary GET until the detector was widened."
+		}
+	],
+	"axes": [
+		{
+			"axis": "client identity",
+			"values": [
+				"web",
+				"web_safari",
+				"web_embedded",
+				"web_music",
+				"web_creator",
+				"mweb",
+				"ios",
+				"android",
+				"android_vr",
+				"tv",
+				"tv_simply",
+				"tv_embedded"
+			],
+			"note": "Twelve clients, same URL, different data and different requirements per client. This is a discovery dimension, not a parameter \u2014 no amount of endpoint enumeration finds it, because the path is identical and only context.client differs."
+		}
+	],
+	"gates": [
+		{
+			"name": "proof-of-origin token",
+			"contexts": [
+				"GVS (the media itself)",
+				"Player (format URLs)",
+				"Subs (subtitles)"
+			],
+			"note": "Required per client per context, not globally: web_safari HLS needs none, web does, android_vr has no restriction, tv is DRM throughout. Missing where required gives HTTP 403 or an IP/account block."
+		},
+		{
+			"name": "visitorData",
+			"note": "From the VISITOR_INFO1_LIVE cookie. A value minted by a bare POST returns UNPLAYABLE \u2014 it has to come from a browser that navigated the specific watch page."
+		},
+		{
+			"name": "signature / n-sig",
+			"note": "Format URLs carry a signature descrambled by running a function out of the player JS, keyed by player version as signature_timestamp@hash. Computation, not extraction \u2014 neither a header to copy nor an endpoint to call."
+		},
+		{
+			"name": "CPN (content playback nonce)",
+			"class": "invented",
+			"note": "A random 16-character value the client generates itself and sends with playback requests. Not harvested from a response and not computed from anything \u2014 the client makes it up and the server expects one. A route that omits it fails for a reason that looks nothing like the cause."
+		},
+		{
+			"name": "BotGuard PoToken",
+			"class": "computed",
+			"note": "Minted through an obfuscated challenge at api/jnn/v1/GenerateIT. Required for adaptive HD formats; not attempted by any run."
+		}
+	],
+	"redundantPaths": {
+		"note": "The same records are reachable four ways: the initial webpage, the client configs, the JS player, and the InnerTube API \u2014 yt-dlp exposes skipping any of them for that reason. Which path a route is built on decides how fragile it is, and an elimination table that only asks which transports exist never surfaces the choice.",
+		"paths": [
+			"initial webpage",
+			"client configs",
+			"JS player",
+			"InnerTube API"
+		]
+	},
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 9,
+		"shapes": 80,
+		"challenge": "none observed"
+	},
+	"breadthPass": {
+		"date": "2026-07-29",
+		"pages": 6,
+		"transports": 9,
+		"saturatedAt": 2,
+		"hosts": 14,
+		"perPass": [
+			5,
+			4,
+			0,
+			0,
+			0,
+			0
+		],
+		"observed": [
+			"Beacon/Telemetry",
+			"Cross-frame RPC",
+			"Form-encoded POST",
+			"HLS/Media",
+			"HTML-over-the-wire",
+			"JSON API (XHR)",
+			"Polling/Long-poll",
+			"Service Worker",
+			"Streaming response"
+		],
+		"method": "Instrumented, swept each page type, drained after each so the event buffer could not cap.",
+		"note": "Every target saturated on transport classes by the second pass. Later pages added endpoints within transports already found, never a new class \u2014 which is what the saturation rule predicts and is worth knowing before budgeting a run."
+	}
+}

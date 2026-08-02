@@ -1,0 +1,63 @@
+{
+	"GET /api/reddit/r/AskReddit": [
+		"{hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string,subreddit:string}"
+	],
+	"GET /api/reddit/r/aww?sort=hot": [
+		"{hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string,subreddit:string}"
+	],
+	"GET /api/reddit/popular": [
+		"{hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string}"
+	],
+	"GET /api/reddit/popular?feedLength=10": [
+		"{hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string}"
+	],
+	"GET /api/reddit/user/spez": [
+		"{comments:[],hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string,username:string}"
+	],
+	"GET /api/reddit/user/Watchful1?feedLength=10": [
+		"{comments:[],hasMore:boolean,nextCursor:{after:string,cursor:string},posts:[{author:string,commentCount:number,contentHref:string,createdAt:string,domain:string,id:string,nsfw:boolean,permalink:string,postType:string,score:number,subreddit:string,title:string}],returned:number,sort:string,username:string}"
+	],
+	"GET /api/reddit/post/aww/1v96p9o": [
+		"{comments:[{author:string,body:string,createdUtc:number,depth:number,id:string,moreChildrenCount:null,score:number}],hasMore:boolean,indicatedTotal:number,post:{author:string,createdUtc:number,hlsUrl:string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string},returned:number,subreddit:string}",
+		"{comments:[{author:null|string,body:null|string,createdUtc:null|number,depth:number,id:string,moreChildrenCount:null|number,score:null|number}],hasMore:boolean,indicatedTotal:number,post:{author:string,createdUtc:number,hlsUrl:string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string},returned:number,subreddit:string}"
+	],
+	"GET /api/reddit/post/aww/1v96p9o?limit=20": [
+		"{comments:[{author:string,body:string,createdUtc:number,depth:number,id:string,moreChildrenCount:null,score:number}],hasMore:boolean,indicatedTotal:number,post:{author:string,createdUtc:number,hlsUrl:string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string},returned:number,subreddit:string}",
+		"{comments:[{author:null|string,body:null|string,createdUtc:null|number,depth:number,id:string,moreChildrenCount:null|number,score:null|number}],hasMore:boolean,indicatedTotal:number,post:{author:string,createdUtc:number,hlsUrl:string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string},returned:number,subreddit:string}"
+	],
+	"POST /api/reddit/post/aww/1v96p9o/comments/more": [
+		"{comments:[{author:string,body:string,createdAt:string,depth:number,id:string,permalink:string,score:number}],hasMore:boolean,moreCursor:null,returned:number,subreddit:string}"
+	],
+	"GET /api/reddit/json/r/aww?limit=25": [
+		"{dist:number,hasMore:boolean,items:[{author:string,createdUtc:number,hlsUrl:null,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string}],nextAfter:string,returned:number,sort:string,subreddit:string}",
+		"{dist:number,hasMore:boolean,items:[{author:string,createdUtc:number,hlsUrl:null|string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string}],nextAfter:string,returned:number,sort:string,subreddit:string}"
+	],
+	"GET /api/reddit/json/r/AskReddit?sort=new&limit=10": [
+		"{dist:number,hasMore:boolean,items:[{author:string,createdUtc:number,hlsUrl:null,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string}],nextAfter:string,returned:number,sort:string,subreddit:string}"
+	],
+	"GET /api/reddit/search?q=cats": [
+		"{dist:number,hasMore:boolean,items:[{author:string,createdUtc:number,hlsUrl:string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string}],nextAfter:string,query:string,returned:number,sort:string,subreddit:null}",
+		"{dist:number,hasMore:boolean,items:[{author:string,createdUtc:number,hlsUrl:null|string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string}],nextAfter:string,query:string,returned:number,sort:string,subreddit:null}"
+	],
+	"GET /api/reddit/search?q=mechanical+keyboard&sort=top&limit=10": [
+		"{dist:number,hasMore:boolean,items:[{author:string,createdUtc:number,hlsUrl:string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string}],nextAfter:string,query:string,returned:number,sort:string,subreddit:null}",
+		"{dist:number,hasMore:boolean,items:[{author:string,createdUtc:number,hlsUrl:null|string,id:string,isVideo:boolean,kind:string,numComments:number,permalink:string,score:number,selftext:string,subreddit:string,title:string,url:string}],nextAfter:string,query:string,returned:number,sort:string,subreddit:null}"
+	],
+	"GET /api/reddit/gql/subreddit/aww": [
+		"{hasMore:boolean,name:string,operation:string,returned:number,subreddit:{__typename:string,id:string,prefixedName:string,styles:{icon:string,legacyIcon:{url:string}}}}"
+	],
+	"GET /api/reddit/gql/subreddit/AskReddit": [
+		"{hasMore:boolean,name:string,operation:string,returned:number,subreddit:{__typename:string,id:string,prefixedName:string,styles:{icon:string,legacyIcon:{url:string}}}}"
+	],
+	"GET /api/reddit/realtime/t5_2qh1o": [
+		"{endpoint:string,frames:[{id:string,payload:{data:null,errors:[{message:string,path:[…]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}",
+		"{endpoint:string,frames:[{id:string,payload?:{data:null,errors:[{message:string,path:[string]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}"
+	],
+	"GET /api/reddit/realtime/t5_2qh1i?frames=2": [
+		"{endpoint:string,frames:[{id:string,payload:{data:null,errors:[{message:string,path:[…]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}",
+		"{endpoint:string,frames:[{id:string,payload?:{data:null,errors:[{message:string,path:[string]}]},type:string}],handshake:string,hasMore:boolean,note:string,protocol:string,returned:number,subredditId:string}"
+	],
+	"GET /api/reddit/video/588ej9n4j0gh1": [
+		"{hasMore:boolean,id:string,masterUrl:string,played:{segment:{bytes:number,contentType:string,status:number,url:string},segmentCount:number,variantBandwidth:number,variantUrl:string},returned:number,variants:[{bandwidth:number,codecs:string,resolution:string,uri:string}]}"
+	]
+}

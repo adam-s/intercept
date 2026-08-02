@@ -14,6 +14,7 @@ process.on('uncaughtException', (err) => {
 });
 
 import { analyzeDiscovery } from '@interceptor/browser/analysis/discovery';
+import { renderManifest, renderTransports } from '@interceptor/browser/driver/manifest';
 import {
 	autoStartHeadlessBrowser,
 	clearTrafficBuffer,
@@ -122,6 +123,102 @@ app.get('/browser/analysis', async (c) => {
 	}
 });
 
+// ─── Egress instrumentation ──────────────────────────────────────────
+// The capture layer exists to be run, not assembled: these three endpoints are
+// the whole instrumented pass, and `scripts/discover-probe.mjs --mode=manifest`
+// drives them.
+
+app.post('/browser/instrument', async (c) => {
+	const browser = getActiveBrowser();
+	if (!browser)
+		return c.json({ error: 'No active browser — connect via /browser/stream first' }, 503);
+	try {
+		const installed = await browser.installInstrument();
+		// Reporting installed when nothing was patched would send a run into a
+		// capture that silently returns nothing.
+		if (!installed) return c.json({ error: 'Instrument failed to install' }, 502);
+		return c.json({ instrumented: true });
+	} catch (err) {
+		return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+	}
+});
+
+app.get('/browser/instrument', (c) => {
+	const browser = getActiveBrowser();
+	if (!browser) return c.json({ error: 'No active browser' }, 503);
+	// The clean-pass gate reads this. A session still carrying aids is not the
+	// session an ordinary visitor gets, so an assertion against it measures the
+	// wrong page.
+	return c.json({ instrumented: browser.isInstrumented() });
+});
+
+app.delete('/browser/instrument', async (c) => {
+	const browser = getActiveBrowser();
+	if (!browser) return c.json({ error: 'No active browser' }, 503);
+	try {
+		return c.json(await browser.removeInstrument());
+	} catch (err) {
+		return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+	}
+});
+
+app.post('/browser/sweep', async (c) => {
+	const browser = getActiveBrowser();
+	if (!browser) return c.json({ error: 'No active browser' }, 503);
+	// Synthetic interaction is the loudest discovery aid there is, so it refuses
+	// to run on a session that is not already admitting to being instrumented.
+	if (!browser.isInstrumented()) {
+		return c.json(
+			{ error: 'Sweep belongs to the instrumented pass. POST /browser/instrument first.' },
+			409,
+		);
+	}
+	try {
+		const body = await c.req.json().catch(() => ({}));
+		return c.json(await browser.sweepPage(body?.limits ?? {}));
+	} catch (err) {
+		return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+	}
+});
+
+app.get('/browser/manifest', async (c) => {
+	const browser = getActiveBrowser();
+	if (!browser) return c.json({ error: 'No active browser' }, 503);
+	try {
+		// Draining is destructive: the JS-level buffer is spliced empty so events
+		// are never double-counted. A reader that only wants to look — the coverage
+		// diff, a status check — must be able to ask without consuming what the
+		// next caller needs.
+		const drain = c.req.query('drain') !== 'false';
+		// Wire-level entries fold in alongside the JS-level ones: a call seen by
+		// both becomes one row that says so, and a call only the wire saw — a
+		// service worker, a redirect — still gets a row.
+		const { entries } = getTrafficEntries();
+		// The declared content type rides along. Without it a wire row says only
+		// "something crossed the network", and every stylesheet and favicon was
+		// being counted as evidence for the JSON API row.
+		const wire = entries.map((e) => ({
+			method: e.method,
+			url: e.url,
+			body: e.responseBody,
+			contentType: e.responseHeaders?.['content-type'] ?? e.responseHeaders?.['Content-Type'],
+		}));
+		const result = drain ? await browser.captureManifest(wire) : browser.manifestFromWire(wire);
+		return c.json({
+			...result,
+			// Rendered here with the shared renderer rather than re-implemented by
+			// each caller. A second copy of the table format is a second thing to
+			// drift, and the elimination table is what the whole protocol gates on.
+			table: renderTransports(result.transports),
+			manifestText: renderManifest(result.rows),
+			instrumented: browser.isInstrumented(),
+			wireEntries: wire.length,
+		});
+	} catch (err) {
+		return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+	}
+});
+
 // Browser MCP REST endpoints — used by the MCP server to control the browser
 app.route('/browser/mcp', browserMcp);
 
@@ -134,6 +231,28 @@ app.get('/api', (c) => {
 			name,
 			routeCount: plugin?.routes?.length ?? 0,
 			routes: plugin?.routes?.map((r) => `${r.method} /api/${name}${r.path}`) ?? [],
+			// Concrete invocations, so a checker can exercise routes whose bare path
+			// is not callable (path params, required query params).
+			examples:
+				plugin?.routes?.flatMap((r) =>
+					(r.examples ?? []).map((e) => `${r.method} /api/${name}${e}`),
+				) ?? [],
+			// What each route consumes upstream, so the coverage check can correlate
+			// captured traffic with built routes exactly rather than by name similarity.
+			upstream: plugin?.routes?.flatMap((r) => r.upstream ?? []) ?? [],
+			// Per-route detail, because the flattened lists above lose which route
+			// declared what — and a gate that checks declarations needs exactly
+			// that association to name the route that is missing one.
+			routeDetail:
+				plugin?.routes?.map((r) => ({
+					method: r.method,
+					path: `/api/${name}${r.path}`,
+					examples: r.examples ?? [],
+					upstream: r.upstream ?? [],
+					transport: r.transport ?? null,
+					hasTargetUrl: Boolean(r.targetUrl),
+					contractualStatuses: r.contractualStatuses ?? [],
+				})) ?? [],
 		};
 	});
 	return c.json({ domains, browserConnected: getActiveBrowser() !== null });

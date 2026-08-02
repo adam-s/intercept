@@ -1,0 +1,232 @@
+/**
+ * Drift pin for .agents/reference/anthropic-conventions.md's "Drift check"
+ * table. The table is prose claiming what exists in the tree, and prose rots.
+ * This pins the mechanically checkable claims:
+ *   - every skill directory under .agents/skills/ has a table row
+ *   - every rule under .agents/rules/ has a table row (this repo's divergence
+ *     from the sibling repos, so nothing else documents it)
+ *   - every sub-agent under .agents/agents/ has a table row
+ *   - .claude/ holds nothing but settings.json and symlinks, so the canon in
+ *     .agents/ stays readable by agents that don't know about .claude/
+ *   - the symlinks the doc describes exist and point where it says
+ *   - the hook scripts settings.json references are present and executable
+ * Everything else in the table stays a claim to re-verify by hand.
+ */
+
+import { accessSync, constants, readdirSync, readFileSync, readlinkSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const DOC = readFileSync(resolve(ROOT, '.agents/reference/anthropic-conventions.md'), 'utf8');
+
+const dirsIn = (rel) =>
+	readdirSync(resolve(ROOT, rel), { withFileTypes: true })
+		.filter((d) => d.isDirectory())
+		.map((d) => d.name);
+
+const filesIn = (rel, ext) =>
+	readdirSync(resolve(ROOT, rel), { withFileTypes: true })
+		.filter((d) => d.isFile() && d.name.endsWith(ext))
+		.map((d) => d.name);
+
+describe('anthropic-conventions drift-check table', () => {
+	it('lists every skill directory under .agents/skills/', () => {
+		const skills = dirsIn('.agents/skills');
+		expect(skills.length).toBeGreaterThan(0);
+		const missing = skills.filter((s) => !DOC.includes(`\`.agents/skills/${s}/\``));
+		expect(missing).toEqual([]);
+	});
+
+	it('documents the .agents/rules/ mechanism and every rule that uses it', () => {
+		const rules = filesIn('.agents/rules', '.md');
+		expect(rules.length).toBeGreaterThan(0);
+		// The Rules section explains the paths: frontmatter no sibling repo has.
+		expect(DOC).toContain('## Rules — `.agents/rules/<name>.md` with `paths:` frontmatter');
+		expect(DOC).toContain('| `.agents/rules/` |');
+	});
+
+	it('lists every sub-agent under .agents/agents/', () => {
+		const agents = filesIn('.agents/agents', '.md').map((f) => f.replace(/\.md$/, ''));
+		expect(agents.length).toBeGreaterThan(0);
+		const missing = agents.filter((a) => !DOC.includes(`\`${a}\``));
+		expect(missing).toEqual([]);
+	});
+
+	it('symlinks it describes exist and point where it says', () => {
+		expect(readlinkSync(resolve(ROOT, '.claude/skills'))).toMatch(/\.agents\/skills\/?$/);
+		expect(readlinkSync(resolve(ROOT, '.claude/rules'))).toMatch(/\.agents\/rules\/?$/);
+		expect(readlinkSync(resolve(ROOT, '.claude/agents'))).toMatch(/\.agents\/agents\/?$/);
+	});
+
+	// A memory file loads on sight, by path, and a symlink is not a pointer the
+	// loader can dedupe — it *is* the file at a second path, so the whole thing
+	// lands in context again. Directories of lazily-read material are safe to
+	// link; memory files are not, and the root entry point already provides the
+	// discovery a linked one would.
+	it('symlinks no memory file into .claude/', () => {
+		const memoryNames = ['CLAUDE.md', 'AGENTS.md'];
+		const linked = readdirSync(resolve(ROOT, '.claude'), { withFileTypes: true })
+			.filter((d) => d.isSymbolicLink() && memoryNames.includes(d.name))
+			.map((d) => d.name);
+		expect(linked).toEqual([]);
+	});
+
+	// The portability invariant: an agent that has never heard of .claude/ must
+	// still find the whole canon by reading AGENTS.md and following it into
+	// .agents/. Anything real that lands in .claude/ breaks that.
+	it('keeps .claude/ to settings.json plus symlinks', () => {
+		const stray = readdirSync(resolve(ROOT, '.claude'), { withFileTypes: true })
+			.filter((d) => !d.isSymbolicLink())
+			.map((d) => d.name)
+			.filter((n) => n !== 'settings.json' && n !== 'settings.local.json' && n !== 'worktrees');
+		expect(stray).toEqual([]);
+	});
+
+	it('root CLAUDE.md imports AGENTS.md rather than holding instructions', () => {
+		const claudeMd = readFileSync(resolve(ROOT, 'CLAUDE.md'), 'utf8');
+		expect(claudeMd).toContain('@AGENTS.md');
+		// An entry point and a map of where the canon lives — nothing else. Past
+		// this size it has started holding instructions that belong in AGENTS.md.
+		expect(claudeMd.split('\n').length).toBeLessThan(30);
+		// It maps every canonical location an agent needs to reach.
+		for (const path of ['.agents/rules/', '.agents/skills/', '.agents/reference/', 'docs/']) {
+			expect(claudeMd, `CLAUDE.md does not point at ${path}`).toContain(path);
+		}
+	});
+
+	it('every hook settings.json references exists and is executable', () => {
+		const settings = JSON.parse(readFileSync(resolve(ROOT, '.claude/settings.json'), 'utf8'));
+		const commands = Object.values(settings.hooks ?? {})
+			.flat()
+			.flatMap((entry) => entry.hooks ?? [])
+			.filter((h) => h.type === 'command')
+			.map((h) => h.command);
+
+		expect(commands.length).toBeGreaterThan(0);
+		for (const command of commands) {
+			const path = command.replaceAll('"', '').replace('$CLAUDE_PROJECT_DIR', ROOT);
+			expect(
+				() => accessSync(path, constants.X_OK),
+				`${path} missing or not executable`,
+			).not.toThrow();
+		}
+	});
+});
+
+describe('AGENTS.md holds principles, not facts', () => {
+	const AGENTS = readFileSync(resolve(ROOT, 'AGENTS.md'), 'utf8');
+
+	// The content rule from the sibling repos: a rule naming a particular
+	// instance is a fact in the wrong file. These tokens are how facts leak.
+	it.each([
+		['a localhost URL', /localhost/i],
+		['a hardcoded port', /:\d{4}\b/],
+		['a curl invocation', /\bcurl\b/],
+		['a /tmp path', /\/tmp\//],
+		['a sleep call', /\bsleep \d/],
+		['a tool-call budget', /\d+-\d+ (tool )?calls/i],
+	])('contains no %s', (_name, pattern) => {
+		const offenders = AGENTS.split('\n')
+			.map((line, i) => [i + 1, line])
+			.filter(([, line]) => pattern.test(line));
+		expect(offenders).toEqual([]);
+	});
+});
+
+describe('the elimination table and the signature table are one list', () => {
+	// The original defect: the rule listed 8 transports, the scanner knew 7 under
+	// different names, and neither could contradict the other. A row the scanner
+	// cannot see is a row where a wrong verdict survives unchallenged.
+	//
+	// The table is now derived from what the capture observed rather than written
+	// out in the rule, so the two lists to reconcile are the runtime one and the
+	// static one. Same defect, one layer down: a transport the scanner hints at
+	// but observation names differently produces two rows nobody merges.
+	it('every transport observation can name is a transport the scanner knows', async () => {
+		const { TRANSPORT_SIGNATURES } = await import('../discover-probe.mjs');
+		const { OBSERVABLE_TRANSPORTS } = await import('../../packages/browser/src/driver/manifest.ts');
+
+		expect(OBSERVABLE_TRANSPORTS.length).toBeGreaterThan(0);
+		const unknown = OBSERVABLE_TRANSPORTS.filter((t) => !(t in TRANSPORT_SIGNATURES));
+		expect(unknown).toEqual([]);
+	});
+
+	// The reverse containment does not hold, and the difference is the point:
+	// these are verdicts about a payload's shape rather than about which
+	// primitive the page reached for, so no runtime patch can produce them.
+	// Markup-over-the-wire used to be among them and is not any more: a
+	// navigation response is observably markup, and calling it unreachable made
+	// it a guaranteed miss on exactly the sites where it is the only transport. Listing them
+	// explicitly keeps "observation cannot see this" distinct from "somebody
+	// forgot to wire it up".
+	it('names the rows only a static scan can reach, so the gap stays deliberate', async () => {
+		const { TRANSPORT_SIGNATURES } = await import('../discover-probe.mjs');
+		const { OBSERVABLE_TRANSPORTS } = await import('../../packages/browser/src/driver/manifest.ts');
+
+		const scanOnly = Object.keys(TRANSPORT_SIGNATURES)
+			.filter((t) => !OBSERVABLE_TRANSPORTS.includes(t))
+			.sort();
+		expect(scanOnly).toEqual(['Embedded JSON', 'Encoded/Binary', 'gRPC-Web']);
+	});
+
+	// The rule stopped carrying a literal table when the table became derived.
+	// A copy left behind would be the stale-record failure AGENTS.md warns about.
+	it('the discovery rule no longer carries a hand-written table to drift from', () => {
+		const rule = readFileSync(resolve(ROOT, '.agents/rules/discovery.md'), 'utf8');
+		expect(rule).not.toContain('| ✓ or ✗ |');
+		expect(rule).toMatch(/derive it/i);
+	});
+});
+
+describe('the reference domain demonstrates the whole route contract', () => {
+	// AGENTS.md calls the reference domain executable documentation, and agents
+	// treat it that way: they copy its shape rather than re-derive one from the
+	// rule. So a field added to the contract and to the rule, but not to the
+	// reference, is a field that does not get used. That is not hypothetical —
+	// `examples` was demonstrated here and got declared downstream, `upstream`
+	// was not and did not, in the same run by the same agent.
+	const ROUTES = readFileSync(resolve(ROOT, 'domains/boardshop/src/routes.ts'), 'utf8');
+	const LOADER = readFileSync(
+		resolve(ROOT, 'packages/browser/src/handler/domain-loader.ts'),
+		'utf8',
+	);
+
+	/** Field names the DomainRoute contract declares, from the contract itself. */
+	const contractFields = [
+		...new Set(
+			[...LOADER.matchAll(/^\t{3,4}(\w+)\??:/gm)]
+				.map((m) => m[1])
+				.filter((f) => !['method', 'targetUrl', 'handler'].includes(f)),
+		),
+	];
+
+	it('reads a non-empty field list off the contract, so this test cannot pass vacuously', () => {
+		expect(contractFields.length).toBeGreaterThanOrEqual(4);
+		expect(contractFields).toContain('upstream');
+		expect(contractFields).toContain('examples');
+	});
+
+	it.each(contractFields)('demonstrates %s', (field) => {
+		expect(ROUTES).toMatch(new RegExp(`^\\t\\t${field}:`, 'm'));
+	});
+
+	// Demonstrating a field once is not enough for a file that gets copied route
+	// by route: a reader lands on whichever route is nearest their case.
+	it('declares examples and upstream on every route, not just a sample', () => {
+		const routes = [...ROUTES.matchAll(/^\t\tpath: '/gm)].length;
+		expect(routes).toBeGreaterThan(0);
+		expect([...ROUTES.matchAll(/^\t\texamples: \[/gm)]).toHaveLength(routes);
+		expect([...ROUTES.matchAll(/^\t\tupstream: \[/gm)]).toHaveLength(routes);
+	});
+
+	// A placeholder is what makes a declaration match a real captured endpoint;
+	// a path parameter left literal matches nothing and reads as a coverage gap.
+	it('writes upstream scheme-less with placeholders for the parts that vary', () => {
+		const declared = [...ROUTES.matchAll(/^\t\tupstream: \[(.+)\],$/gm)].map((m) => m[1]);
+		expect(declared.length).toBeGreaterThan(0);
+		expect(declared.some((d) => d.includes('{'))).toBe(true);
+		expect(declared.filter((d) => /'https?:\/\//.test(d))).toEqual([]);
+	});
+});

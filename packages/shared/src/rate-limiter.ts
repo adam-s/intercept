@@ -20,8 +20,26 @@
  */
 
 import { DEBUG } from './debug.js';
+import { assertNotChallenge, assertOpenTransport } from './transport-tier.js';
 
 // ─── Types ───────────────────────────────────────────────────────────
+
+/**
+ * `RequestInit` plus the one transport-tier escape hatch.
+ *
+ * The extra field is stripped before the underlying `fetch`, so it never
+ * reaches the network layer.
+ */
+export interface RateLimitedFetchInit extends RequestInit {
+	/**
+	 * Return bot-wall responses instead of throwing `TransportTierError`.
+	 *
+	 * Set this only on an escalation path that reads the *status* and retries
+	 * through the browser. Anything that parses the body wants the throw —
+	 * that is the failure the guard exists to catch.
+	 */
+	allowChallengeResponse?: boolean;
+}
 
 export interface RateLimitConfig {
 	/** Max requests per 60-second sliding window. */
@@ -30,6 +48,21 @@ export interface RateLimitConfig {
 	maxConcurrent?: number;
 	/** Retry up to this many times on 429 with exponential backoff. Default: 2. */
 	retryOn429?: number;
+	/**
+	 * Minimum gap between two requests to this host. Default: none.
+	 *
+	 * `maxPerMinute` is a sliding-window *count*, so on its own it permits the
+	 * whole minute's budget as one instantaneous burst and only then starts
+	 * queueing. That is the shape a small origin refuses: measured against a
+	 * single-server site registered at 8/min, an assertion run issuing 14 calls
+	 * sent the first 8 back to back, collected refusals on five of them, and
+	 * then queued politely for the rest — a pace no reader has and a limit this
+	 * side caused.
+	 *
+	 * Set this where the host is small enough that arrival *rate* matters as
+	 * much as volume. It composes with the window rather than replacing it.
+	 */
+	minSpacingMs?: number;
 }
 
 interface HostState {
@@ -98,13 +131,31 @@ function pruneWindow(state: HostState): void {
 	}
 }
 
+/**
+ * Whether the host's most recent request is far enough behind us.
+ *
+ * Read off the window's last timestamp rather than a separate clock, so a
+ * request recorded by any caller — `rateLimitedFetch` or a hand-rolled
+ * `waitForRateLimitSlot` pair — counts the same.
+ */
+function spacingSatisfied(state: HostState): boolean {
+	const gap = state.config.minSpacingMs ?? 0;
+	if (gap <= 0) return true;
+	const last = state.timestamps.at(-1);
+	return last === undefined || Date.now() - last >= gap;
+}
+
 /** Wait until the host's rate limit allows a new request. */
 async function waitForSlot(state: HostState): Promise<void> {
 	const { maxPerMinute, maxConcurrent = maxPerMinute } = state.config;
 
-	// Fast path: both slots available
+	// Fast path: every constraint satisfied
 	pruneWindow(state);
-	if (state.timestamps.length < maxPerMinute && state.inflight < maxConcurrent) {
+	if (
+		state.timestamps.length < maxPerMinute &&
+		state.inflight < maxConcurrent &&
+		spacingSatisfied(state)
+	) {
 		return;
 	}
 
@@ -112,13 +163,25 @@ async function waitForSlot(state: HostState): Promise<void> {
 	return new Promise<void>((resolve) => {
 		const check = () => {
 			pruneWindow(state);
-			if (state.timestamps.length < maxPerMinute && state.inflight < maxConcurrent) {
+			if (
+				state.timestamps.length < maxPerMinute &&
+				state.inflight < maxConcurrent &&
+				spacingSatisfied(state)
+			) {
 				resolve();
 			} else {
 				// Calculate delay until the oldest request exits the window
 				const oldestAge =
 					state.timestamps.length > 0 ? 60_000 - (Date.now() - state.timestamps[0]) : 1000;
-				const delay = Math.max(100, Math.min(oldestAge, 5000));
+				// When spacing is the only unmet constraint the window is nowhere
+				// near full, so polling on the window's schedule would sleep whole
+				// seconds past the moment the gap closes.
+				const last = state.timestamps.at(-1);
+				const spacingWait =
+					state.config.minSpacingMs && last !== undefined
+						? state.config.minSpacingMs - (Date.now() - last)
+						: Number.POSITIVE_INFINITY;
+				const delay = Math.max(100, Math.min(oldestAge, spacingWait, 5000));
 				setTimeout(check, delay);
 			}
 		};
@@ -165,14 +228,34 @@ export function releaseRateLimitSlot(url: string): void {
  *
  * On 429 responses, automatically retries with exponential backoff
  * (up to `retryOn429` times, default 2).
+ *
+ * This is the bottom rung of the transport ladder, so it also enforces the
+ * ladder: a host registered `session-gated` throws before the request leaves,
+ * and a WAF interstitial throws instead of being handed back as data. See
+ * [transport-tier.ts](./transport-tier.ts). Pass `allowChallengeResponse: true`
+ * on an escalation path that inspects the status and retries via the browser.
  */
-export async function rateLimitedFetch(url: string | URL, init?: RequestInit): Promise<Response> {
+export async function rateLimitedFetch(
+	url: string | URL,
+	init?: RateLimitedFetchInit,
+): Promise<Response> {
 	const urlStr = String(url);
+
+	// Fails at the call site rather than one 403 later. Before the rate-limit
+	// wait so a mis-tiered route doesn't spend budget proving it is mis-tiered.
+	assertOpenTransport(urlStr);
+
+	const { allowChallengeResponse = false, ...fetchInit } = init ?? {};
+	const guard = (res: Response): Response => {
+		if (!allowChallengeResponse) assertNotChallenge(res, urlStr);
+		return res;
+	};
+
 	const state = getHostState(urlStr);
 
 	// No rate limit registered — pass through
 	if (!state) {
-		return fetch(urlStr, init);
+		return guard(await fetch(urlStr, fetchInit));
 	}
 
 	const maxRetries = state.config.retryOn429 ?? 2;
@@ -187,7 +270,7 @@ export async function rateLimitedFetch(url: string | URL, init?: RequestInit): P
 
 		let res: Response;
 		try {
-			res = await fetch(urlStr, init);
+			res = await fetch(urlStr, fetchInit);
 		} finally {
 			state.inflight--;
 		}
@@ -203,9 +286,9 @@ export async function rateLimitedFetch(url: string | URL, init?: RequestInit): P
 			continue;
 		}
 
-		return res;
+		return guard(res);
 	}
 
 	// Should not reach here, but TypeScript needs it
-	return fetch(urlStr, init);
+	return guard(await fetch(urlStr, fetchInit));
 }

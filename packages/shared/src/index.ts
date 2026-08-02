@@ -1,4 +1,13 @@
+export type { CompletenessSignal } from './completeness';
+export { deriveCompleteness, withCompleteness } from './completeness';
 export { appendDebugLog, DEBUG, DEBUG_DIR } from './debug';
+export type { DerivedStreamOptions } from './derived-stream';
+export {
+	DERIVED_STREAM_LIMITS,
+	derivedItemStream,
+	diffNewItems,
+	UpstreamStatusError,
+} from './derived-stream';
 export type { RetryOptions } from './fetch-retry';
 export { fetchWithRetry, friendlyHttpError } from './fetch-retry';
 export type {
@@ -8,7 +17,7 @@ export type {
 	PythonBridgeConfig,
 } from './python-bridge';
 export { BridgeError, PythonBridge } from './python-bridge';
-export type { RateLimitConfig } from './rate-limiter';
+export type { RateLimitConfig, RateLimitedFetchInit } from './rate-limiter';
 export {
 	getRateLimits,
 	rateLimitedFetch,
@@ -17,5 +26,16 @@ export {
 	releaseRateLimitSlot,
 	waitForRateLimitSlot,
 } from './rate-limiter';
+export type { TransportTier, TransportTierViolation } from './transport-tier';
+export {
+	assertNotChallenge,
+	assertOpenTransport,
+	clearTransportTiers,
+	detectChallenge,
+	getTransportTier,
+	getTransportTiers,
+	registerTransportTier,
+	TransportTierError,
+} from './transport-tier';
 export type { AppConfig } from './types';
 export { ConfigValidationError, validateConfig } from './validate';

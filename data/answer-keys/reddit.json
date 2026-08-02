@@ -1,0 +1,136 @@
+{
+	"target": "reddit.com",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://pypi.org/project/gatered/1.1.0",
+		"https://roundproxies.com/blog/reddit/",
+		"Verified against an interception run on 2026-07-29, not from documentation."
+	],
+	"transports": [
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"endpoints": [
+				"www.reddit.com/svc/shreddit/community-more-posts/{sort}/",
+				"www.reddit.com/svc/shreddit/more-comments/{id}"
+			],
+			"note": "Served as content-type text/vnd.reddit.partial+html \u2014 the body is <shreddit-*> custom elements carrying fields as attributes, not JSON. This is the front end's actual data transport, and a JSON-shaped scan reports the endpoint as a page.",
+			"pagination": "cursor in the more-posts-cursor attribute on <shreddit-post>"
+		},
+		{
+			"transport": "GraphQL",
+			"endpoints": [
+				"www.reddit.com/svc/shreddit/graphql",
+				"gql.reddit.com"
+			],
+			"note": "Two distinct hosts. Our run observed only ExposeVariant (A/B tracking) on the svc host across three page types \u2014 present, but not a content query. gql.reddit.com is unconfirmed by us.",
+			"detectableBy": "observation"
+		},
+		{
+			"transport": "JSON API (XHR)",
+			"endpoints": [
+				"gateway.reddit.com/desktopapi/v1/subreddits/{sub}/posts",
+				"www.reddit.com/{path}.json",
+				"oauth.reddit.com"
+			],
+			"note": "The .json suffix is a documented public API, so wrapping it satisfies the letter of a discovery task while learning nothing about the front end. The gateway host is the internal one.",
+			"detectableBy": "observation"
+		},
+		{
+			"transport": "Embedded JSON",
+			"endpoints": [
+				"<shreddit-post> element attributes"
+			],
+			"note": "Records live in HTML attributes on custom elements \u2014 no script tag, no hydration payload. Verified absent as hydration: a direct fetch of the homepage, a subreddit and a post page contained none of the framework markers.",
+			"detectableBy": "scan"
+		},
+		{
+			"transport": "Beacon/Telemetry",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Cross-frame RPC",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "HLS/Media",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Polling/Long-poll",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Service Worker",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Streaming response",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Worker-scoped",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Form-encoded POST",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end. A sweep will not submit a form, so this cannot fire from a direct pass."
+		}
+	],
+	"variants": [
+		{
+			"host": "old.reddit.com",
+			"note": "Same data, disjoint transports: server-rendered HTML, form-encoded XHR for voting and more-comments, .json suffix. No GraphQL, no WebSocket. Elimination tables for the two hosts must differ; if they come out similar, the run pattern-matched on the domain name instead of observing."
+		}
+	],
+	"gates": [
+		{
+			"name": "loid cookie",
+			"note": "Issued only by a JS bot-check, so it cannot be learned from API documentation."
+		}
+	],
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 10,
+		"shapes": 38,
+		"challenge": "reCAPTCHA"
+	},
+	"breadthPass": {
+		"date": "2026-07-29",
+		"pages": 6,
+		"transports": 11,
+		"saturatedAt": 2,
+		"hosts": 10,
+		"perPass": [
+			10,
+			1,
+			0,
+			0,
+			0,
+			0
+		],
+		"observed": [
+			"Beacon/Telemetry",
+			"Cross-frame RPC",
+			"GraphQL",
+			"HLS/Media",
+			"HTML-over-the-wire",
+			"JSON API (XHR)",
+			"JSONP",
+			"Polling/Long-poll",
+			"Service Worker",
+			"Streaming response",
+			"Worker-scoped"
+		],
+		"method": "Instrumented, swept each page type, drained after each so the event buffer could not cap.",
+		"note": "Every target saturated on transport classes by the second pass. Later pages added endpoints within transports already found, never a new class \u2014 which is what the saturation rule predicts and is worth knowing before budgeting a run."
+	}
+}

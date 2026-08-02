@@ -1,6 +1,12 @@
 {
 	"$schema": "https://biomejs.dev/schemas/2.4.7/schema.json",
-	"assist": { "actions": { "source": { "organizeImports": "on" } } },
+	"assist": {
+		"actions": {
+			"source": {
+				"organizeImports": "on"
+			}
+		}
+	},
 	"linter": {
 		"enabled": true,
 		"rules": {
@@ -10,7 +16,8 @@
 				"noDocumentCookie": "warn"
 			},
 			"correctness": {
-				"useExhaustiveDependencies": "warn"
+				"useExhaustiveDependencies": "warn",
+				"noUndeclaredVariables": "error"
 			}
 		}
 	},
@@ -20,7 +27,10 @@
 		"lineWidth": 100
 	},
 	"javascript": {
-		"formatter": { "quoteStyle": "single", "semicolons": "always" }
+		"formatter": {
+			"quoteStyle": "single",
+			"semicolons": "always"
+		}
 	},
 	"overrides": [
 		{
@@ -61,7 +71,8 @@
 			"!**/data",
 			"!**/.venv",
 			"!**/next-env.d.ts",
-			"!apps/api/src/browser.ts"
+			"!apps/api/src/browser.ts",
+			"!**/experiments/captures"
 		]
 	}
 }

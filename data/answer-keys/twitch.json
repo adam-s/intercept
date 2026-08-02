@@ -1,0 +1,137 @@
+{
+	"target": "twitch.tv",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://wundergraph.com/blog/graphql_in_production_analyzing_public_graphql_apis_1_twitch_tv",
+		"https://dev.twitch.tv/docs/eventsub/handling-websocket-events",
+		"https://dev.twitch.tv/docs/pubsub/",
+		"https://github.com/PhilippHeuer/twitch4j",
+		"https://github.com/streamlink/streamlink/blob/master/src/streamlink/plugins/twitch.py",
+		"https://github.com/pixeltris/TwitchAdSolutions"
+	],
+	"transports": [
+		{
+			"transport": "GraphQL",
+			"endpoints": [
+				"gql.twitch.tv/gql",
+				"gql.twitch.tv/integrity"
+			],
+			"note": "Persisted queries addressed by SHA-256 hash. The hashes rotate server-side \u2014 downstream projects report 24-72h to catch up when one changes \u2014 so a hash in code is a moving part, not a constant.",
+			"detectableBy": "observation",
+			"operations": [
+				"PlaybackAccessToken",
+				"VideoMetadata",
+				"ChannelShell",
+				"StreamMetadata",
+				"ShareClipRenderStatus",
+				"VideoAccessToken_Clip"
+			]
+		},
+		{
+			"transport": "WebSocket",
+			"endpoints": [
+				"wss://irc-ws.chat.twitch.tv/",
+				"wss://pubsub-edge.twitch.tv/v1",
+				"wss://eventsub.wss.twitch.tv/ws",
+				"wss://hermes.twitch.tv/v1"
+			],
+			"note": "Three distinct sockets, not one. The chat socket tunnels IRC \u2014 a text protocol inside the frames \u2014 so a reader expecting JSON concludes the socket carries nothing useful.",
+			"encoding": "The hermes socket carries an encrypted envelope; the IRC socket carries text, not JSON. Encoding is a property of each socket, so neither is a separate transport row.",
+			"detectableBy": "observation"
+		},
+		{
+			"transport": "HLS/Media",
+			"endpoints": [
+				"usher.ttvnw.net/api/v2/channel/hls/{channel}.m3u8",
+				"usher.ttvnw.net/vod/v2/{id}.m3u8"
+			],
+			"note": "Playlist needs an access token minted by a GraphQL call first. The player also fetches and parses the playlist inside a Web Worker \u2014 ad-blocking projects hook exactly that worker \u2014 so a page-scoped capture sees no media at all on a streaming page.",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29. Verified to media: playlist -> variant -> a fetched MP4 segment."
+		},
+		{
+			"transport": "Beacon/Telemetry",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Polling/Long-poll",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Worker-scoped",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "JSON API (XHR)",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Cross-frame RPC",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end."
+		}
+	],
+	"gates": [
+		{
+			"name": "client integrity",
+			"note": "Device-Id and Client-Integrity headers, minted at gql.twitch.tv/integrity by driving a real browser at twitch.tv/{channel}; token carries an expiry. The maintained implementation tries WITHOUT it first and mints only on 400/401/403 \u2014 prove the cheap path fails before paying for the expensive one."
+		},
+		{
+			"name": "Kasada",
+			"note": "k.twitchcdn.net serves the device-ID script. Present from first navigation."
+		}
+	],
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 8,
+		"shapes": 27,
+		"challenge": "Kasada"
+	},
+	"workerChain": {
+		"note": "Media is handled by a WASM worker reached through two hops: a blob-backed bootstrap whose text is only readable at creation time, which importScripts the real worker from a CDN that CORS refuses to the page but plain HTTP serves. Its source names JSON API, WebTransport, HLS/Media, Encoded/Binary, Cross-frame RPC, Beacon, Polling and Streaming response.",
+		"caveat": "These are source markers, not observed calls. A bundled worker may reference a capability it never uses \u2014 WebTransport in particular is plausibly a fallback path. Named in source justifies looking; it does not justify recording the transport as in use.",
+		"chain": [
+			"blob: bootstrap (page)",
+			"assets.twitch.tv/assets/amazon-ivs-wasmworker.min-*.js",
+			".wasm module"
+		]
+	},
+	"breadthPass": {
+		"date": "2026-07-29",
+		"pages": 7,
+		"transports": 9,
+		"saturatedAt": 2,
+		"hosts": 18,
+		"perPass": [
+			8,
+			1,
+			0,
+			0,
+			0,
+			0,
+			0
+		],
+		"observed": [
+			"Beacon/Telemetry",
+			"GraphQL",
+			"HLS/Media",
+			"HTML-over-the-wire",
+			"JSON API (XHR)",
+			"JSONP",
+			"Polling/Long-poll",
+			"WebSocket",
+			"Worker-scoped"
+		],
+		"method": "Instrumented, swept each page type, drained after each so the event buffer could not cap.",
+		"note": "Every target saturated on transport classes by the second pass. Later pages added endpoints within transports already found, never a new class \u2014 which is what the saturation rule predicts and is worth knowing before budgeting a run."
+	}
+}

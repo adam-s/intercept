@@ -1,0 +1,20 @@
+{
+	"name": "@interceptor/domain-reddit",
+	"version": "0.0.1",
+	"type": "module",
+	"main": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@interceptor/browser": "workspace:*",
+		"@interceptor/shared": "workspace:*",
+		"cheerio": "^1.2.0",
+		"ws": "^8.19.0"
+	},
+	"devDependencies": {
+		"@types/node": "25.5.0",
+		"@types/ws": "^8.18.1",
+		"typescript": "5.9.3"
+	}
+}

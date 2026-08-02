@@ -12,8 +12,14 @@
 		"@interceptor/browser": "workspace:*",
 		"@interceptor/domain-boardshop": "workspace:*",
 		"@interceptor/shared": "workspace:*",
+		"@msgpack/msgpack": "^3.1.3",
 		"hono": "^4.12.8",
-		"ws": "^8.19.0"
+		"ws": "^8.19.0",
+		"@interceptor/domain-youtube": "workspace:*",
+		"@interceptor/domain-yahoofinance": "workspace:*",
+		"@interceptor/domain-reddit": "workspace:*",
+		"@interceptor/domain-hackernews": "workspace:*",
+		"@interceptor/domain-twitch": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "25.5.0",

@@ -14,6 +14,9 @@
 		"./shared/auth": "./src/shared/auth.ts",
 		"./shared/interceptor": "./src/shared/interceptor.ts",
 		"./shared/session-manager": "./src/shared/session-manager.ts",
+		"./shared/main-world": "./src/shared/main-world.ts",
+		"./driver": "./src/driver/index.ts",
+		"./driver/manifest": "./src/driver/manifest.ts",
 		"./handler": "./src/handler/index.ts",
 		"./handler/api-proxy": "./src/handler/api-proxy.ts",
 		"./handler/domain-loader": "./src/handler/domain-loader.ts",
@@ -22,8 +25,7 @@
 		"./analysis/dom": "./src/analysis/dom-orchestrator.ts",
 		"./codegen": "./src/codegen/index.ts",
 		"./registry": "./src/registry.ts",
-		"./mcp": "./src/mcp/server.ts",
-		"./analysis/discovery": "./src/analysis/discovery-analyzer.ts"
+		"./mcp": "./src/mcp/server.ts"
 	},
 	"scripts": {
 		"test": "vitest run",
@@ -33,11 +35,14 @@
 	},
 	"dependencies": {
 		"@ghostery/adblocker-playwright": "2.14.1",
+		"@interceptor/shared": "workspace:*",
 		"@modelcontextprotocol/sdk": "1.27.1",
+		"camoufox-js": "^0.11.5",
 		"cheerio": "^1.2.0",
 		"cross-fetch": "4.1.0",
 		"hono": "^4.12.8",
 		"patchright": "1.58.2",
+		"playwright-core": "1.53.1",
 		"ws": "8.18.2",
 		"zod": "4.3.6"
 	},

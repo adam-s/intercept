@@ -1,0 +1,895 @@
+#!/usr/bin/env node
+/**
+ * route-spec — the asserting tier over domain proxy routes.
+ *
+ * PURPOSE
+ *   Every registered domain route is called through the running API server and
+ *   checked against the contract in AGENTS.md §"Product invariants": a route
+ *   returns JSON it actually received, and reports what it actually got. This
+ *   is the layer that ASSERTS. It complements the report-only tools
+ *   (capture-traffic.sh, snapshot.mjs) — those print, this exits non-zero.
+ *
+ *   Four checks per route:
+ *     status        — 2xx, and not a bot-wall interstitial
+ *     content-type  — JSON, because a proxy route that serves markup has
+ *                     silently handed back an error page
+ *     completeness  — an indicated total larger than the returned item count
+ *                     must come with an explicit incomplete signal. Silent
+ *                     truncation is the defect this check exists to catch.
+ *     shape         — the response's structural fingerprint against a recorded
+ *                     baseline, so live-site drift surfaces as a verdict
+ *                     instead of a mystery
+ *
+ * USAGE
+ *   node scripts/route-spec.mjs                        # assert against the recorded baseline
+ *   node scripts/route-spec.mjs --record               # write/refresh the baseline, assert the rest
+ *   node scripts/route-spec.mjs --domain=boardshop     # one domain only
+ *   node scripts/route-spec.mjs --label=pre-deploy     # name this run's artifact dir
+ *   node scripts/route-spec.mjs --budget=20            # cap routes probed
+ *   node scripts/route-spec.mjs --port=3001 --timeout=45000
+ *
+ * BOUNDS
+ *   At most --budget routes (default 40), one request each, --timeout ms per
+ *   request (default 45000), and a hard --wall-clock ceiling (default 300s) for
+ *   the whole run. The per-request default is deliberately generous: a route
+ *   that drives a real browser can legitimately take tens of seconds, and a
+ *   timeout tight enough to abort it reports "hung" for work that was merely
+ *   slow. The wall-clock ceiling is what bounds the run.
+ *
+ *   No retries: an unexpected response is the finding. Baselines
+ *   live in data/route-spec-baseline/<domain>.json (committed, small — shapes
+ *   only, never response bodies, so no captured data lands in git). Run
+ *   artifacts go to .route-spec/<label>/ (gitignored). No model calls. Nothing
+ *   is written outside those two directories.
+ *
+ *   A passing run deletes its artifact directory. A failing run leaves it in
+ *   place for inspection and exits 1.
+ *
+ * Importing this module runs nothing — the pure checks are exported so
+ * scripts/__tests__/route-spec.test.mjs drives them over fixtures with no
+ * network and no server.
+ */
+
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const BASELINE_DIR = resolve(ROOT, 'data/route-spec-baseline');
+
+// ─── Arg parsing ─────────────────────────────────────────────────────
+
+/** The uniform 4-line argv parser every script in this folder shares. */
+export function parseArgs(argv) {
+	const flags = {};
+	for (const arg of argv) {
+		const raw = arg.replace(/^--/, '');
+		// Split on the FIRST '=' only: a value can contain more of them
+		// (--url=/api?page=2), and splitting on all of them silently truncates it.
+		const eq = raw.indexOf('=');
+		if (eq === -1) flags[raw] = true;
+		else flags[raw.slice(0, eq)] = raw.slice(eq + 1);
+	}
+	return {
+		record: flags.record === true,
+		domain: typeof flags.domain === 'string' ? flags.domain : null,
+		label: typeof flags.label === 'string' ? flags.label : 'latest',
+		// The reference domain alone exceeds 40 routes, so a lower default made a
+		// full run silently partial — and "8 not probed" reads a lot like "8
+		// passed" at a glance.
+		budget: Number(flags.budget ?? 100),
+		allowInstrumented: flags['allow-instrumented'] === true,
+		port: Number(flags.port ?? 3001),
+		timeout: Number(flags.timeout ?? 45_000),
+		wallClock: Number(flags['wall-clock'] ?? 300) * 1000,
+		help: flags.help === true || flags.h === true,
+	};
+}
+
+// ─── Pure checks ─────────────────────────────────────────────────────
+
+/**
+ * Structural fingerprint of a JSON value — types and keys, never values.
+ *
+ * Values are deliberately excluded: a baseline that recorded them would be a
+ * captured copy of the target's data, which must not land in git, and it would
+ * go red on every ordinary content change rather than on a shape change.
+ */
+/**
+ * At this many same-shaped keys, an object is a map and its keys are data.
+ *
+ * A struct's key names are its schema and a change in them is a regression. A
+ * map's key names are content: a feature-flag blob, a per-symbol quote table, a
+ * translations dictionary. Enumerating those pins the site's own release
+ * schedule, so the check fails whenever they ship a flag — a red that says
+ * nothing about our route.
+ */
+const MAP_LIKE_MIN_KEYS = 8;
+
+/**
+ * Whether a response may become a recorded contract.
+ *
+ * Only a success may. A failure recorded as the expected shape turns the route
+ * green forever over exactly the response the check exists to catch, and the
+ * window where this happens is ordinary: a host that rate-limits mid-run answers
+ * some routes and refuses others.
+ */
+export function isRecordableStatus(status, contractualStatuses = []) {
+	if (status >= 200 && status < 300) return true;
+	// A status the route DECLARED is an answer, not a failure, so its shape is a
+	// contract worth pinning. Without this the two mechanisms disagreed: the
+	// status check accepted a declared 404 while the recorder refused to record
+	// what that 404 returns, leaving the route permanently without a baseline.
+	// The pollution this gate exists to prevent is an UNdeclared failure being
+	// frozen as the expectation, and that is untouched — an undeclared status is
+	// still refused.
+	return contractualStatuses.includes(status);
+}
+
+/**
+ * Merge a list of objects into one shape, field by field.
+ *
+ * Two content properties leak in through any single element, and both were seen
+ * failing on live data. A nullable field reads `string` in an element that has it
+ * and `null` in one that does not — a streamer with no chosen colour — so the
+ * recorded type depended on which row sorted first. And a list reads `[]` when
+ * that element's list is empty and `[{…}]` when it is not.
+ *
+ * Merging is field-wise and recursive, not an alternation of whole objects.
+ * Alternating renders each distinct row shape as its own arm, so a page of
+ * results produces an arm per combination and no two runs agree — which is
+ * exactly what a first attempt at this did. Merged, the union is stable where a
+ * single element is not: both variants of each field nearly always appear across
+ * a page, so two runs agree even though no two rows do.
+ *
+ * A field whose values are all objects recurses; anything else contributes the
+ * set of types it took, joined so the result is order-independent.
+ */
+function unionOfObjects(objects, depth, ancestors) {
+	const counts = new Map();
+	const values = new Map();
+	for (const el of objects) {
+		for (const k of Object.keys(el)) {
+			counts.set(k, (counts.get(k) ?? 0) + 1);
+			if (!values.has(k)) values.set(k, []);
+			values.get(k).push(el[k]);
+		}
+	}
+	const keys = [...counts.keys()].sort();
+	// Same self-similar guard as the object branch: a merged node repeating itself
+	// is described once, so a tree's depth stays out of the contract.
+	const signature = keys.join(',');
+	if (keys.length >= 2 && ancestors.includes(signature)) return '↻';
+	const nested = [...ancestors, signature];
+
+	return keys
+		.map((k) => {
+			const optional = counts.get(k) === objects.length ? '' : '?';
+			const vals = values.get(k);
+			const objs = vals.filter((v) => v && typeof v === 'object' && !Array.isArray(v));
+			const shape =
+				objs.length === vals.length && objs.length > 1
+					? `{${unionOfObjects(objs, depth + 1, nested)}}`
+					: [...new Set(vals.map((v) => shapeOf(v, depth + 1, nested)))].sort().join('|');
+			return `${k}${optional}:${shape}`;
+		})
+		.join(',');
+}
+
+export function shapeOf(value, depth = 0, ancestors = []) {
+	if (depth > 6) return '…';
+	if (value === null) return 'null';
+	if (Array.isArray(value)) {
+		if (value.length === 0) return '[]';
+		// The union across elements, not element zero.
+		//
+		// A shape check asks whether the element type changed — count is the
+		// completeness check's job — but sampling one element only answers that
+		// when the elements agree. They routinely do not: a delta stream sends
+		// each frame carrying just the fields that changed, so element zero is
+		// whichever tick happened to arrive first. Measured on a live protobuf
+		// quote stream, the pin flapped between runs with nothing wrong, because
+		// two of eleven fields are present only on some ticks.
+		//
+		// So a key absent from any element is marked optional, and absence of an
+		// optional key is not a regression. A field that vanishes from *every*
+		// element still is.
+		const objects = value.filter((v) => v && typeof v === 'object' && !Array.isArray(v));
+		if (objects.length === value.length && objects.length > 1) {
+			return `[{${unionOfObjects(objects, depth, ancestors)}}]`;
+		}
+		return `[${shapeOf(value[0], depth + 1, ancestors)}]`;
+	}
+	if (typeof value === 'object') {
+		const keys = Object.keys(value).sort();
+
+		// A self-similar node, described once however deep this instance goes.
+		//
+		// A comment tree, a category tree, a threaded reply — its DEPTH is content.
+		// Recording the shape of a story with eight levels of replies and asserting
+		// it against a story with three is a check that fails when somebody
+		// answers a comment, which it did. Spelling the nesting out also spends the
+		// depth budget re-describing one type, so the ellipsis lands mid-structure
+		// and two shapes that agree print as though they differ.
+		//
+		// Matched on the key signature rather than the rendered shape, because the
+		// shape is not known until the recursion returns. Two keys minimum, so
+		// small unrelated objects are not collapsed into each other.
+		const signature = keys.join(',');
+		if (keys.length >= 2 && ancestors.includes(signature)) return '{↻}';
+		const nested = [...ancestors, signature];
+
+		// A map, described by what its values look like rather than by its keys.
+		//
+		// Two cases, and only handling the first left the defect in place. Values
+		// that render identically collapse to that one shape. Values that are all
+		// objects but differ — a feature-flag table where each flag carries its own
+		// variations — are a population like an array's elements, so they merge
+		// field-wise by the same rule. Requiring them to be identical meant a real
+		// map fell through to being enumerated key by key, which is what pinned a
+		// third party's release schedule into the contract.
+		if (keys.length >= MAP_LIKE_MIN_KEYS) {
+			const valueShapes = new Set(keys.map((k) => shapeOf(value[k], depth + 1, nested)));
+			if (valueShapes.size === 1) return `{*:${[...valueShapes][0]}}`;
+			const objectValues = keys
+				.map((k) => value[k])
+				.filter((v) => v && typeof v === 'object' && !Array.isArray(v));
+			if (objectValues.length === keys.length) {
+				return `{*:{${unionOfObjects(objectValues, depth, nested)}}}`;
+			}
+		}
+		return `{${keys.map((k) => `${k}:${shapeOf(value[k], depth + 1, nested)}`).join(',')}}`;
+	}
+	return typeof value;
+}
+
+/**
+ * Whether an actual shape satisfies a baseline that marks some keys optional.
+ *
+ * Compared as text after removing every optional key from both sides, so a
+ * frame that simply did not carry `dayVolume` this time is accepted while a
+ * frame that lost `price` is not.
+ */
+export function shapeSatisfies(baselineShape, actualShape) {
+	if (baselineShape === actualShape) return true;
+	if (!baselineShape?.includes('?:')) return false;
+	const optional = [...baselineShape.matchAll(/([A-Za-z0-9_]+)\?:/g)].map((m) => m[1]);
+	const strip = (shape) => {
+		let out = shape;
+		for (const key of optional) {
+			// Drop the key wherever it appears, optional-marked or not, with the
+			// comma on whichever side it has one.
+			out = out.replace(new RegExp(`,?${key}\\??:[^,}]*`, 'g'), '');
+		}
+		return out.replace(/\{,/g, '{');
+	};
+	return strip(baselineShape) === strip(actualShape);
+}
+
+/** Field names sites use for "here are the items". */
+const ITEM_KEYS = ['items', 'data', 'results', 'entries', 'records', 'rows', 'products', 'list'];
+/** Field names sites use for "this is how many exist". */
+const TOTAL_KEYS = ['total', 'totalCount', 'total_count', 'totalItems', 'totalResults', 'count'];
+/** Fields whose presence means the route already told the truth about truncation. */
+const INCOMPLETE_KEYS = [
+	'hasMore',
+	'has_more',
+	'nextCursor',
+	'next_cursor',
+	'nextPage',
+	'complete',
+	'incomplete',
+	'truncated',
+];
+
+/**
+ * The completeness contract: a route reports what it actually got.
+ *
+ * Returns `{ verdict, itemCount, indicatedTotal, detail }` where verdict is
+ * 'complete' | 'incomplete-declared' | 'silent-truncation' | 'not-applicable'.
+ * Only 'silent-truncation' is a failure — the route returned fewer items than
+ * it said exist and said nothing about it.
+ */
+export function checkCompleteness(body) {
+	if (body === null || typeof body !== 'object') {
+		return { verdict: 'not-applicable', detail: 'response is not an object' };
+	}
+
+	const items = Array.isArray(body)
+		? body
+		: (ITEM_KEYS.map((k) => body[k]).find(Array.isArray) ?? null);
+	if (items === null) {
+		return { verdict: 'not-applicable', detail: 'no item collection found' };
+	}
+
+	const totalKey = Array.isArray(body) ? null : TOTAL_KEYS.find((k) => typeof body[k] === 'number');
+	if (!totalKey) {
+		return { verdict: 'not-applicable', itemCount: items.length, detail: 'no indicated total' };
+	}
+
+	const indicatedTotal = body[totalKey];
+	if (items.length >= indicatedTotal) {
+		return { verdict: 'complete', itemCount: items.length, indicatedTotal };
+	}
+
+	// The route returned fewer than it claims exist. That is fine only if it
+	// said so — a cursor, a hasMore flag, an explicit incomplete marker.
+	const declared = INCOMPLETE_KEYS.find(
+		(k) => body[k] !== undefined && body[k] !== null && body[k] !== false,
+	);
+	if (declared) {
+		return {
+			verdict: 'incomplete-declared',
+			itemCount: items.length,
+			indicatedTotal,
+			detail: `declared via "${declared}"`,
+		};
+	}
+
+	return {
+		verdict: 'silent-truncation',
+		itemCount: items.length,
+		indicatedTotal,
+		detail: `returned ${items.length} of ${indicatedTotal} (via "${totalKey}") with no incompleteness signal`,
+	};
+}
+
+/**
+ * Compare a response's shape against its recorded baseline.
+ *
+ * Verdict vocabulary is deliberate and matches the snapshot-diff convention:
+ * 'no-signal-flipped' | 'new-route' | 'unexpected-regression'.
+ */
+export function diffShape(baselineShape, actualShape) {
+	if (baselineShape === undefined) {
+		return { verdict: 'new-route', detail: 'no baseline recorded' };
+	}
+	// A baseline is a SET of accepted shapes, not one shape. Some routes vary
+	// legitimately — an escalation route returns the API's shape on a first call
+	// and its fallback's shape once the upstream rate-limits. Pinning such a
+	// route to whichever shape got recorded first turns designed behavior into a
+	// permanent red. Record mode accumulates; assert passes on any member.
+	const accepted = Array.isArray(baselineShape) ? baselineShape : [baselineShape];
+	// Optional-key tolerance, so a recorded shape whose array elements disagreed
+	// accepts a later sample missing one of those keys. Exact match first, so the
+	// common case costs nothing.
+	if (accepted.some((s) => shapeSatisfies(s, actualShape))) {
+		return { verdict: 'no-signal-flipped' };
+	}
+	if (accepted.length > 1) {
+		return {
+			verdict: 'unexpected-regression',
+			detail: `shape matches none of ${accepted.length} recorded shapes\n      now: ${truncate(actualShape, 300)}`,
+		};
+	}
+	return {
+		verdict: 'unexpected-regression',
+		detail: `shape changed\n      was: ${truncate(accepted[0], 300)}\n      now: ${truncate(actualShape, 300)}`,
+	};
+}
+
+function truncate(s, n) {
+	return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+/** Every check for one route's response, as a list of findings. Pure. */
+export function checkResponse({
+	status,
+	contentType,
+	body,
+	raw,
+	baselineShape,
+	contractualStatuses = [],
+}) {
+	const findings = [];
+
+	// A route may declare a non-2xx status as one of its contractual answers.
+	//
+	// This is narrow on purpose, and it is not the same thing as widening what
+	// counts as success. Some resources genuinely are not always there — a live
+	// broadcast when nobody is on air — and for those, "there is no stream right
+	// now" is a complete, correct answer rather than a fault. Without this the
+	// route is permanently red, which trains a reader to skip the whole domain.
+	//
+	// The danger it would create if used loosely is real: a route that always
+	// answers its declared non-2xx passes forever while proving nothing. So the
+	// obligation travels with the declaration — the transport must be proved
+	// somewhere that IS deterministic, and the route says where. A declaration
+	// with no such sibling is a check that cannot fail.
+	const contractual = new Set(contractualStatuses);
+	if ((status < 200 || status >= 300) && !contractual.has(status)) {
+		findings.push({ check: 'status', detail: `HTTP ${status}` });
+	}
+
+	// A streaming route is a legitimate shape and its body is not JSON. Judging it
+	// by the JSON rule reported a working live feed as a route serving an error
+	// page — the checker failing to understand a transport rather than the route
+	// failing. It gets its own rule: the framing must be right and at least one
+	// event must have arrived, because an event stream that opens and delivers
+	// nothing is the failure that matters here and it is invisible to a status
+	// check.
+	const isStream = /event-stream|x-ndjson|stream\+json/i.test(contentType ?? '');
+	if (isStream) {
+		// A stream body is never JSON, so `body` is undefined here by design; the
+		// raw text is the only thing that carries the frames.
+		const text = typeof raw === 'string' ? raw : typeof body === 'string' ? body : '';
+		const events = [...text.matchAll(/^event:\s*(\S+)/gm)].map((m) => m[1]);
+		const payloads = [...text.matchAll(/^data:\s*(.+)$/gm)].length;
+		if (!events.length && !payloads) {
+			findings.push({
+				check: 'stream',
+				detail: 'opened but delivered no event — a channel that carries nothing',
+			});
+		} else if (!payloads) {
+			findings.push({ check: 'stream', detail: `events ${events.join(',')} but no data line` });
+		}
+		return findings;
+	}
+
+	const isJson = /json/i.test(contentType ?? '');
+	if (!isJson) {
+		findings.push({
+			check: 'content-type',
+			detail: `${contentType || 'none'} — a proxy route serving non-JSON has handed back an error or challenge page`,
+		});
+	}
+
+	// The remaining checks need a parsed body; skip rather than double-report.
+	if (body === undefined) return findings;
+
+	const completeness = checkCompleteness(body);
+	if (completeness.verdict === 'silent-truncation') {
+		findings.push({ check: 'completeness', detail: completeness.detail });
+	}
+
+	const shape = diffShape(baselineShape, shapeOf(body));
+	if (shape.verdict === 'unexpected-regression') {
+		findings.push({ check: 'shape', detail: shape.detail });
+	}
+
+	return findings;
+}
+
+/** Routes this tier can probe unattended: GET, no path parameters. */
+export function isProbeable(route) {
+	return route.startsWith('GET ') && !route.includes(':') && !route.includes('*');
+}
+
+/**
+ * The concrete URLs to probe for a domain, and what got left out.
+ *
+ * A declared example always wins: a route with a path parameter or a required
+ * query parameter is not callable from its declaration alone, and skipping it
+ * silently is how a checker reports green over routes nothing ever called.
+ * Examples are matched to their route by path prefix so a route that declares
+ * one is never also probed bare.
+ */
+/**
+ * Routes that failed to declare what the checker needs from them.
+ *
+ * `examples` and `upstream` are both obligations the discovery rule states, and
+ * only one of them was ever enforced here. The other was demonstrated in the
+ * reference domain, stated in the rule, and dropped — by an agent that declared
+ * `examples` seven times in the same run. An obligation nothing checks is a
+ * suggestion, so both are checked.
+ *
+ * A `targetUrl` route is exempt from `upstream`: its target *is* the upstream,
+ * so declaring it again would be a second copy to drift.
+ */
+export function undeclared(routes = []) {
+	const missing = [];
+	for (const r of routes) {
+		const path = typeof r === 'string' ? r : r.path;
+		const rec = typeof r === 'string' ? {} : r;
+		const needsExample = /[:*]/.test(String(path));
+		if (needsExample && !(rec.examples ?? []).length) {
+			missing.push({
+				route: path,
+				field: 'examples',
+				why: 'has a path parameter, so it cannot be called from its declaration alone',
+			});
+		}
+		// The index sends `hasTargetUrl`; a plugin object would carry `targetUrl`.
+		// Accept either, so this works against the wire shape and the source shape.
+		const proxies = Boolean(rec.hasTargetUrl ?? rec.targetUrl);
+		if (!proxies && !(rec.upstream ?? []).length) {
+			missing.push({
+				route: path,
+				field: 'upstream',
+				why: 'the coverage check cannot recover what a route calls from its own path',
+			});
+		}
+	}
+	return missing;
+}
+
+export function probeTargets(routes = [], examples = []) {
+	// Every declared example is probed, whatever its verb.
+	//
+	// Filtering to GET left one route per domain permanently unchecked — a player
+	// control, a comment page, a fixture — each of which declares a concrete
+	// example and answers 200 with real data. "A route nothing calls is not a
+	// route this tier has checked" applied to them as much as to any other, and
+	// reporting them as unprobed forever is a gap, not a policy.
+	//
+	// Declaring an example IS the safety assertion. An example is required to be a
+	// real, callable invocation, so writing one for a non-GET route is the author
+	// saying this call is safe to make unattended. A route that changes state must
+	// therefore declare no example — and then it shows up as unprobed, which is
+	// the honest outcome rather than an accident.
+	const exampleTargets = examples
+		.map((e) => {
+			const sp = e.indexOf(' ');
+			return sp === -1
+				? { method: 'GET', path: e }
+				: { method: e.slice(0, sp), path: e.slice(sp + 1) };
+		})
+		.filter((t) => t.path.startsWith('/'));
+
+	// Coverage is a claim about a specific route, so it is matched on method AND
+	// path. Stripping the method first made every example cover every same-stem
+	// route regardless of verb: a `GET /api/x/post/aww/1v96p9o` example marked
+	// `POST /api/x/post/:sub/:id/comments/more` covered, because their stems
+	// agree. The POST route then dropped out of `skipped` — it is only listed
+	// when *not* covered — so `skippedUnprobeable` stayed zero, the "not probed"
+	// line never printed, and the run reported `✓ 17 route(s) passed` over a
+	// route nothing had called. That is exactly the silence the docblock above
+	// exists to prevent, reintroduced one line lower down.
+	const covered = new Set();
+	for (const target of exampleTargets) {
+		const base = target.path.split('?')[0];
+		for (const route of routes) {
+			// Method must agree. See the note above: matching on path alone let one
+			// verb's example vouch for another's route.
+			if (!route.startsWith(`${target.method} `)) continue;
+			const path = route.slice(target.method.length + 1);
+			const stem = path.split('/:')[0].split('/*')[0];
+			if (base === path || base.startsWith(`${stem}/`) || base === stem) covered.add(route);
+		}
+	}
+
+	const bare = routes
+		.filter((r) => isProbeable(r) && !covered.has(r))
+		.map((r) => ({ method: 'GET', path: r.slice(4) }));
+	// What remains is genuinely uncheckable: a parameterised or non-GET route that
+	// declared no example, so there is no invocation to make.
+	const skipped = routes.filter((r) => !covered.has(r) && !isProbeable(r));
+
+	return { targets: [...exampleTargets, ...bare], skipped };
+}
+
+// ─── Runner ──────────────────────────────────────────────────────────
+
+const HELP = `route-spec — assert every domain proxy route against its contract
+
+  node scripts/route-spec.mjs [--record] [--domain=NAME] [--label=NAME]
+                              [--budget=N] [--port=N] [--timeout=MS]
+                              [--wall-clock=SECONDS]
+
+Read the header docblock in this file for the bounds this run will respect.`;
+
+async function fetchJson(url, timeout, method = 'GET') {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), timeout);
+	try {
+		// No body is sent. A declared example is a complete invocation on its own,
+		// and inventing a payload here would be asserting against a request no
+		// route author wrote down.
+		const res = await fetch(url, { method, signal: controller.signal });
+		const contentType = res.headers.get('content-type');
+		const text = await res.text();
+		let body;
+		try {
+			body = JSON.parse(text);
+		} catch {
+			body = undefined;
+		}
+		return { status: res.status, contentType, body, raw: text };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+function readBaseline(domain) {
+	try {
+		return JSON.parse(readFileSync(resolve(BASELINE_DIR, `${domain}.json`), 'utf8'));
+	} catch {
+		return {};
+	}
+}
+
+async function main() {
+	const opts = parseArgs(process.argv.slice(2));
+	if (opts.help) {
+		console.log(HELP);
+		return 0;
+	}
+
+	const started = Date.now();
+	const base = `http://localhost:${opts.port}`;
+	const artifactDir = resolve(ROOT, '.route-spec', opts.label);
+	mkdirSync(artifactDir, { recursive: true });
+
+	let index;
+	try {
+		index = await fetchJson(`${base}/api`, opts.timeout);
+	} catch (err) {
+		console.error(`✗ API server not reachable on port ${opts.port}: ${err.message}`);
+		console.error('  Start it first — see docs/ARCHITECTURE.md.');
+		return 1;
+	}
+	if (!index.body?.domains) {
+		console.error(`✗ GET ${base}/api did not return a domain index (HTTP ${index.status}).`);
+		return 1;
+	}
+
+	const domains = index.body.domains.filter((d) => !opts.domain || d.name === opts.domain);
+	if (domains.length === 0) {
+		console.error(`✗ No registered domain named "${opts.domain}".`);
+		return 1;
+	}
+
+	// GATE: an assertion run against an instrumented session measures a page no
+	// ordinary visitor sees — patched primitives, aids installed — so a pass here
+	// says nothing about what a clean session would get, and a block during one
+	// says nothing about the site. Refuse rather than produce a number that reads
+	// like a verdict. See the two-pass rule in .agents/rules/discovery.md.
+	if (!opts.allowInstrumented) {
+		// fetchJson returns { status, body } — reading `state.instrumented` here
+		// silently yields undefined and the gate never fires, which is exactly the
+		// unfalsifiable green this gate exists to prevent.
+		const state = await fetchJson(`${base}/browser/instrument`, opts.timeout).catch(() => null);
+		if (state?.body?.instrumented === true) {
+			console.error(
+				'✗ This session is instrumented — discovery aids are still installed.\n' +
+					'  route-spec asserts what a clean session gets, and an instrumented page is not that.\n' +
+					'  Run: node scripts/discover-probe.mjs --mode=uninstall\n' +
+					'  Then re-run. Use --allow-instrumented only to debug the checker itself.',
+			);
+			return 1;
+		}
+	}
+
+	// GATE: recording is destructive and domain-wide. Without a domain it rewrites
+	// every baseline in the repo from whatever happens to be reachable right now —
+	// including reference material whose test server may not even be running, whose
+	// routes then record as failures or as error shapes. That has happened more
+	// than once and each time it was noticed by accident.
+	if (opts.record && !opts.domain) {
+		console.error(
+			'✗ --record needs --domain=NAME.\n' +
+				'  Recording rewrites baselines for every domain it can reach, and a domain\n' +
+				'  whose server is down records its failures as the expected shape.\n' +
+				'  Name the one you mean.',
+		);
+		return 1;
+	}
+
+	const results = [];
+	const baselines = {};
+	let probed = 0;
+	let skippedForBudget = 0;
+	let skippedUnprobeable = 0;
+	let declarationFailures = 0;
+	// Routes whose shape was refused because the upstream was failing. A run that
+	// refused any is not a complete recording, and says so at the end.
+	let refusedToRecord = 0;
+
+	outer: for (const domain of domains) {
+		baselines[domain.name] = opts.record ? {} : readBaseline(domain.name);
+		const recorded = opts.record ? baselines[domain.name] : null;
+		const existing = opts.record ? readBaseline(domain.name) : baselines[domain.name];
+
+		// GATE: a route that did not declare what the checker needs is a route the
+		// checker cannot honestly assert. Failing here rather than skipping is the
+		// point — a silently skipped route reads exactly like a passing one.
+		// Declared contractual statuses, keyed by "METHOD /path" so a probe can find
+		// its own route's declaration. Path parameters are kept as declared and
+		// matched by stem below, since a probe carries a concrete example.
+		const contractByRoute = new Map(
+			(domain.routeDetail ?? []).map((r) => [`${r.method} ${r.path}`, r.contractualStatuses ?? []]),
+		);
+
+		const missing = undeclared(domain.routeDetail ?? []);
+		if (missing.length) {
+			console.error(
+				`\n✗ ${domain.name}: ${missing.length} route(s) missing a required declaration:`,
+			);
+			for (const m of missing.slice(0, 20)) {
+				console.error(`    ${m.route} — no ${m.field}: ${m.why}`);
+			}
+			if (missing.length > 20) console.error(`    … ${missing.length - 20} more`);
+			declarationFailures += missing.length;
+			continue;
+		}
+
+		const { targets, skipped } = probeTargets(domain.routes ?? [], domain.examples ?? []);
+		skippedUnprobeable += skipped.length;
+
+		for (const target of targets) {
+			const route = `${target.method} ${target.path}`;
+			if (probed >= opts.budget) {
+				skippedForBudget++;
+				continue;
+			}
+			if (Date.now() - started > opts.wallClock) {
+				console.error(`\n✗ Wall-clock ceiling (${opts.wallClock / 1000}s) reached — stopping.`);
+				break outer;
+			}
+
+			const path = target.path;
+			probed++;
+
+			const t0 = Date.now();
+			let res;
+			try {
+				res = await fetchJson(`${base}${path}`, opts.timeout, target.method);
+			} catch (err) {
+				results.push({
+					domain: domain.name,
+					route,
+					ms: Date.now() - t0,
+					findings: [{ check: 'request', detail: err.message }],
+				});
+				continue;
+			}
+
+			const shape = res.body === undefined ? null : shapeOf(res.body);
+
+			// A probed target is a concrete example, so match it back to the route
+			// that declared it by method plus path stem.
+			let contractualStatuses = [];
+			for (const [declared, statuses] of contractByRoute) {
+				if (!statuses.length) continue;
+				if (!declared.startsWith(`${target.method} `)) continue;
+				const declaredPath = declared.slice(target.method.length + 1);
+				const stem = declaredPath.split('/:')[0].split('/*')[0];
+				const base = path.split('?')[0];
+				if (base === declaredPath || base === stem || base.startsWith(`${stem}/`)) {
+					contractualStatuses = statuses;
+					break;
+				}
+			}
+
+			// GATE: a failing response never becomes the expected shape.
+			//
+			// The guard above stops a domain-wide record from baking in a dead
+			// server's failures; this stops the same thing one route at a time, which
+			// is the form it actually takes. A host that rate-limits mid-run answers
+			// some routes and refuses others, so `--record` accumulated
+			// `{error:string}` as an accepted shape for six routes on one target —
+			// and those routes would then pass over an error response for good. It
+			// happened twice on the same host: once to a discovery run, once to me
+			// re-recording afterwards, both times having written down the rule about
+			// not recording while rate-limited. A rule nothing checks is a
+			// suggestion.
+			//
+			// Reported rather than silent, because a route whose shape was refused is
+			// a route with no baseline, and that must not read like a recorded one.
+			if (recorded && shape && !isRecordableStatus(res.status, contractualStatuses)) {
+				console.error(
+					`    ⚠ not recorded: ${route} answered HTTP ${res.status}. ` +
+						`A failure is not a contract — re-record when the upstream is healthy.`,
+				);
+				refusedToRecord += 1;
+			} else if (recorded && shape) {
+				const seen = new Set(
+					Array.isArray(recorded[route])
+						? recorded[route]
+						: recorded[route]
+							? [recorded[route]]
+							: [],
+				);
+				const prior = existing[route];
+				for (const v of Array.isArray(prior) ? prior : prior ? [prior] : []) seen.add(v);
+				seen.add(shape);
+				recorded[route] = [...seen];
+			}
+
+			const findings = checkResponse({
+				contractualStatuses,
+				status: res.status,
+				contentType: res.contentType,
+				body: res.body,
+				raw: res.raw,
+				// In --record mode the shape check is vacuous by construction, so
+				// skip it rather than assert a value against itself.
+				baselineShape: opts.record ? shape : existing[route],
+			});
+
+			results.push({
+				domain: domain.name,
+				route,
+				ms: Date.now() - t0,
+				status: res.status,
+				findings,
+				completeness: res.body === undefined ? null : checkCompleteness(res.body),
+			});
+		}
+	}
+
+	if (opts.record) {
+		mkdirSync(BASELINE_DIR, { recursive: true });
+		for (const [domain, shapes] of Object.entries(baselines)) {
+			const file = resolve(BASELINE_DIR, `${domain}.json`);
+			writeFileSync(file, `${JSON.stringify(shapes, null, '\t')}\n`);
+			console.log(
+				`  recorded ${Object.keys(shapes).length} shapes → data/route-spec-baseline/${domain}.json`,
+			);
+		}
+	}
+
+	// ─── Report ──────────────────────────────────────────────────────
+	const failed = results.filter((r) => r.findings.length > 0);
+
+	for (const r of results) {
+		const mark = r.findings.length === 0 ? '✓' : '✗';
+		const counts =
+			r.completeness && r.completeness.itemCount !== undefined
+				? ` [${r.completeness.itemCount}${r.completeness.indicatedTotal !== undefined ? `/${r.completeness.indicatedTotal}` : ''} items]`
+				: '';
+		console.log(`${mark} ${r.route}${counts} ${r.ms}ms`);
+		for (const f of r.findings) console.log(`    ${f.check}: ${f.detail}`);
+	}
+
+	const report = {
+		startedAt: new Date(started).toISOString(),
+		durationMs: Date.now() - started,
+		probed,
+		failed: failed.length,
+		skippedForBudget,
+		skippedUnprobeable,
+		results,
+	};
+	writeFileSync(resolve(artifactDir, 'report.json'), `${JSON.stringify(report, null, '\t')}\n`);
+
+	// Silent caps read as "covered everything" when they didn't. Say so.
+	if (skippedForBudget > 0) {
+		console.log(`\n⊘ ${skippedForBudget} route(s) not probed — --budget=${opts.budget} reached.`);
+	}
+	if (skippedUnprobeable > 0) {
+		console.log(
+			`⊘ ${skippedUnprobeable} route(s) not probed — not GET, or a path/query parameter is required and the route declares no \`examples\`. A route nothing calls is not a route this tier has checked.`,
+		);
+	}
+
+	const secs = ((Date.now() - started) / 1000).toFixed(1);
+	// A missing declaration is a failure of the suite, not of a route that ran —
+	// counting it among the passes would let a domain go green while whole routes
+	// were never asserted at all.
+	if (declarationFailures > 0) {
+		console.log(
+			`\n✗ ${declarationFailures} undeclared route(s). Every route declares \`upstream\`, and any route with a path or required query parameter declares \`examples\`.`,
+		);
+		return 1;
+	}
+	if (refusedToRecord > 0) {
+		// An incomplete recording presented as a recording is the same failure this
+		// whole tier exists to remove, one level up.
+		console.error(
+			`\n✗ ${refusedToRecord} route(s) had no shape recorded because the upstream was failing.\n` +
+				'  Those routes now have no baseline. Re-record when the upstream is healthy —\n' +
+				'  and if we caused the failure, wait rather than retrying into it.',
+		);
+		return 1;
+	}
+	if (failed.length === 0) {
+		console.log(`\n✓ ${probed} route(s) passed in ${secs}s.`);
+		rmSync(artifactDir, { recursive: true, force: true });
+		return 0;
+	}
+
+	console.log(`\n✗ ${failed.length} of ${probed} route(s) failed in ${secs}s.`);
+	console.log(`  Artifacts kept: .route-spec/${opts.label}/report.json`);
+	return 1;
+}
+
+// Importing runs nothing; a unit test drives the exported checks directly.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	main()
+		.then((code) => process.exit(code))
+		.catch((err) => {
+			console.error(err);
+			process.exit(1);
+		});
+}

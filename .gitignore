@@ -17,7 +17,7 @@ __pycache__/
 .DS_Store
 
 # Runtime data (browser profiles, cache, logs — all generated at runtime)
-/data/
+/data/*
 
 # Sub-agent worktrees (temporary, per-session)
 .claude/worktrees/
@@ -28,6 +28,14 @@ prompts/.app-spec.md
 # Domain plugins (created by agents, only boardshop is the reference example)
 domains/*/
 !domains/boardshop/
+!domains/youtube/
+!domains/reddit/
+!domains/twitch/
+!domains/hackernews/
+!domains/yahoofinance/
+!domains/chatgpt/
+!domains/nvidia-build
+!domains/build-nvidia
 
 # Cached API responses for offline dashboard dev
 tmp/cache/
@@ -42,4 +50,16 @@ apps/api/data/
 # Temporary handoff state (not committed)
 .claude/tuning-handoff.md
 .claude/dashboard-tuning-handoff.md
-.claude/user-consent.md
+.agents/user-consent.md
+
+# Visual captures from scripts/snapshot.mjs. Large binaries, and a capture of a
+# live third-party site is spent material with a short life — it is deleted once
+# its description is written, never committed.
+.snapshots/
+
+# Route-spec baselines are shape fingerprints only — no captured data.
+!/data/route-spec-baseline/
+# Grader-held transport keys. Version-controlled because they are durable
+# knowledge, not session material — and because a scoring record that lives
+# only on one machine cannot be re-verified or corrected.
+!/data/answer-keys/

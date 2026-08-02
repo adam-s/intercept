@@ -108,7 +108,7 @@ Type `/` in Claude Code to see available commands:
 | `/debug-logs` | Iterative debugging with targeted logs |
 | `/ci-check` | Run lint, build, typecheck, and tests |
 | `/instruction-tuning` | Improve the discovery instructions by testing agents on real sites |
-| `/instruction-dashboard-tuning` | Improve dashboard-building instructions the same way |
+| `/instruction-dashboard-tuning` | Improve dashboard-building instructions by building from a written description of a real screen |
 | `/ec2-deploy` | Deploy to production |
 
 ## How It Works
@@ -175,6 +175,6 @@ MIT
 > - **Get explicit permission.** Intercepting traffic on sites you do not own or operate may violate their Terms of Service, the Computer Fraud and Abuse Act (CFAA), the GDPR, or equivalent laws in your jurisdiction. Only run this against sites you own, operate, or have written authorization to test.
 > - **No scraping guarantees.** Bot-detection systems (Cloudflare, Akamai, Kasada, DataDome) may flag or block your IP. Some sites explicitly prohibit automated access. Check `robots.txt` and the site's ToS before proceeding.
 > - **AI agent autonomy.** The discovery and instruction-tuning agents make autonomous decisions — navigating pages, clicking elements, extracting data, and writing code — based on natural-language rules. Their behavior is not fully deterministic and has not been validated against every possible target.
-> - **Resource consumption.** Agents burn through API tokens (50K-170K per agent, 400K-1.3M for a parallel batch). Sub-agents can become detached zombie processes. Chrome instances can be orphaned. Run `bash .claude/hooks/cleanup-agents.sh` to clean up.
+> - **Resource consumption.** Agents burn through API tokens (50K-170K per agent, 400K-1.3M for a parallel batch). Sub-agents can become detached zombie processes. Chrome instances can be orphaned. Run `bash .agents/hooks/cleanup-agents.sh` to clean up.
 >
 > **This is purely experimental research code.** The authors make no warranties, express or implied, regarding fitness for any particular purpose, correctness, or safety. The authors are not responsible for any consequences — legal, financial, technical, or otherwise — arising from the use or misuse of this software. Use it only in contexts where you have the legal right to do so.

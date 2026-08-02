@@ -1,0 +1,113 @@
+{
+	"target": "finance.yahoo.com",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://jonpalmisc.com/2020/08/10/yahoo-finance-websockets",
+		"https://github.com/yahoofinancelive/yliveticker",
+		"https://pypi.org/project/yahooquery/2.2.14/"
+	],
+	"transports": [
+		{
+			"transport": "JSON API (XHR)",
+			"endpoints": [
+				"query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+				"query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}",
+				"query1.finance.yahoo.com/v7/finance/quote",
+				"query1.finance.yahoo.com/v1/finance/search",
+				"query1.finance.yahoo.com/v1/finance/screener"
+			],
+			"note": "Behind a crumb plus cookie pair; the crumb has to be harvested from a page first.",
+			"detectableBy": "observation"
+		},
+		{
+			"transport": "WebSocket",
+			"endpoints": [
+				"wss://streamer.finance.yahoo.com/"
+			],
+			"note": "Frames are base64-wrapped protobuf against a PricingData schema. Neither JSON nor text, so a reader who does not decode concludes the socket carries nothing.",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end. Worker-scoped, so a direct pass with the current instrument cannot see it \u2014 found by reading the worker source and confirmed from plain Node."
+		},
+		{
+			"transport": "Beacon/Telemetry",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "HLS/Media",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Polling/Long-poll",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Service Worker",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Streaming response",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "Worker-scoped",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29."
+		},
+		{
+			"transport": "GraphQL",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29. nexus-gateway-prod.media.yahoo.com. Distinct from v1/finance/visualization, which a run correctly disproved as GraphQL."
+		}
+	],
+	"gates": [
+		{
+			"name": "crumb + cookie",
+			"note": "The crumb has to be harvested from a page before any query endpoint will answer."
+		}
+	],
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 9,
+		"shapes": "200 of 222",
+		"challenge": "reCAPTCHA"
+	},
+	"breadthPass": {
+		"date": "2026-07-29",
+		"pages": 5,
+		"transports": 11,
+		"saturatedAt": 1,
+		"hosts": 106,
+		"perPass": [
+			11,
+			0,
+			0,
+			0,
+			0
+		],
+		"observed": [
+			"Beacon/Telemetry",
+			"Cross-frame RPC",
+			"GraphQL",
+			"HLS/Media",
+			"HTML-over-the-wire",
+			"JSON API (XHR)",
+			"JSONP",
+			"Polling/Long-poll",
+			"Service Worker",
+			"Streaming response",
+			"Worker-scoped"
+		],
+		"method": "Instrumented, swept each page type, drained after each so the event buffer could not cap.",
+		"note": "Every target saturated on transport classes by the second pass. Later pages added endpoints within transports already found, never a new class \u2014 which is what the saturation rule predicts and is worth knowing before budgeting a run."
+	}
+}

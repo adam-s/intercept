@@ -1,0 +1,28 @@
+{
+	"GET /api/yahoofinance/stream/snapshot?symbols=AAPL,TSLA&frames=3": [
+		"{_note:string,frames:[{change:number,changePercent:number,dayVolume:number,exchange:string,field22:number,field27:number,id:string,marketHours:number,price:number,quoteType:number,time:number}],symbols:[string],total:number}",
+		"{_note:string,frames:[{change:number,changePercent:number,exchange:string,field27:number,id:string,marketHours:number,price:number,quoteType:number,time:number}],symbols:[string],total:number}",
+		"{_note:string,frames:[{change:number,changePercent:number,exchange:string,field27:number,id:string,marketHours:number,price:number,quoteType:number,time:number,timeIso:string}],symbols:[string],total:number}"
+	],
+	"GET /api/yahoofinance/chart/AAPL?range=5d&interval=1d": [
+		"{candles:[{close:number,high:number,low:number,open:number,time:string,volume:number}],currency:string,interval:string,range:string,symbol:string,total:number}"
+	],
+	"GET /api/yahoofinance/search?q=apple": [
+		"{query:string,quotes:[{exchange:string,name:string,symbol:string,type:string}],total:number}"
+	],
+	"GET /api/yahoofinance/quote?symbols=AAPL,TSLA": [
+		"{_gate:string,quotes:[{change:number,changePercent:number,marketState:string,price:number,symbol:string,volume:number}],symbols:[string],total:number}"
+	],
+	"GET /api/yahoofinance/screener/MOST_ACTIVES?count=25": [
+		"{count:number,quotes:[{changePercent:number,name:string,price:number,symbol:string,volume:number}],screenerId:string,start:number,title:string,total:number}"
+	],
+	"GET /api/yahoofinance/screener/DAY_GAINERS?count=25&start=25": [
+		"{count:number,quotes:[{changePercent:number,name:string,price:number,symbol:string,volume:number}],screenerId:string,start:number,title:string,total:number}"
+	],
+	"GET /api/yahoofinance/news/home?start=0&count=10": [
+		"{_gate:string,count:number,hasMore:boolean,hasNextPage:boolean,items:[{id:string,summary:string,tickers:[string],title:string,type:string,url:string}],returned:number,start:number,total:number}"
+	],
+	"GET /api/yahoofinance/video/8af61f2d-2734-459a-9f9f-67a1844c179a": [
+		"{description:string,durationSeconds:number,id:string,streams:[{bitrate:number,format:string,height:number,mimeType:string,url:string,width:number}],thumbnail:string,title:string,total:number}"
+	]
+}

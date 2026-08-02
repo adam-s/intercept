@@ -15,6 +15,8 @@
 #   --port <number>     API server port (default: 3001)
 #   --timeout <seconds> Max wait for browser ready (default: 60)
 #   --foreground        Run in foreground instead of background
+#   --headed            Launch the browser headed (visible window) — default is headless.
+#                       Useful for observation harnesses where a human drives input.
 #
 # Output:
 #   Prints "Browser connected. Capture traffic at: GET http://localhost:PORT/browser/traffic"
@@ -34,6 +36,7 @@ URL=""
 PORT="3001"
 TIMEOUT="60"
 FOREGROUND=false
+HEADED=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -43,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --foreground) FOREGROUND=true; shift ;;
+    --headed) HEADED=true; shift ;;
     -h|--help)
       head -25 "$0" | tail -20
       exit 0
@@ -89,14 +93,17 @@ if [[ -f "$PIDFILE" ]]; then
   rm -f "$PIDFILE"
 fi
 
+HEADED_FLAG=""
+if [[ "$HEADED" == "true" ]]; then HEADED_FLAG="headed"; fi
+
 if [[ "$FOREGROUND" == "true" ]]; then
   # Run in foreground — useful for debugging
-  NODE_PATH="$WS_MODULE/.." exec node "$CONNECT_SCRIPT" "$PORT" "$PROFILE" "$URL" "$TIMEOUT"
+  NODE_PATH="$WS_MODULE/.." exec node "$CONNECT_SCRIPT" "$PORT" "$PROFILE" "$URL" "$TIMEOUT" "$HEADED_FLAG"
 else
   # Run in background, wait for BROWSER_READY signal
   OUTFILE=$(mktemp /tmp/connect-browser-out.XXXXXX)
 
-  NODE_PATH="$WS_MODULE/.." node "$CONNECT_SCRIPT" "$PORT" "$PROFILE" "$URL" "$TIMEOUT" > "$OUTFILE" 2>&1 &
+  NODE_PATH="$WS_MODULE/.." node "$CONNECT_SCRIPT" "$PORT" "$PROFILE" "$URL" "$TIMEOUT" "$HEADED_FLAG" > "$OUTFILE" 2>&1 &
   BG_PID=$!
   echo "$BG_PID" > "$PIDFILE"
 

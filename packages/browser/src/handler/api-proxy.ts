@@ -70,9 +70,15 @@ export function createDomainProxy(
 			const safeBrowser = browser!;
 
 			try {
-				// Custom handler (Type B/B2/C): full access to Hono context + browser
+				// Custom handler (Type B/B2/C): full access to Hono context + browser.
+				// AWAIT is load-bearing: returning the promise unawaited puts the
+				// rejection outside this try, so an async failure escapes to Hono's
+				// default handler and comes back as text/plain 500. A consumer then
+				// calls .json() on an error page — the exact "data that isn't data"
+				// failure the transport guard exists to prevent, arriving by a path
+				// that bypasses it.
 				if (route.handler) {
-					return route.handler(c, safeBrowser);
+					return await route.handler(c, safeBrowser);
 				}
 
 				// Proxy handler (Type A): browserFetch targetUrl with cookies inherited

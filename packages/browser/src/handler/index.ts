@@ -11,6 +11,7 @@
  */
 
 import type { WebSocket } from 'ws';
+import { digestLargeBody } from '../driver/capture-filter.js';
 import {
 	BrowserLifecycleManager,
 	browserLogger,
@@ -196,11 +197,12 @@ function addTrafficEntry(req: InterceptedRequest, res: InterceptedResponse): voi
 	try {
 		const bodyStr = JSON.stringify(responseBody);
 		if (bodyStr.length > MAX_BODY_SIZE) {
-			responseBody = {
-				_truncated: true,
-				_size: bodyStr.length,
-				_preview: bodyStr.slice(0, 2000),
-			};
+			// Keeps the embedded-data regions rather than only the first two
+			// thousand characters. A head-slice drops exactly what a document is
+			// captured for: hydration payloads and semantic markup sit deep in a
+			// page, so a large server-rendered site reported no embedded data while
+			// the data sat in the part that was discarded.
+			responseBody = digestLargeBody(bodyStr);
 		}
 	} catch {
 		/* not serializable */
@@ -460,6 +462,12 @@ export async function handleBrowserWebSocket(ws: WebSocket, requestUrl: URL): Pr
 	const profile = requestUrl.searchParams.get('profile') || undefined;
 	const url = requestUrl.searchParams.get('url') || undefined;
 	const _captureDomainsParam = requestUrl.searchParams.get('capture') || undefined;
+	// Per-connection headless override: ?headless=false launches a visible window.
+	// Used by observation harnesses (domains/build-nvidia/scripts/observe-human.ts)
+	// where a human drives input. Falls back to the BROWSER_HEADLESS env default.
+	const headlessParam = requestUrl.searchParams.get('headless');
+	const headlessOverride =
+		headlessParam === 'false' ? false : headlessParam === 'true' ? true : null;
 
 	// Wire message handler FIRST — before any async work.
 	// Messages from the frontend can arrive immediately after WS upgrade.
@@ -579,9 +587,15 @@ export async function handleBrowserWebSocket(ws: WebSocket, requestUrl: URL): Pr
 			quality: 60, // Better image quality for human viewing
 			viewportWidth: VIEWPORT_WIDTH,
 			viewportHeight: VIEWPORT_HEIGHT,
-			headless: process.env.BROWSER_HEADLESS !== 'false',
+			headless: headlessOverride ?? process.env.BROWSER_HEADLESS !== 'false',
 			userDataDir,
 		});
+
+		// Headed override gets logged so we can see in /tmp/api-server.log that the
+		// observation harness actually got a visible window.
+		if (headlessOverride === false) {
+			browserLogger.lifecycle('headed_override', { profile: profile || 'temp' });
+		}
 
 		try {
 			browserLogger.lifecycle('starting', { profile: profile || 'temp', userDataDir });

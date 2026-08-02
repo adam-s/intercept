@@ -28,4 +28,5 @@ jobs:
       - run: pnpm biome ci .
       - run: pnpm turbo typecheck
       - run: pnpm turbo test
+      - run: pnpm test:repo
       - run: pytest services/python/ -v

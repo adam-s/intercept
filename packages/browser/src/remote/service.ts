@@ -20,15 +20,26 @@ import { join } from 'node:path';
 import type { BrowserContext, CDPSession, Page, Route } from 'patchright';
 import { chromium } from 'patchright';
 import { BlockerManager } from '../blocker';
-import type {
-	CDPLoadingFailed,
-	CDPLoadingFinished,
-	CDPRequestWillBeSent,
-	CDPResponseReceived,
-	CDPWebSocketClosed,
-	CDPWebSocketCreated,
-	CDPWebSocketFrameReceived,
-} from './cdp-types';
+import { isEngineInternal } from '../driver/capture-filter';
+import type { EgressEvent } from '../driver/instrument';
+import { runSweep, type SweepAction, type SweepLimits } from '../driver/interaction-sweep';
+import {
+	buildManifest,
+	type ChallengePresence,
+	deriveTransports,
+	detectChallengePresence,
+	type ManifestRow,
+	type TransportVerdict,
+} from '../driver/manifest';
+import {
+	drainEgressEvents,
+	installEgressInstrument,
+	removeEgressInstrument,
+	startTrafficCapture,
+} from '../driver/traffic-capture';
+import { CdpScriptControl } from './cdp-script-control';
+import type { CDPLoadingFinished, CDPRequestWillBeSent } from './cdp-types';
+import { FingerprintController } from './fingerprint-controller';
 
 // Rate limiter integration for browserFetch — injected at startup to avoid circular deps
 let rateLimitWait: ((url: string) => Promise<void>) | null = null;
@@ -48,57 +59,6 @@ export function connectBrowserRateLimiter(fns: {
 	rateLimitRecord = fns.record;
 	rateLimitRelease = fns.release;
 }
-
-/**
- * URLs to block completely (tracking, analytics, fingerprinting)
- * Domain-specific trackers that can detect automation
- */
-const BLOCKED_TRACKING_URLS = [
-	// Fingerprinting / device detection - CRITICAL for bot detection
-	'**/fingerprintjs.com/**',
-	'**/fpjs.io/**',
-	'**/cdn.fingerprint.com/**',
-	'**/fp.boardshop.com/**',
-	'**/arkoselabs.com/**',
-	'**/funcaptcha.com/**',
-
-	// Analytics & tracking
-	'**/segment.io/**',
-	'**/segment.com/**',
-	'**/analytics.boardshop.com/**',
-	'**/cdn.segment.com/**',
-	'**/api.segment.io/**',
-
-	// Marketing / attribution
-	'**/branch.io/**',
-	'**/app.link/**',
-	'**/bnc.lt/**',
-	'**/adjust.com/**',
-	'**/appsflyer.com/**',
-
-	// Error tracking (can leak automation info)
-	'**/sentry.io/**',
-	'**/bugsnag.com/**',
-
-	// Analytics services
-	'**/google-analytics.com/**',
-	'**/googletagmanager.com/**',
-	'**/gtag/**',
-
-	// Social tracking pixels
-	'**/facebook.com/tr/**',
-	'**/connect.facebook.net/**',
-
-	// Other trackers
-	'**/doubleclick.net/**',
-	'**/hotjar.com/**',
-	'**/fullstory.com/**',
-	'**/heap.io/**',
-	'**/amplitude.com/**',
-	'**/mixpanel.com/**',
-	'**/optimizely.com/**',
-	'**/launchdarkly.com/**',
-];
 
 export interface StreamConfig {
 	/** Frames per second (default: 4) */
@@ -158,6 +118,10 @@ export class RemoteBrowserService {
 	private config: FullConfig;
 	private context: BrowserContext | null = null;
 	private page: Page | null = null;
+	/** Whether egress instrumentation is currently installed on this session. */
+	private instrumented = false;
+	/** Detaches the traffic listener; kept so a restart cannot leak one. */
+	private stopTrafficCapture: (() => void) | null = null;
 	private cdp: CDPSession | null = null;
 	private frameCallback: FrameCallback | null = null;
 	private urlChangeCallback: ((url: string) => void) | null = null;
@@ -177,8 +141,16 @@ export class RemoteBrowserService {
 	 */
 	private namedPages: Map<string, Page> = new Map();
 
-	/** Cached anti-detection script — set during start(), used by getOrCreatePage() */
-	private antiDetectionScript: string | null = null;
+	/** Controls baseline anti-detection: removes webdriver, sets UA, sec-ch-ua, blocks trackers. */
+	private fingerprint = new FingerprintController();
+
+	/**
+	 * Raw-CDP control for init scripts and (optionally) script-body capture.
+	 * Replaces Patchright's addInitScript / page.route for hostile detection
+	 * targets (Cloudflare Turnstile, ChatGPT Sentinel). Domain plugins access
+	 * this via getScriptControl().
+	 */
+	private scriptControl: CdpScriptControl | null = null;
 
 	/** Callback for CDP-captured network traffic (XHR/Fetch JSON responses) */
 	private networkCaptureCallback:
@@ -313,6 +285,18 @@ export class RemoteBrowserService {
 	}
 
 	/**
+	 * Get the raw-CDP script control surface. Domain plugins use this to
+	 * register fingerprint init scripts via Page.addScriptToEvaluateOnNewDocument
+	 * (rather than Patchright's detectable addInitScript wrapper) and to
+	 * capture script bodies in log mode.
+	 *
+	 * Returns null if the browser hasn't started yet.
+	 */
+	getScriptControl(): CdpScriptControl | null {
+		return this.scriptControl;
+	}
+
+	/**
 	 * Get or create a named page for a specific domain.
 	 * Named pages run in the same browser context (shared cookies, anti-detection)
 	 * but navigate independently — enabling parallel browsing across domains.
@@ -325,10 +309,12 @@ export class RemoteBrowserService {
 		if (!this.context) throw new Error('Browser not running — connect via WebSocket first');
 		const newPage = await this.context.newPage();
 
-		// Apply same anti-detection as main page (context-level addInitScript
-		// only applies to pages created AFTER the call, so we need page-level too)
-		if (this.antiDetectionScript) {
-			await newPage.addInitScript(this.antiDetectionScript);
+		// Eagerly adopt the new page into raw-CDP control. The context.on('page')
+		// handler in CdpScriptControl will also adopt it asynchronously, but
+		// adoptChildPage is idempotent — so we explicitly await here to guarantee
+		// init scripts are installed BEFORE the caller navigates the new page.
+		if (this.scriptControl) {
+			await this.scriptControl.adoptChildPage(newPage);
 		}
 
 		// Enable ad blocking on the new page
@@ -445,17 +431,28 @@ export class RemoteBrowserService {
 			'--disable-background-timer-throttling',
 			'--disable-backgrounding-occluded-windows',
 			'--disable-renderer-backgrounding',
-			// Prevents GPU process crash loop in headless/container environments without
-			// GPU hardware. Falls back to Skia CPU rendering (sufficient for screenshots
-			// and CDP screencasting). Harmless on macOS where real GPU is available.
-			'--disable-gpu',
 		];
 
-		// SwiftShader provides software WebGL on Linux/Docker without a real GPU.
-		// On macOS (darwin) the real GPU handles WebGL natively — SwiftShader
-		// conflicts and disables WebGL entirely.
-		if (process.platform === 'linux') {
+		// GPU handling: real Chrome has real WebGL. Anything we do here that
+		// breaks WebGL (--disable-gpu, software-only) makes hCaptcha
+		// fingerprinting (params 2401-2501 from d4c5d1e0/hcaptcha) flag the
+		// browser as non-real.
+		// - Headed on macOS: bare default → hardware Metal renderer. Best.
+		// - Headless on macOS: --use-angle=metal forces ANGLE/Metal even in
+		//   the headless-shell binary, which keeps WebGL functional and the
+		//   renderer string realistic ("ANGLE (Apple, Apple M1, …)").
+		// - Linux containers: --use-gl=swiftshader provides software WebGL
+		//   without crash; --disable-gpu only as a last resort because it
+		//   eliminates WebGL entirely and is detectable.
+		if (process.platform === 'darwin' && this.config.headless) {
+			commonArgs.push('--use-angle=metal');
+		} else if (process.platform === 'linux') {
 			commonArgs.push('--use-gl=swiftshader', '--use-angle=swiftshader-webgl');
+			if (this.config.headless) {
+				// Linux containers without GPU hardware crash without --disable-gpu;
+				// SwiftShader runs CPU-side regardless.
+				commonArgs.push('--disable-gpu');
+			}
 		}
 
 		// When using a persistent Chrome user data dir, force the Default profile.
@@ -480,132 +477,6 @@ export class RemoteBrowserService {
 				: undefined;
 		const executablePath = chromePath || chromiumPath || undefined;
 
-		// Use consistent Mac User-Agent across all platforms to avoid bot detection
-		// Chrome 145 — matches real Chrome binary version and sec-ch-ua override below.
-		// Version mismatch between UA and sec-ch-ua is a bot detection signal.
-		const MAC_USER_AGENT =
-			'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
-
-		// Anti-detection: Comprehensive script to override navigator properties BEFORE any page JS runs
-		// This must match the macOS fingerprint as closely as possible
-		const antiDetectionScript = `
-			// === Core Navigator Overrides ===
-			Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
-			Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
-			Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-			Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-			Object.defineProperty(navigator, 'language', { get: () => 'en-US' });
-			Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); // Typical Mac
-			Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); // 8GB typical
-			Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 }); // Desktop Mac has no touch
-
-			// === Plugins - macOS Chrome has these ===
-			const fakePlugins = {
-				0: { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				1: { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				2: { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				3: { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				4: { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-				length: 5,
-				item: function(i) { return this[i] || null; },
-				namedItem: function(name) { return Object.values(this).find(p => p && p.name === name) || null; },
-				refresh: function() {},
-				[Symbol.iterator]: function*() { for (let i = 0; i < this.length; i++) yield this[i]; }
-			};
-			Object.defineProperty(navigator, 'plugins', { get: () => fakePlugins });
-
-			// === WebGL - Critical for fingerprinting ===
-			const getParameterProxyHandler = {
-				apply: function(target, thisArg, args) {
-					const param = args[0];
-					// UNMASKED_VENDOR_WEBGL
-					if (param === 37445) return 'Apple Inc.';
-					// UNMASKED_RENDERER_WEBGL  
-					if (param === 37446) return 'Apple M1';
-					// VERSION
-					if (param === 7938) return 'WebGL 1.0 (OpenGL ES 2.0 Chromium)';
-					// SHADING_LANGUAGE_VERSION
-					if (param === 35724) return 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)';
-					return Reflect.apply(target, thisArg, args);
-				}
-			};
-			
-			// Wrap WebGL getParameter for all canvas contexts
-			const originalGetContext = HTMLCanvasElement.prototype.getContext;
-			HTMLCanvasElement.prototype.getContext = function(type, ...args) {
-				const context = originalGetContext.apply(this, [type, ...args]);
-				if (context && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
-					context.getParameter = new Proxy(context.getParameter, getParameterProxyHandler);
-				}
-				return context;
-			};
-
-			// Also wrap OffscreenCanvas if available
-			if (typeof OffscreenCanvas !== 'undefined') {
-				const originalOffscreenGetContext = OffscreenCanvas.prototype.getContext;
-				OffscreenCanvas.prototype.getContext = function(type, ...args) {
-					const context = originalOffscreenGetContext.apply(this, [type, ...args]);
-					if (context && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
-						context.getParameter = new Proxy(context.getParameter, getParameterProxyHandler);
-					}
-					return context;
-				};
-			}
-
-			// === Screen properties - Match typical Mac display ===
-			Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-			Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
-
-			// === AudioContext fingerprinting protection ===
-			const originalAudioContext = window.AudioContext || window.webkitAudioContext;
-			if (originalAudioContext) {
-				window.AudioContext = window.webkitAudioContext = class extends originalAudioContext {
-					constructor(...args) {
-						super(...args);
-						// Override sampleRate to macOS default
-						Object.defineProperty(this, 'sampleRate', { get: () => 44100 });
-					}
-				};
-			}
-
-			// === Battery API - Return null (macOS Chrome doesn't expose this) ===
-			if (navigator.getBattery) {
-				navigator.getBattery = undefined;
-			}
-
-			// === Connection API - Spoof to typical desktop ===
-			if (navigator.connection) {
-				Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g' });
-				Object.defineProperty(navigator.connection, 'downlink', { get: () => 10 });
-				Object.defineProperty(navigator.connection, 'rtt', { get: () => 50 });
-			}
-
-			// === Permissions API - Don't reveal automation ===
-			const originalQuery = navigator.permissions?.query;
-			if (originalQuery) {
-				navigator.permissions.query = function(parameters) {
-					// Notifications typically denied by default on Mac
-					if (parameters.name === 'notifications') {
-						return Promise.resolve({ state: 'denied', onchange: null });
-					}
-					return originalQuery.call(this, parameters);
-				};
-			}
-
-			// === CDP screenX/screenY patch — Cloudflare Turnstile bypass ===
-			// When CDP dispatches Input.dispatchMouseEvent, MouseEvent.screenX/screenY
-			// equal the x/y coordinates (relative to iframe, small values like 30,15).
-			// Real clicks have screen-relative coordinates (hundreds/thousands).
-			// Cloudflare Turnstile checks this in cross-origin iframes to detect bots.
-			// Fix: override screenX/screenY on MouseEvent prototype with realistic values.
-			const _fakeScreenX = 800 + Math.floor(Math.random() * 400);
-			const _fakeScreenY = 300 + Math.floor(Math.random() * 300);
-			Object.defineProperty(MouseEvent.prototype, 'screenX', { get() { return this.clientX + _fakeScreenX; } });
-			Object.defineProperty(MouseEvent.prototype, 'screenY', { get() { return this.clientY + _fakeScreenY; } });
-			Object.defineProperty(PointerEvent.prototype, 'screenX', { get() { return this.clientX + _fakeScreenX; } });
-			Object.defineProperty(PointerEvent.prototype, 'screenY', { get() { return this.clientY + _fakeScreenY; } });
-		`;
-
 		// Configure proxy based on proxyType setting
 		// Bright Data proxy URLs from environment variables
 		const proxyConfig = this.getProxyConfig();
@@ -617,23 +488,32 @@ export class RemoteBrowserService {
 			console.log('[RemoteBrowserService] No proxy configured (direct connection)');
 		}
 
-		// Use real Chrome channel when available — it has window.chrome, proper plugins,
-		// and real WebGL contexts that Patchright's bundled Chromium lacks.
-		// Fall back to bundled Chromium when CHROMIUM_PATH is set (Docker) or Chrome isn't installed.
-		const useChannel = !executablePath ? 'chrome' : undefined;
+		// Use Patchright's bundled (patched) Chromium by default — that is the
+		// whole reason Patchright exists. The bundled binary has anti-detection
+		// patches baked into the binary that no JS-level shim can replicate
+		// (CDP runtime fingerprints, devtools-protocol behaviour, etc.). Using
+		// `channel: 'chrome'` (system Chrome) silently disables all of that.
+		//
+		// Override only when CHROME_PATH or CHROMIUM_PATH is explicitly set
+		// (Docker, custom builds). For everything else: bundled Patchright wins.
 
 		this.context = await chromium.launchPersistentContext(this.userDataDir, {
 			...(executablePath && { executablePath }),
-			...(useChannel && { channel: useChannel }),
 			headless: this.config.headless,
 			viewport: {
 				width: this.config.viewportWidth,
 				height: this.config.viewportHeight,
 			},
 			deviceScaleFactor: 1, // Force 1x scale for consistent streaming
-			userAgent: MAC_USER_AGENT,
-			locale: 'en-US',
-			timezoneId: 'America/New_York',
+			// In headed mode we want a near-vanilla Chrome experience: skip our
+			// custom UA + locale + timezone overrides so the browser reports
+			// what Patchright's bundled binary natively does. Headless still
+			// gets the full persona because that's what discovery code expects.
+			...(this.config.headless && {
+				userAgent: this.fingerprint.userAgent,
+				locale: 'en-US',
+				timezoneId: 'America/New_York',
+			}),
 			args: commonArgs,
 			// ⚠️  DO NOT REMOVE. --enable-automation sets navigator.webdriver=true and shows
 			// an automation infobar — both are primary bot detection signals. Without this
@@ -646,44 +526,43 @@ export class RemoteBrowserService {
 			ignoreHTTPSErrors: this.config.proxyType === 'residential',
 		});
 
-		// Override sec-ch-ua to prevent HeadlessChrome detection.
-		// When Patchright runs in headless mode, Chromium automatically sets
-		// sec-ch-ua to include "HeadlessChrome" — a primary Cloudflare Bot Management
-		// detection signal. Some sites allow CDN-cached endpoints through
-		// but block real-time data endpoints when HeadlessChrome is detected.
-		// setExtraHTTPHeaders overrides browser-generated headers for ALL requests from this context,
-		// including JavaScript-initiated fetch() calls via page.evaluate().
-		// The value must match MAC_USER_AGENT version (Chrome 145) to avoid version-mismatch detection.
-		// When using real Chrome channel, sec-ch-ua is already correct — this is defense-in-depth.
-		await this.context.setExtraHTTPHeaders({
-			'sec-ch-ua': '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
-			'sec-ch-ua-mobile': '?0',
-			'sec-ch-ua-platform': '"macOS"',
-		});
-
-		// Add anti-detection script BEFORE getting/creating pages
-		await this.context.addInitScript(antiDetectionScript);
-		this.antiDetectionScript = antiDetectionScript;
-
+		// Resolve the primary page BEFORE attaching the CDP script control —
+		// the control needs a page target to open its root CDP session against.
 		const pages = this.context.pages();
 		this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 
-		// Also add init script to the page level for existing pages from persistent context
-		// Context-level addInitScript only applies to pages created AFTER the call
-		await this.page.addInitScript(antiDetectionScript);
+		// Attach raw-CDP script control on the primary page. From here on
+		// every init-script registration goes through Chromium's
+		// Page.addScriptToEvaluateOnNewDocument directly — bypassing
+		// Patchright's addInitScript wrapper.
+		this.scriptControl = new CdpScriptControl();
+		await this.scriptControl.attach(this.context, this.page);
 
-		// Block fingerprinting and tracking URLs at the route level
-		// This runs BEFORE Ghostery and catches domain-specific trackers
-		for (const pattern of BLOCKED_TRACKING_URLS) {
-			await this.context.route(pattern, (route) => route.abort());
+		// Apply baseline fingerprint protection: install the anti-detection
+		// init script via CDP, set sec-ch-ua headers, and register the
+		// tracking-URL blocklist. Must run BEFORE the page navigates so the
+		// init script fires on the first real document load.
+		//
+		// SKIP when running headed: headed mode is for human-driven research
+		// where we want a near-vanilla Chrome experience. Patchright's binary-
+		// level stealth is still active; layering FingerprintController on top
+		// adds 50+ context.route() interceptors and an init script that
+		// changes navigator/screen properties — both of which slow page loads
+		// and confuse research observation. Domain plugins that NEED a persona
+		// in headed mode can call browser.getScriptControl() and apply it
+		// explicitly via their own attach() flow.
+		if (this.config.headless) {
+			await this.fingerprint.applyToContext(this.context, this.scriptControl);
 		}
 
-		// Block static resources — discovery only needs HTML + JS, not images/CSS/fonts.
-		// Saves ~30% memory per browser instance and speeds up page loads.
-		await this.context.route(
-			'**/*.{png,jpg,jpeg,gif,svg,webp,ico,css,woff,woff2,ttf,eot,mp4,webm,ogg,mp3,wav}',
-			(route) => route.abort(),
-		);
+		// Static-resource blocking removed. The previous "discovery only needs
+		// HTML + JS" optimisation broke headless-driven flows: blocking CSS
+		// destroys the page layout (verified — body grows to 40k+px tall when
+		// CSS is missing because flex/grid collapse), which then breaks
+		// coordinate-based clicks on textareas / buttons. The memory savings
+		// were not worth losing the ability to drive pages headlessly.
+		// Tracking-URL blocking still happens via FingerprintController in
+		// headless mode (sentry, segment, etc.) — that's surgical and safe.
 
 		// Enable Ghostery ad/tracker blocking (general ad blocking)
 		if (this.config.enableAdBlocking) {
@@ -729,91 +608,9 @@ export class RemoteBrowserService {
 		await this.page.goto('data:text/html,<html></html>');
 
 		// Log browser fingerprint data for debugging bot detection issues
-		await this.logBrowserFingerprint();
+		await this.fingerprint.logFingerprint(this.page);
 
 		await this.startScreencast();
-	}
-
-	/**
-	 * Log key browser fingerprint data for debugging bot detection.
-	 * Only logs once on browser start - not on every page load.
-	 */
-	private async logBrowserFingerprint(): Promise<void> {
-		if (!this.page) return;
-
-		try {
-			const fingerprint = await this.page.evaluate(() => {
-				return {
-					userAgent: navigator.userAgent,
-					platform: navigator.platform,
-					vendor: navigator.vendor,
-					language: navigator.language,
-					languages: navigator.languages,
-					hardwareConcurrency: navigator.hardwareConcurrency,
-					deviceMemory: (navigator as unknown as { deviceMemory?: number }).deviceMemory,
-					maxTouchPoints: navigator.maxTouchPoints,
-					webdriver: (navigator as unknown as { webdriver?: boolean }).webdriver,
-					// Screen info
-					screenWidth: screen.width,
-					screenHeight: screen.height,
-					screenColorDepth: screen.colorDepth,
-					devicePixelRatio: window.devicePixelRatio,
-					// Timezone
-					timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-					timezoneOffset: new Date().getTimezoneOffset(),
-					// WebGL (key for bot detection)
-					webglVendor: (() => {
-						try {
-							const canvas = document.createElement('canvas');
-							const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-							if (gl) {
-								const debugInfo = (gl as WebGLRenderingContext).getExtension(
-									'WEBGL_debug_renderer_info',
-								);
-								if (debugInfo) {
-									return (gl as WebGLRenderingContext).getParameter(
-										debugInfo.UNMASKED_VENDOR_WEBGL,
-									);
-								}
-							}
-						} catch {
-							/* ignore */
-						}
-						return 'unknown';
-					})(),
-					webglRenderer: (() => {
-						try {
-							const canvas = document.createElement('canvas');
-							const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-							if (gl) {
-								const debugInfo = (gl as WebGLRenderingContext).getExtension(
-									'WEBGL_debug_renderer_info',
-								);
-								if (debugInfo) {
-									return (gl as WebGLRenderingContext).getParameter(
-										debugInfo.UNMASKED_RENDERER_WEBGL,
-									);
-								}
-							}
-						} catch {
-							/* ignore */
-						}
-						return 'unknown';
-					})(),
-				};
-			});
-
-			// Import logger dynamically to avoid circular deps
-			const { browserLogger } = await import('./logger');
-			browserLogger.lifecycle('fingerprint', {
-				...fingerprint,
-				nodeEnv: process.env.NODE_ENV,
-				chromiumPath: process.env.CHROMIUM_PATH || 'bundled',
-			});
-		} catch (err) {
-			// Don't fail browser start if fingerprint logging fails
-			console.warn('[RemoteBrowserService] Failed to log fingerprint:', err);
-		}
 	}
 
 	/**
@@ -879,6 +676,16 @@ export class RemoteBrowserService {
 
 		// Clear named pages map (pages themselves closed below with context.pages())
 		this.namedPages.clear();
+
+		// Detach the raw-CDP script control before closing pages.
+		if (this.scriptControl) {
+			try {
+				await this.scriptControl.detach();
+			} catch {
+				// Script control may already be detached
+			}
+			this.scriptControl = null;
+		}
 
 		// Clear CDP session first
 		if (this.cdp) {
@@ -1391,8 +1198,13 @@ export class RemoteBrowserService {
 						credentials: 'include', // Include cookies
 					};
 
-					if (options.body) {
-						fetchOptions.body = JSON.stringify(options.body);
+					if (options.body !== undefined && options.body !== null) {
+						// A string body is already encoded — form-encoded, XML, NDJSON,
+						// a signed blob. Stringifying it again wraps it in quotes and
+						// the server rejects a body that was correct when handed over.
+						// Only a structured value needs encoding here.
+						fetchOptions.body =
+							typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
 					}
 
 					const response = await fetch(url, fetchOptions);
@@ -1452,6 +1264,185 @@ export class RemoteBrowserService {
 	async evaluate<T>(fn: () => T | Promise<T>): Promise<T> {
 		if (!this.page) throw new Error('Browser not started');
 		return this.page.evaluate(fn);
+	}
+
+	// ─── Egress instrumentation ──────────────────────────────────────
+	// The capture layer is only useful if a workflow can reach it, so it is
+	// exposed here rather than left as a library a caller has to assemble.
+
+	/**
+	 * Patch the page's egress primitives. Discovery aids are detectable, so this
+	 * belongs to the instrumented pass only — see the two-pass rule in
+	 * .agents/rules/discovery.md.
+	 */
+	/**
+	 * Capture the top-level document through CDP.
+	 *
+	 * Everything else runs on Playwright's own events — the traffic capture wired
+	 * at startup, which sees worker traffic a page-bound CDP session cannot. The
+	 * main document is the one thing that path does not see: a navigation driven
+	 * through CDP does not surface its own response to Playwright's listener,
+	 * which was measured rather than assumed. So the split is by concern rather
+	 * than duplicated: CDP owns the navigation layer, Playwright owns everything
+	 * the page and its workers request afterwards.
+	 *
+	 * Pre-hydration HTML is worth that seam. It is where server-rendered data
+	 * lives, and dropping it would trade one blind spot for another.
+	 */
+	private setupDocumentCapture(): void {
+		if (!this.cdp) return;
+		const documentRequests = new Map<string, { url: string }>();
+
+		this.cdp.on('Network.requestWillBeSent', (params: CDPRequestWillBeSent) => {
+			if (params.type === 'Document') {
+				documentRequests.set(params.requestId, { url: params.request.url });
+			}
+		});
+
+		this.cdp.on('Network.loadingFinished', async (params: CDPLoadingFinished) => {
+			const doc = documentRequests.get(params.requestId);
+			if (!doc || !this.networkCaptureCallback) return;
+			documentRequests.delete(params.requestId);
+			// The engine's own injection URLs are documents too, and they describe
+			// the tooling rather than the target.
+			if (isEngineInternal(doc.url)) return;
+			try {
+				const bodyResult = await this.cdp?.send('Network.getResponseBody', {
+					requestId: params.requestId,
+				});
+				this.networkCaptureCallback(
+					{ method: 'DOCUMENT', url: doc.url, body: null, headers: {} },
+					{
+						url: doc.url,
+						status: 200,
+						headers: { 'content-type': 'text/html' },
+						body: bodyResult?.body,
+					},
+				);
+			} catch {
+				/* a document body already discarded is a gap, not a failure */
+			}
+		});
+	}
+
+	async installInstrument(): Promise<boolean> {
+		if (!this.page) throw new Error('Browser not started');
+		this.instrumented = await installEgressInstrument(this.page as never);
+		return this.instrumented;
+	}
+
+	/** Read and clear buffered egress events from every frame. */
+	async drainEgress(): Promise<EgressEvent[]> {
+		if (!this.page) throw new Error('Browser not started');
+		return drainEgressEvents(this.page as never);
+	}
+
+	/** Restore the page, so the session carries no evidence it was instrumented. */
+	async removeInstrument(): Promise<{
+		clean: boolean;
+		framesRestored: number;
+		framesUnreachable: number;
+		detail: string;
+	}> {
+		if (!this.page) throw new Error('Browser not started');
+		// Nothing installed is not a failed restoration. Reporting it as one made
+		// a clean session look un-cleanable, and a gate that fails on a session
+		// that was already fine is a gate people learn to ignore.
+		if (!this.instrumented) {
+			return {
+				clean: true,
+				framesRestored: 0,
+				framesUnreachable: 0,
+				detail: 'No instrument was installed; the session was already clean.',
+			};
+		}
+		const result = await removeEgressInstrument(this.page as never);
+		if (result.clean) this.instrumented = false;
+		return result;
+	}
+
+	/**
+	 * Whether this session is currently carrying discovery aids.
+	 *
+	 * Load-bearing for the gate that keeps a collection pass clean: an assertion
+	 * run against an instrumented session measures a page that no ordinary
+	 * visitor sees, and a block during one says nothing about the site.
+	 */
+	isInstrumented(): boolean {
+		return this.instrumented;
+	}
+
+	/**
+	 * Exercise the page so interaction-gated transports fire.
+	 *
+	 * A capture from a page that was only loaded reports every transport that
+	 * opens behind a click, a keystroke, or a scroll boundary as absent — which
+	 * is indistinguishable from the site not having it. This is the loudest of
+	 * the discovery aids, because synthetic interaction has no human trajectory,
+	 * so it belongs to the instrumented pass and to no other.
+	 */
+	async sweepPage(
+		limits: Partial<SweepLimits> = {},
+	): Promise<{ performed: SweepAction[]; skipped: string[] }> {
+		if (!this.page) throw new Error('Browser not started');
+		return runSweep(this.page as never, limits);
+	}
+
+	/**
+	 * Drain, reduce, and derive — the whole capture pipeline in one call.
+	 *
+	 * Returns the manifest and the elimination table together because they are
+	 * read together: the table says which transports fired, the manifest says
+	 * which call shapes proved it.
+	 */
+	/**
+	 * Reduce wire traffic alone, without touching the JS-level buffer.
+	 *
+	 * Draining is destructive by design — events are spliced out so nothing is
+	 * counted twice — which makes the full pipeline unusable for anything that
+	 * merely wants to look. The coverage diff is exactly that: it reads what has
+	 * been seen so far and must not consume it.
+	 */
+	manifestFromWire(
+		wire: Array<{ method: string; url: string; body?: unknown; contentType?: string }> = [],
+	): {
+		rows: ManifestRow[];
+		truncatedFrom?: number;
+		transports: TransportVerdict[];
+		events: number;
+		challenges: ChallengePresence[];
+	} {
+		const rows = buildManifest([], wire);
+		return {
+			rows,
+			truncatedFrom: (rows as { truncatedFrom?: number }).truncatedFrom,
+			transports: deriveTransports(rows),
+			events: 0,
+			challenges: detectChallengePresence(rows),
+		};
+	}
+
+	async captureManifest(
+		wire: Array<{ method: string; url: string; body?: unknown; contentType?: string }> = [],
+	): Promise<{
+		rows: ManifestRow[];
+		truncatedFrom?: number;
+		transports: TransportVerdict[];
+		events: number;
+		challenges: ChallengePresence[];
+	}> {
+		const events = await this.drainEgress();
+		const rows = buildManifest(events, wire);
+		return {
+			rows,
+			truncatedFrom: (rows as { truncatedFrom?: number }).truncatedFrom,
+			transports: deriveTransports(rows),
+			events: events.length,
+			// Reported alongside the transports because it changes what the
+			// transports mean: a thin table from a watched page is not the same
+			// finding as a thin table from an unwatched one.
+			challenges: detectChallengePresence(rows),
+		};
 	}
 
 	/**
@@ -1520,194 +1511,6 @@ export class RemoteBrowserService {
 	}
 
 	/**
-	 * Set up CDP Network event handlers for traffic capture.
-	 */
-	private setupNetworkCapture(): void {
-		if (!this.cdp) return;
-
-		const pendingRequests = new Map<
-			string,
-			{
-				method: string;
-				url: string;
-				body: unknown;
-				headers: Record<string, string>;
-				timestamp: number;
-			}
-		>();
-		const responseInfo = new Map<
-			string,
-			{ url: string; status: number; headers: Record<string, string>; contentType: string }
-		>();
-
-		// Track Document requests for pre-hydration HTML capture
-		const documentRequests = new Map<string, { url: string }>();
-
-		this.cdp.on('Network.requestWillBeSent', (params: CDPRequestWillBeSent) => {
-			// Capture Document requests for the analyzer (pre-hydration HTML)
-			if (params.type === 'Document') {
-				documentRequests.set(params.requestId, { url: params.request.url });
-			}
-			if (!params.type || !['XHR', 'Fetch'].includes(params.type)) return;
-			let body: unknown;
-			try {
-				if (params.request.postData) body = JSON.parse(params.request.postData);
-			} catch {
-				body = params.request.postData || null;
-			}
-			pendingRequests.set(params.requestId, {
-				method: params.request.method,
-				url: params.request.url,
-				body,
-				headers: params.request.headers,
-				timestamp: Date.now(),
-			});
-		});
-
-		this.cdp.on('Network.responseReceived', (params: CDPResponseReceived) => {
-			if (!pendingRequests.has(params.requestId)) return;
-			const ct =
-				params.response.headers['content-type'] || params.response.headers['Content-Type'] || '';
-			responseInfo.set(params.requestId, {
-				url: params.response.url,
-				status: params.response.status,
-				headers: params.response.headers,
-				contentType: ct,
-			});
-		});
-
-		// Unified loadingFinished handler — processes both XHR/Fetch and Document requests
-		this.cdp.on('Network.loadingFinished', async (params: CDPLoadingFinished) => {
-			if (!this.networkCaptureCallback) return;
-
-			// Check if this is a Document request (pre-hydration HTML capture)
-			const doc = documentRequests.get(params.requestId);
-			if (doc) {
-				documentRequests.delete(params.requestId);
-				try {
-					const bodyResult = await this.cdp?.send('Network.getResponseBody', {
-						requestId: params.requestId,
-					});
-					this.networkCaptureCallback(
-						{ method: 'DOCUMENT', url: doc.url, body: null, headers: {} },
-						{
-							url: doc.url,
-							status: 200,
-							headers: { 'content-type': 'text/html' },
-							body: bodyResult?.body,
-						},
-					);
-				} catch {
-					/* Document body unavailable */
-				}
-				return;
-			}
-
-			// XHR/Fetch request handling
-			const req = pendingRequests.get(params.requestId);
-			const res = responseInfo.get(params.requestId);
-			pendingRequests.delete(params.requestId);
-			responseInfo.delete(params.requestId);
-			if (!req || !res) return;
-
-			// Skip responses that are clearly not API data
-			const ct = res.contentType.toLowerCase();
-			if (
-				ct.includes('text/html') ||
-				ct.includes('text/css') ||
-				ct.includes('image/') ||
-				ct.includes('font/')
-			)
-				return;
-
-			// Skip analytics/tracking
-			const skip = [
-				'google-analytics',
-				'googleadservices',
-				'google.com/ccm',
-				'sentry.io',
-				'forter.com',
-				'riskified.com',
-				'doubleclick.net',
-			];
-			if (skip.some((s) => res.url.includes(s))) return;
-
-			try {
-				const bodyResult = await this.cdp?.send('Network.getResponseBody', {
-					requestId: params.requestId,
-				});
-				let resBody: unknown = bodyResult?.body;
-				if (resBody) {
-					try {
-						resBody = JSON.parse(resBody as string);
-					} catch {
-						// keep as string
-					}
-				}
-				this.networkCaptureCallback(req, {
-					url: res.url,
-					status: res.status,
-					headers: res.headers,
-					body: resBody,
-				});
-			} catch {
-				/* body unavailable */
-			}
-		});
-
-		// Clean up on failed requests (prevents memory leak)
-		this.cdp.on('Network.loadingFailed', (params: CDPLoadingFailed) => {
-			pendingRequests.delete(params.requestId);
-			responseInfo.delete(params.requestId);
-			documentRequests.delete(params.requestId);
-		});
-
-		// WebSocket frame capture — CDP does NOT capture WS frames via requestWillBeSent.
-		// These events let us see WebSocket connections and their messages.
-		const wsConnections = new Map<string, string>(); // requestId → url
-
-		this.cdp.on('Network.webSocketCreated', (params: CDPWebSocketCreated) => {
-			wsConnections.set(params.requestId, params.url);
-			if (this.networkCaptureCallback) {
-				this.networkCaptureCallback(
-					{ method: 'WS', url: params.url, body: null, headers: {} },
-					{
-						url: params.url,
-						status: 101,
-						headers: {},
-						body: { type: 'websocket-created', wsUrl: params.url },
-					},
-				);
-			}
-		});
-
-		this.cdp.on('Network.webSocketFrameReceived', (params: CDPWebSocketFrameReceived) => {
-			const url = wsConnections.get(params.requestId) || 'unknown-ws';
-			if (!this.networkCaptureCallback) return;
-			const payload = params.response?.payloadData || '';
-			let body: unknown;
-			try {
-				body = JSON.parse(payload);
-			} catch {
-				body = payload.length > 200 ? `[binary/text ${payload.length} bytes]` : payload;
-			}
-			this.networkCaptureCallback(
-				{ method: 'WS-FRAME', url, body: null, headers: {} },
-				{
-					url,
-					status: 0,
-					headers: {},
-					body: { type: 'websocket-frame', data: body, size: payload.length },
-				},
-			);
-		});
-
-		this.cdp.on('Network.webSocketClosed', (params: CDPWebSocketClosed) => {
-			wsConnections.delete(params.requestId);
-		});
-	}
-
-	/**
 	 * Check if browser is running.
 	 */
 	isActive(): boolean {
@@ -1738,9 +1541,31 @@ export class RemoteBrowserService {
 		try {
 			this.cdp = await this.context.newCDPSession(this.page);
 
-			// Enable network capture via CDP — catches ALL XHR/Fetch including cross-domain
+			// Network capture runs on Playwright's own events, not on CDP.
+			//
+			// The CDP session is bound to the page, so it never saw a worker's
+			// traffic — and that is where real sites do work worth finding. A live
+			// run reported adaptive media absent on a page that was visibly
+			// streaming, because the player fetches its segments from a worker.
+			// Playwright's context-level listener sees those; measured against the
+			// benchmark's worker fixture it records the worker's own fetch and the
+			// page-scoped CDP session records nothing.
+			//
+			// It also removes the second implementation. Capture is a cross-cutting
+			// concern and there were two of them, with the unused one's docblock
+			// claiming it had already replaced the other.
+			//
+			// CDP stays enabled for the screencast and for script control.
 			await this.cdp.send('Network.enable');
-			this.setupNetworkCapture();
+			// CDP keeps exactly one job: the top-level document, which Playwright's
+			// listener does not see for a CDP-driven navigation.
+			this.setupDocumentCapture();
+			this.stopTrafficCapture?.();
+			this.stopTrafficCapture = startTrafficCapture(this.page as never, (req, res) => {
+				// Resolved per call rather than captured, because the callback is
+				// registered after the browser starts.
+				this.networkCaptureCallback?.(req as never, res as never);
+			});
 
 			// Reset throttling state
 			this.lastFrameSentAt = 0;

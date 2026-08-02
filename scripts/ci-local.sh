@@ -37,6 +37,12 @@ step "Test"
 pnpm turbo test || fail "Tests failed"
 pass "Test"
 
+# turbo test only reaches per-package suites. Repo-level pins (conventions
+# drift, script contracts) live in scripts/__tests__ and need their own run.
+step "Repo-level tests"
+pnpm test:repo || fail "Repo-level tests failed"
+pass "Repo-level tests"
+
 step "Python test"
 PYTHON_VENV="services/python/.venv/bin/python3"
 if [ -x "$PYTHON_VENV" ]; then

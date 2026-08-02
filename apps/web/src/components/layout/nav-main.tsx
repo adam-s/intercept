@@ -1,6 +1,6 @@
 'use client';
 
-import { Globe, LayoutDashboard } from 'lucide-react';
+import { Globe, LayoutDashboard, MessageSquare, Newspaper, Tv, Youtube } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -17,15 +17,26 @@ const items = [
 	{ title: 'Browser', href: '/browser', icon: Globe },
 ];
 
+/**
+ * One entry per domain screen. A page nothing links to does not ship, however
+ * finished it is, so a domain lands here in the same change that builds it.
+ */
+const domainItems = [
+	{ title: 'Hacker News', href: '/hackernews', icon: Newspaper },
+	{ title: 'Reddit', href: '/reddit', icon: MessageSquare },
+	{ title: 'Twitch', href: '/twitch', icon: Tv },
+	{ title: 'YouTube', href: '/youtube', icon: Youtube },
+];
+
 export function NavMain() {
 	const pathname = usePathname();
 	const { setOpenMobile } = useSidebar();
 
-	return (
+	const group = (label: string, entries: typeof items) => (
 		<SidebarGroup>
-			<SidebarGroupLabel>Navigation</SidebarGroupLabel>
+			<SidebarGroupLabel>{label}</SidebarGroupLabel>
 			<SidebarMenu>
-				{items.map((item) => (
+				{entries.map((item) => (
 					<SidebarMenuItem key={item.href}>
 						<SidebarMenuButton
 							asChild
@@ -41,5 +52,12 @@ export function NavMain() {
 				))}
 			</SidebarMenu>
 		</SidebarGroup>
+	);
+
+	return (
+		<>
+			{group('Navigation', items)}
+			{group('Domains', domainItems)}
+		</>
 	);
 }

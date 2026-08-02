@@ -1,0 +1,66 @@
+{
+	"target": "news.ycombinator.com",
+	"asOf": "2026-07-29",
+	"sources": [
+		"https://firebase.blog/posts/2014/10/hacker-news-now-has-api-its-firebase/",
+		"https://cotera.co/articles/hacker-news-api-guide"
+	],
+	"purpose": "Negative control. The site itself is server-rendered HTML with no client-side data transport at all, so a correct elimination table here is almost entirely absent rows. It also tests the public-API gate at its hardest: two fully documented APIs sit beside a site that uses neither.",
+	"transports": [
+		{
+			"transport": "Embedded JSON",
+			"endpoints": [],
+			"note": "Absent. Data is in the markup as ordinary table rows, not as a payload.",
+			"detectableBy": "scan"
+		},
+		{
+			"transport": "HTML-over-the-wire",
+			"detectableBy": "observation",
+			"evidence": "Measured by driving the browser here on 2026-07-29. The only transport. Two call shapes total."
+		},
+		{
+			"transport": "Form-encoded POST",
+			"detectableBy": "observation",
+			"evidence": "Found by a discovery run and verified end to end. Vote and comment forms exist in the DOM; unreachable without an account.",
+			"reachable": "session-gated",
+			"note": "Vote and comment forms are in the DOM and the classifier can emit this row \u2014 but exercising it needs an account, and the sweep will not submit a form in any case. Detectability is a property of the tool; reachability is a property of the target and the session. Conflating them makes a row that cannot be reached here look like a row the tool cannot see anywhere."
+		}
+	],
+	"publicApis": [
+		{
+			"endpoint": "hacker-news.firebaseio.com/v0/",
+			"note": "Official, documented, and NOT what the site's front end calls. Wrapping it is the public-API gate failure."
+		},
+		{
+			"endpoint": "hn.algolia.com/api/v1/",
+			"note": "Third-party search index over the same content. Same caveat."
+		}
+	],
+	"directPass": {
+		"date": "2026-07-29",
+		"transports": 1,
+		"shapes": 2,
+		"challenge": "none"
+	},
+	"sessionGated": [
+		"vote",
+		"collapse",
+		"snip-story (fetch/json)"
+	],
+	"breadthPass": {
+		"date": "2026-07-29",
+		"pages": 2,
+		"transports": 1,
+		"saturatedAt": 1,
+		"hosts": 1,
+		"perPass": [
+			1,
+			0
+		],
+		"observed": [
+			"HTML-over-the-wire"
+		],
+		"method": "Instrumented, swept each page type, drained after each so the event buffer could not cap.",
+		"note": "Every target saturated on transport classes by the second pass. Later pages added endpoints within transports already found, never a new class \u2014 which is what the saturation rule predicts and is worth knowing before budgeting a run."
+	}
+}
